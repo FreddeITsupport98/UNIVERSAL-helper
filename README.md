@@ -1,0 +1,2754 @@
+![Zypper Auto-Helper screenshot](icon/Screenshot_20260205_091408.png)
+
+# Zypper Auto-Downloader for Tumbleweed
+
+![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE-Tumbleweed-73ba25?style=for-the-badge&logo=opensuse)
+
+Welcome to the **Zypper Auto-Helper** community project – a batteries‑included automation layer for openSUSE Tumbleweed that turns "`zypper dup` nights" into a quick, predictable routine.
+
+This repository provides a robust `systemd` architecture and CLI that:
+- Pre‑downloads Tumbleweed snapshots safely in the background.
+- Notifies you like a modern desktop app (with snooze, progress bars, and rich actions).
+- Wraps manual `zypper dup` runs with extra safety rails, service checks, and reboot advice.
+- Adds self‑healing and diagnostics so you can trust it on real, everyday systems.
+- Ships a WebUI onboarding flow: first open shows a welcome guide, and version upgrades show a thank-you + release-notes screen.
+- Keeps advanced WebUI panels (`Snapper Manager` + `Recent Activity Log`) hidden by default behind a master `Enable Dev Mode / Logs` toggle while `Service Health` stays visible.
+
+If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
+
+-----
+
+<a id="reporting-issues-top"></a>
+## 🐞 Reporting Issues?
+
+**If you need help, please include the relevant logs!** See the [Reporting Issues on GitHub](#reporting-issues-on-github) section for which logs to include.
+
+-----
+
+## 📌 Table of Contents
+
+- Getting started
+  - Reporting issues
+  - The goal
+  - Key features
+  - How it works (architecture)
+  - Installation / upgrading
+- User guides
+  - Self-update (CLI + WebUI)
+  - Rocket conflict quick flow
+  - Boot Entry Scrub (scrub-ghost)
+  - Configuration file (/etc/zypper-auto.conf)
+  - Duplicate RPM cleanup
+  - Usage
+  - Diagnostics
+  - Logging & monitoring
+  - Server history (SQLite)
+  - Additional resources
+  - Uninstallation
+
+### Quick links (clickable)
+
+- [Reporting issues](#reporting-issues-top)
+- [The goal](#goal)
+- [Key features](#key-features)
+- [How it works (architecture)](#architecture)
+- [Installation / upgrading](#installation-upgrading)
+- [Self-update (CLI + WebUI)](#self-update)
+- [Rocket conflict quick flow](#rocket-conflict-quick-flow)
+- [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
+- [Configuration file (/etc/zypper-auto.conf)](#configuration)
+- [Verification low-impact mode](#cfg-verify-low-impact)
+- [Duplicate RPM cleanup](#duplicate-rpm-cleanup)
+- [Usage](#usage)
+- [Diagnostics](#diagnostics)
+- [Logging & monitoring](#logging-monitoring)
+- [Server history (SQLite)](#server-history-sqlite)
+- [Additional resources](#additional-resources)
+- [Uninstallation](#uninstallation)
+
+-----
+
+<a id="goal"></a>
+## 🎯 The Goal
+
+On a rolling-release distribution like Tumbleweed, updates are frequent and can be large. This script automates the most time-consuming part: the **download**.
+
+It runs `zypper dup --download-only` in the background, but only when it's safe. When you're ready to update, the packages are already cached. This turns a potential 10-minute download and update process into a 1-minute, authenticated installation.
+
+<a id="key-features"></a>
+## ✨ Key Features (v58 Architecture)
+
+### 🧱 Safety-first updates
+
+* **Safe Duplicate RPM Cleanup (Wrapper + CLI):** Automatically and manually cleans up broken duplicate RPMs that block `zypper dup`, with:
+    * **Whitelist mode** for known-problematic third‑party apps (default: `insync`).
+    * Optional **third‑party mode** that only touches non‑SUSE vendors and never touches critical packages (`kernel-*`, `glibc`, `systemd`, `filesystem`, `gpg-pubkey*`, etc.).
+    * Architecture‑aware detection (`NAME + ARCH`) so legitimate multi‑arch installs (x86_64 + i686) are never flagged as conflicts.
+    * `rpm -e --test --noscripts` dependency pre‑flight before every erase.
+    * **Automatic Snapper snapshot** in the wrapper before third‑party cleanup, and optional snapshot in manual mode.
+    * Unified audit log at `/var/log/zypper-auto/duplicate-cleanup.log` for both automatic wrapper cleanup and `zypper-auto-helper --rm-conflict` runs.
+* **Modern Reboot Detection:** After `zypper dup`, the wrapper runs `zypper ps -s` to show services using old libraries **and** calls `zypper needs-reboot` to tell you explicitly whether a system reboot is required (with an optional `notify-send` desktop alert).
+* **Fish-Safe `sudo zypper`:** A small Fish `sudo` wrapper transparently redirects `sudo zypper ...` to the safe `zypper-with-ps` wrapper, so both `zypper dup` and `sudo zypper dup` always benefit from the same safety logic.
+
+### 🧰 Command-line interface & verification
+
+* **Command-Line Interface (v51):** New `zypper-auto-helper` command provides easy access to all management functions:
+    * Auto-installed to `/usr/local/bin/zypper-auto-helper`
+    * Adds a compatibility symlink at `/usr/bin/zypper-auto-helper` (when safe) so the command stays PATH-accessible on shells/environments that omit `/usr/local/bin`
+    * Shell aliases automatically configured for Bash, Zsh, and Fish
+    * Commands: `--verify`, `--repair`, `--diagnose`, `--check`, `--help`
+* **Advanced Verification & Auto-Repair (v51):** Comprehensive 52-point health check system:
+    * Verifies services, scripts, permissions, processes, and cache
+    * Multi-stage auto-repair with retry logic (up to 3 attempts per issue)
+    * Deep health checks: active + enabled + triggers scheduled
+    * Nuclear options for complete service resets when needed
+    * Accessible via `zypper-auto-helper --verify` after installation
+
+### 🔔 Notifications & background services
+
+* **Real-Time Download Progress (v51–v56):** Enhanced progress tracking with visual feedback:
+* Background downloader writes precise status (`refreshing`, `downloading:TOTAL:SIZE:DOWNLOADED:PERCENT`, `complete`, `idle`)
+* Notifier shows a live-updating progress bar while downloads are in progress
+* Cache-aware logic skips fake progress when `zypper` reports everything is already in cache
+* Background downloads run at low priority by default to avoid desktop performance spikes
+* **Smart Notification Management (v51–v56):** Prevents notification spam and keeps state consistent:
+    * Synchronous notification IDs prevent duplicate popups
+    * "No updates" notification shown only once until state changes
+    * Download status notifications replace each other smoothly
+* **Robust Zypper Error Handling (v54–v57):** Distinguishes between zypper locks, PolicyKit/auth failures, and solver/interaction errors (e.g. vendor conflicts) and guides you with appropriate notifications. Zypper locks are detected via both the canonical error message *and* zypp lockfiles, so the downloader/notifier will gracefully back off (and retry later) when a manual `zypper` or YaST is running. When the background downloader hits a solver conflict it preserves any downloaded RPMs in the cache and triggers a persistent "updates require your decision" notification with an **Install Now** action, showing how many updates are pending and a short package preview once a transaction can be summarised.
+
+### 🧩 Optional ecosystem integrations
+
+* **Soar / Flatpak / Snap / Homebrew / pipx Integration (v55–v61):** Every `zypper dup` / `zypper update` run via the helper or wrapper automatically chains Flatpak updates, Snap refresh (if installed), a Soar stable-version check + `soar sync` + `soar update` (if installed), a Homebrew `brew update` followed by conditional `brew upgrade`, **and** (when enabled) `pipx upgrade-all` so that system packages, runtimes, Soar-managed apps, Homebrew formulae, and pipx‑managed Python CLI tools stay aligned after system updates. Optional helper commands are provided via `zypper-auto-helper --soar`, `zypper-auto-helper --brew`, and `zypper-auto-helper --pip-package` (alias: `--pipx`).
+* **Snap/Flatpak Setup Helper (v62+):** `zypper-auto-helper --setup-SF` installs/configures Snapd and Flatpak (including common Flatpak remotes like Flathub) and, when `discover6` (KDE Discover) is present, optionally removes it with a detailed explanation so that only the zypper-based helper manages system updates and offline upgrades.
+* **Smarter Optional Tool Detection (v55):** Optional helpers like Flatpak, Snap, and Soar are detected using the *user's* PATH and common per-user locations (e.g. `~/.local/bin`, `~/pkgforge`) to avoid false "missing" warnings when they are already installed.
+* **Improved Snapper Detection (v55–v56):** Recognises Tumbleweed's default root snapper configuration, treats `snapper list` permission errors ("No permissions.") as "snapshots exist but are root-only", and surfaces the current Snapper state (configured/missing/snapshots available) directly in the update notification.
+* **More Robust Notifier Timer (v55–v56):** Uses calendar-based scheduling plus an automatic timer restart after installation so the user systemd timer (`zypper-notify-user.timer`) no longer gets stuck in an `active (elapsed)` state with no next trigger.
+* **Manual Update Wrapper (v51):** Automatic post-update checks for manual updates:
+    * Wraps `sudo zypper dup` command automatically
+    * Runs `zypper ps -s` after successful updates
+    * Provides guidance on service restarts and reboots
+    * Works across all shells (Bash, Zsh, Fish)
+* **Decoupled Architecture:** Two separate services: a "safe" root-level downloader and a "smart" **user-level** notifier.
+* **User-Space Notifier:** Runs as a user service (`~/.config/systemd/user`) so it can reliably talk to your desktop session (D-Bus) and show clickable notifications.
+* **Stage-Based Download Progress (v50–v61):** Real-time notifications showing download stages:
+    * **"Checking for updates..."** - Refreshing repositories
+    * **"Downloading updates... (X of Y packages)"** - Active download with real-time progress
+    * **(Download complete)** - Completion info is attached to the main **"Updates Ready"** notification to avoid duplicate popups
+    * **"Updates Ready to Install"** - Ready to apply with snapshot info
+* **Smart Download Detection (v49–v61):** Only downloads and notifies when updates are actually available, eliminating false "downloading" notifications. In v61 the notifier additionally re-checks `zypper dup --dry-run` when the downloader reports `complete:` and suppresses the "✅ Downloads Complete!" popup if there are no remaining updates, avoiding stale completion notifications after you have already installed everything manually.
+* **Safe Downloads (Root):** The downloader service is a simple, root-only worker that always runs at low priority and logs to `/var/log/zypper-auto`; network/AC safety decisions are enforced in the user-space notifier.
+* **Smart Safety Logic (User):** The notifier Python script uses `/sys/class/power_supply`, `upower` and `nmcli` with extra heuristics to distinguish real laptops from desktops/UPS setups (including laptops that only expose a battery device without a separate `line_power` entry), and to avoid false "metered" or "on battery" positives. On laptops it only refreshes/inspects updates on AC power and non‑metered connections.
+* **Fixed Battery Detection (v48+):** Corrected logic that was incorrectly identifying laptops as desktops, now detects batteries via `/sys/class/power_supply` with an `upower` fallback.
+* **Persistent Notifications (v48):** Update notifications now persist until user interaction or timeout by keeping a GLib main loop active.
+* **Environment Change Awareness (v53):** Tracks when your machine switches between AC/battery or metered/unmetered connections and shows "updates paused" / "conditions now safe" notifications accordingly.
+* **Snooze & Quiet Hours (v53):** Lets you snooze update reminders for 1h, 4h, or 1 day via notification buttons, with state stored under `~/.cache/zypper-notify`.
+* **Safety Preflight Checks (v53):** Before showing "Install" it checks root filesystem free space, Btrfs snapshots (snapper), and basic network health and adds warnings to the notification if something looks risky.
+* **Post-Update Service Check:** After updates complete, automatically runs `zypper ps -s` to show which services need restart and provides reboot guidance.
+* **Comprehensive Logging:** Full debug logging for installation, system services, and user notifier with automatic log rotation and persistent status tracking.
+* **Clickable Install:** The rich, Python-based notification is **clickable**. Clicking the "Install" button runs `~/.local/bin/zypper-run-install`, which opens a terminal and executes `pkexec zypper dup`.
+* **Automatic Upgrader:** The installer is idempotent and will **cleanly stop, disable, and overwrite any previous version** (v1–v58) to ensure a clean migration.
+* **Dependency Checks:** The installer verifies all necessary dependencies (`nmcli`, `upower`, `python3-gobject`, `pkexec`) are present and offers to install them if they are missing (**default Yes / recommended**). It also recommends installing `ShellCheck` (optional) for safer maintenance of the bash scripts.
+
+### 🗑️ Uninstallation & cleanup
+
+* **Safe Scripted Uninstaller (v58+):** Use the single uninstall flag `--uninstall-zypper` in `zypper-auto.sh` / `zypper-auto-helper` to remove all helper services, timers (including the auto-verify health-check timer), binaries, user scripts, aliases, logs and caches with a confirmation prompt by default, plus advanced flags:
+*  * `--yes` / `-y` / `--non-interactive` – skip the prompt and proceed non-interactively
+*  * `--dry-run` – show exactly what would be removed without making any changes
+*  * `--keep-logs` – leave `/var/log/zypper-auto` installation/service logs intact (including the `status.html` dashboard) while still clearing caches
+*  * `--keep-hooks` – leave custom hook scripts under `/etc/zypper-auto/hooks` intact
+*  * It also cleans up shell aliases and wrapper function blocks it added to `~/.bashrc` / `~/.zshrc` (best-effort), and removes `/usr/bin/zypper-auto-helper` when that path is a compatibility symlink to `/usr/local/bin/zypper-auto-helper`.
+*  * It **never** removes `snapd`, Flatpak, Soar, Homebrew itself, or any zypper configuration such as `/etc/zypp/zypper.conf`.
+
+-----
+
+<a id="architecture"></a>
+## 🛠️ How It Works: The v64 Architecture
+
+This is a two-service system to provide both safety (Downloader) and persistence/user interaction (Notifier).
+
+### 1. The Installer: `zypper-auto.sh`
+
+* **Cleanup:** Explicitly stops and disables all timers/services from *any* previous version to ensure a clean state.
+* **User Detection:** Reliably determines the `$SUDO_USER`'s home directory to place the user-specific systemd files and scripts (`~/.config/systemd/user`, `~/.local/bin`).
+* **Enables Root Timer:** After writing the units, it runs `systemctl daemon-reload` and `systemctl enable --now zypper-autodownload.timer` automatically.
+
+### 2. The Downloader (Root Service)
+
+This service's only job is to download packages when it's safe, and report progress stages.
+
+* **Service:** `/etc/systemd/system/zypper-autodownload.service`
+    * This service runs `zypper refresh` and `zypper dup --download-only`.
+    * It writes stage information to `/var/log/zypper-auto/download-status.txt`:
+        * `refreshing` - Repositories being refreshed
+        * `downloading:X` - Downloading X packages (includes count)
+        * `complete` - Ready for installation
+        * `idle` - No updates available
+    * It will **only** start if `ConditionACPower=true` is met, and it will **skip** running on metered connections (detected via `nmcli` / NetworkManager).
+* **Timer:** `/etc/systemd/system/zypper-autodownload.timer`
+*    * Default schedule is derived from the config option `DL_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (allowed values: 1,5,10,15,30,60).
+*    * For example:
+*        * `1`  → runs minutely
+*        * `10` → runs every 10 minutes (`OnCalendar=*:0/10`)
+*        * `60` → runs hourly (`OnCalendar=hourly`)
+*
+### 3. Periodic Verification / Auto-Repair Service
+
+In addition to the downloader, a small root service periodically runs the same
+52-point verification and auto-repair logic as `zypper-auto-helper --verify`:
+
+* **Service:** `/etc/systemd/system/zypper-auto-verify.service`
+* Runs `zypper-auto-helper --verify` as a oneshot root service.
+    * Logs to `/var/log/zypper-auto/service-logs/verify.log`.
+    * Uses `python3 -B -m py_compile` for syntax checks so verification still works under systemd hardening (it won’t try to write `__pycache__/*.pyc` into the user’s home).
+    * Newer builds additionally use a read-only-safe AST parser path (`python_ast_syntax_check`) for notifier syntax checks, so verify does not depend on pyc generation behavior under hardened mounts.
+    * Automatically resets failed states for the core units it manages and,
+      when configured, sends a short desktop notification whenever it fixes
+      one or more issues.
+    * Snapper root snapshot validation is best-effort and tries to be compatible with older Snapper versions/output formats.
+    * Cron conflict detection only flags cron entries that appear to *run* `zypper` (comment-only mentions are ignored).
+    * Extra hardening checks include world-writable file scans, basic SSH hardening checks, NTP sync status, orphaned package detection, SMART disk health (when available), kernel taint warnings, reboot-required detection, memory headroom checks, and AppArmor status.
+* Self-healing actions (best-effort) include recreating missing/empty helper status files, resetting global systemd failed states, repairing sudoers permissions, attempting DNS recovery, force-refreshing zypper metadata, reloading AppArmor when it’s active but profiles aren’t enabled, proactive disk space reclamation (journal vacuum + cache cleanup + snapper cleanup), RPM DB rebuild (with backup) when corruption is detected, dependency verification (`zypper verify --details` is captured when failures are detected), Btrfs metadata balancing on high metadata usage, and deep GPG cache/key repair for signature-related refresh failures.
+    * **Safety Net:** helper verification/auto-repair paths are snapshot-neutral (no automatic pre/post Safety Net snapshots in routine verify or install/update verification flows), avoiding extra Btrfs snapshot churn.
+    * **Flight Report:** after verification completes, the helper prints an executive summary (checks performed, repairs executed, health status, and snapshot IDs when available).
+    * Performs safety checks such as cleaning up stale `/run/zypp.pid`
+      locks (when the PID is no longer running), **but never removes lockfiles when a real
+      `zypper` process is running**, and it will **skip zypper-based repairs/cleanups**
+      (repo refresh fixes, orphan checks, dependency repair, `zypper clean --all`, deep GPG repair)
+      when an active lock is detected.
+      It also runs `zypper clean --all` when free space on `/` falls below ~1 GiB.
+* **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
+    * Default schedule is derived from `VERIFY_TIMER_INTERVAL_MINUTES` in
+      `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
+      installer converts this into a simple calendar schedule in the same
+      way as the downloader timer (minutely, hourly, or `*:0/N`).
+
+### 4. The Notifier (User Service)
+
+* **Service:** `~/.config/systemd/user/zypper-notify-user.service`
+    * Runs the Python script `~/.local/bin/zypper-notify-updater.py`.
+    * Because it runs in user-space, it has the correct D-Bus environment variables to display notifications reliably.
+* **Timer:** `~/.config/systemd/user/zypper-notify-user.timer`
+    * Default schedule is derived from `NT_TIMER_INTERVAL_MINUTES` in `/etc/zypper-auto.conf` (same allowed values as above).
+    * By changing `NT_TIMER_INTERVAL_MINUTES` (e.g. to 10 or 60) and re-running the installer, you can control how often the notifier checks and pops notifications.
+
+### 5. The "Brains": `~/.local/bin/zypper-notify-updater.py`
+
+This Python script is the core of the system, run by the `zypper-notify-user.service` on the schedule defined by the user timer.
+
+1.  **Checks Download Stage:** Reads `/var/log/zypper-auto/download-status.txt` to determine if downloads are in progress:
+    * `refreshing` → Shows "Checking for updates..." notification
+    * `downloading:X` → Shows "Downloading X packages..." notification with count
+    * `complete` or `idle` → Proceeds to normal update check
+2.  **Checks Safety:** Uses `inxi`, `upower` and `nmcli` with extra heuristics to:
+    * distinguish laptops (real internal battery + AC adapter) from desktops/UPS/embedded setups,
+    * reliably classify any system with a real battery as a laptop, even when `upower` does not expose a `line_power` device,
+    * treat desktops as always on AC for safety decisions,
+    * treat NetworkManager failures as "unmetered" to avoid random false positives.
+3.  **Runs Zypper:** Executes `pkexec zypper refresh` (if safe) and always runs `pkexec zypper dup --dry-run` to check for pending updates. On laptops, "safe" explicitly means **on AC and not on a metered connection**.
+4.  **Parses Output:** Counts packages and finds the latest Tumbleweed snapshot version.
+5.  **Sends Clickable Notification:** Uses PyGObject to send a rich notification with the snapshot version and an **"Install"** button.
+6.  **Launches Terminal (Action):** Clicking "Install" runs the `~/.local/bin/zypper-run-install` script via `systemd-run --user --scope`, which launches your preferred terminal (`konsole`, `gnome-terminal`, etc.) to execute `pkexec zypper dup` interactively.
+7.  **Post-Update Check:** After update completes, runs `zypper ps -s` to show which services need restart and provides reboot guidance if needed.
+8.  **Debug Mode:** If `ZNH_DEBUG=1` (or `true/yes/debug`) is set in the environment, extra debug logs (e.g. `upower` / `nmcli` / `inxi` decisions) are printed to the journal.
+9.  **Manual-Intervention Helper (v54+):** When `pkexec zypper dup --dry-run` or the background downloader encounter a solver/interaction problem (such as a vendor conflict), the notifier shows a dedicated, persistent "Updates require your decision" notification. It:
+    - Includes a concise summary of the problem (first `Problem:` line when available).
+    - Attempts to parse the dry-run output to show how many updates are pending and a short package preview, so you still see *what* is waiting to be installed even though zypper needs your choice.
+    - Provides an **"Install Now"** / **"Open Helper"** action that launches `~/.local/bin/zypper-run-install` so you can resolve the conflict interactively in a terminal, plus snooze and "View Changes" actions.
+
+-----
+
+<a id="installation-upgrading"></a>
+## 🚀 Installation / Upgrading
+
+The script is idempotent. You can run this on a fresh install *or* on a PC with an older version.
+
+1.  Download the latest `zypper-auto.sh` script.
+2.  Make it executable:
+    ```bash
+    chmod +x zypper-auto.sh
+    ```
+3.  Run it with `sudo`. The script will handle everything automatically:
+    ```bash
+    sudo ./zypper-auto.sh install
+    ```
+
+**That's it!** The installer now:
+- Installs the `zypper-auto-helper` command to `/usr/local/bin`
+- Adds shell aliases to your `.bashrc`, `.zshrc`, or Fish config
+- Enables both root and user services automatically
+- Runs comprehensive verification and auto-repair
+- Reports any issues and fixes them automatically
+
+### Using the Installed Command
+
+After installation (restart your shell or run `source ~/.bashrc`), you can use:
+
+**Note about `sudo`:** many examples in this README include `sudo` so they also work when you run the script directly.
+If you installed via `sudo ./zypper-auto.sh install`, the installer adds a small shell wrapper named `zypper-auto-helper` that will **auto-elevate** when needed—so you can usually run commands as:
+- `zypper-auto-helper --verify` (no `sudo`)
+- `zypper-auto-helper --dashboard` (no `sudo`)
+
+Exception: `zypper-auto-helper --dash-open` should be run **without** `sudo` so it can open your browser in your desktop session. It will only prompt for admin permissions if it needs to refresh dashboard artifacts or start the Settings API.
+
+```bash
+zypper-auto-helper --help           # Show help
+zypper-auto-helper --verify         # Run health check and auto-repair
+zypper-auto-helper --repair         # Alias for --verify
+zypper-auto-helper --diagnose       # Alias for --verify
+zypper-auto-helper --check          # Syntax check only
+zypper-auto-helper install          # Reinstall/upgrade
+zypper-auto-helper --reset-config   # Reset /etc/zypper-auto.conf to documented defaults (with backup)
+zypper-auto-helper --reset-downloads  # Clear cached download/notifier state and restart timers (alias: --reset-state)
+zypper-auto-helper --stale-module-dirs  # Audit stale non-bootable module dirs (safe default: no changes)
+sudo zypper-auto-helper --stale-module-dirs quarantine --yes  # Quarantine stale module dirs (restorable move)
+
+# Self-update (updates the helper script itself)
+sudo zypper-auto-helper --self-update                  # Update using SELF_UPDATE_CHANNEL (default: stable)
+sudo zypper-auto-helper --self-update stable           # Stable channel: latest GitHub Release
+sudo zypper-auto-helper --self-update rolling          # Rolling channel: latest commit on main
+sudo zypper-auto-helper --self-update stable --force   # Force reinstall even if refs match / force downgrade
+sudo zypper-auto-helper --self-update stable --dry-run  # SAFE test: opens WebUI dry-run simulation (default) or runs CLI dry-run when ZNH_SELF_UPDATE_NO_UI=1
+sudo zypper-auto-helper --self-update-rollback          # Restore the most recent self-update backup (script + config snapshot)
+
+# Rollback Wizard (DANGEROUS)
+sudo zypper-auto-helper --rollback             # Interactive Snapper rollback wizard (reboots after rollback)
+
+# Optional helpers
+zypper-auto-helper --soar           # Install/upgrade the optional Soar CLI helper
+zypper-auto-helper --brew           # Install/upgrade Homebrew (brew) for the system/user
+zypper-auto-helper --pip-package    # Install/guide pipx and manage Python CLI tools (alias: --pipx)
+
+# Snapper tools
+zypper-auto-helper snapper          # Snapper submenu (status/list/create/cleanup/timers)
+zypper-auto-helper snapper status   # Show snapper configs, snapshot detection, and timer state
+zypper-auto-helper snapper auto     # Enable common snapper timers (timeline + cleanup + boot)
+# (Interactive snapper menu: AUTO enable option is color-coded: red=disabled, yellow=partial, green=enabled)
+# It also shows a text suffix: (disabled|partial|enabled) so it’s readable even when colors are off.
+# snapper auto-off disables the same snapper timers and also disables optional option-5 maintenance timers (btrfsmaintenance + fstrim) when present.
+
+# Boot Entry Scrub (scrub-ghost)
+# NOTE: run --dry-run first. This tool touches boot menu entries (high-stakes).
+zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --force                      # safe mode (moves broken entries to backup)
+sudo zypper-auto-helper scrub-ghost --force --prune-stale-snapshots
+sudo zypper-auto-helper scrub-ghost --list-backups
+sudo zypper-auto-helper scrub-ghost --validate-latest
+sudo zypper-auto-helper scrub-ghost --restore-best
+
+# Diagnostics & debugging
+zypper-auto-helper debug            # Interactive debug/diagnostics tools menu
+zypper-auto-helper --logs           # Show tails of installer, service, and notifier logs
+zypper-auto-helper --live-logs      # Follow installer/service/notifier logs in real time
+zypper-auto-helper --diag-logs-on   # Enable background diagnostics follower (aggregated diag-YYYY-MM-DD.log)
+zypper-auto-helper --diag-logs-off  # Disable diagnostics follower
+zypper-auto-helper --snapshot-state # Capture one-shot diagnostics snapshot into today's diag log
+zypper-auto-helper --diag-bundle    # Create compressed diagnostics bundle tarball in your home
+zypper-auto-helper --show-logs      # Open diagnostics logs folder in a file manager (when available)
+zypper-auto-helper --test-notify    # Send a test desktop notification to verify GUI/DBus wiring
+
+# Scripted uninstaller
+zypper-auto-helper --uninstall-zypper  # Remove only this helper's services/scripts/logs
+```
+
+Verification snapshot policy note:
+- `zypper-auto-helper --verify` (including the periodic `zypper-auto-verify.timer`) does **not** create pre/post Snapper Safety Net snapshots on each run.
+- Install/update verification auto-repair flow (for example `zypper-auto-helper install`) also runs without pre/post Safety Net snapshots, so helper-driven auto-repair does not create extra Btrfs snapshots.
+
+<a id="self-update"></a>
+### 🔄 Self-update
+
+Self-update notes:
+- Default channel is `stable`.
+- `--self-update` follows **GitHub refs**, not the internal `# VERSION` header:
+  - `stable` compares the installed **GitHub Release tag** (`tag_name`, e.g. `v65`) with the latest release tag.
+  - `rolling` compares the installed **commit SHA on `main`** with the latest commit SHA.
+- The installed ref is stored in a root-owned state file: `/var/lib/zypper-auto/self-update-state.json`.
+- It creates a timestamped backup before overwriting the destination script, and also keeps an archive copy under `/var/backups/zypper-auto/self-update/`.
+  - It also snapshots `/etc/zypper-auto.conf` alongside script backups to make rollback safer.
+  - Rollback shortcut: `sudo zypper-auto-helper --self-update-rollback` restores the most recent script+config snapshot.
+- It downloads into a temp file and then swaps it in with an atomic `mv` rename (so updating the currently-running script won’t corrupt execution).
+- It refuses to install empty downloads or HTML error pages (GitHub 404/403), and runs `bash -n` syntax checks before installing.
+- Stable channel safety: it refuses to **downgrade** to an older stable tag unless you pass `--force`.
+- In the stable channel, if a `.sha256`/`.sha256sum` file is published for the release, it will verify SHA256 before installing.
+- After installing, it runs a safe post-update self-test (`--help` and `--check` when possible). If that fails, it automatically rolls back to the previous version.
+- Self-update state now records clearer install provenance for update runs (`stable-release` vs `rolling-commit`) so API/UI status can show where the current helper build came from.
+- Dashboard/API status now exposes `install_origin` + `channel_recommendation`; when a build appears to come from rolling lineage while stable is configured, the UI can explicitly recommend switching channel to rolling.
+- **Git safety:** if the destination path is inside a git working tree, the helper refuses to overwrite it and asks you to use `git pull` instead.
+
+#### 🖥️ Dashboard WebUI self-update
+
+Dashboard WebUI self-update:
+- In the dashboard (`status.html`), under **Features & Config**, you can:
+  - Toggle the self-update channel (stable/rolling).
+  - Fetch the changelog.
+  - Click **Update**.
+- Clicking **Update** opens a **blocking overlay** (it covers the page and prevents clicking other elements) where you must:
+  - Read a long disclosure explaining the selected channel (stable vs rolling) and accept the MIT license.
+  - Type a confirmation phrase.
+  - Click **Install**.
+- While installing, the overlay shows a scrollable live log view and a progress bar.
+- Safe testing: you can enable “Dry-run test” in the overlay to download + verify without replacing the installed helper.
+- CLI note: `--self-update ... --dry-run` opens the WebUI simulation by default. If you want a pure CLI dry-run instead, run it like:
+  - `sudo env ZNH_SELF_UPDATE_NO_UI=1 zypper-auto-helper --self-update stable --dry-run`
+- The Update button will be disabled when the latest stable release tag is older than your installed build (no downgrade by default).
+- After a successful update + reload, the dashboard auto-fetches and shows the full latest stable release notes.
+
+### Shell tab completion
+
+The installer installs best-effort **tab completion** for `zypper-auto-helper`:
+- Bash: `/etc/bash_completion.d/zypper-auto-helper` (or system completions dir)
+- Zsh: `/usr/share/zsh/site-functions/_zypper-auto-helper` (or `/usr/local/share/...`)
+- Fish: `~/.config/fish/completions/zypper-auto-helper.fish`
+
+Restart your shell (or start a new terminal) after installing/upgrading.
+
+You normally run `zypper-auto-helper` **without** `sudo`; it will prompt for elevation internally when needed.
+
+<a id="scrub-ghost"></a>
+### 🥾 Boot Entry Scrub (scrub-ghost)
+
+`scrub-ghost` is a safety-focused boot-entry maintenance tool for **Boot Loader Specification (BLS)** entries on openSUSE (commonly `sd-boot` with entry files under `/boot/efi/loader/entries`).
+
+It detects and cleans up obvious boot-menu “junk” like:
+- **GHOST** entries (boot entries pointing at missing kernels/initrds)
+- **STALE snapshot** entries (Snapper snapshot IDs that no longer exist)
+- **Duplicates** (same payload repeated multiple times)
+- Optionally: entries for **uninstalled kernels** (more risky)
+
+High-stakes warning: bootloaders are high-stakes. Deleting/moving the wrong files can make a system unbootable. The workflow is designed to be conservative, but you should still:
+- Always run a **scan / dry-run** first
+- Keep at least one known-good entry
+- Know how to restore (see Backups & restore below)
+
+#### Supported / not supported
+- Supported: openSUSE Tumbleweed / Slowroll / immutable variants (Aeon/Kalpa/MicroOS)
+- Not supported: openSUSE Leap (the script/tool will refuse to run)
+
+#### Recommended workflow (safe)
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --force
+sudo zypper-auto-helper scrub-ghost --dry-run   # re-scan to verify counts dropped
+```
+
+#### What is a “ghost” entry?
+A BLS entry is treated as a *ghost* when it references a kernel/initrd path that does not exist on disk.
+
+#### Key safety guardrails (why it’s safer than “rm *.conf”)
+`scrub-ghost` includes multiple guardrails to avoid creating an unbootable state:
+- **Dry-run by default** (`--dry-run`)
+- **Backups by default** when applying changes (`--force`): it creates a filesystem backup of the current entries and then moves/quarantines entries instead of hard-deleting
+- **Optional Snapper snapshot** backup (best-effort)
+- Protects:
+  - the **running kernel** entry (`uname -r`)
+  - the **latest installed kernel** entry (detected under `/lib/modules` / `/usr/lib/modules`)
+  - GRUB “saved default” entry (when GRUB is in use)
+- Restore is **validated by default** (restore is blocked if validation fails unless you force it)
+
+#### CLI quick reference (common)
+Scan only:
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --dry-run
+sudo zypper-auto-helper scrub-ghost --dry-run --json
+```
+
+Apply in safe backup mode (recommended):
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --force
+sudo zypper-auto-helper scrub-ghost --force --prune-duplicates
+sudo zypper-auto-helper scrub-ghost --force --prune-stale-snapshots
+sudo zypper-auto-helper scrub-ghost --force --prune-uninstalled --confirm-uninstalled  # extra danger
+```
+
+Hard delete mode (danger):
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --delete --prune-stale-snapshots
+```
+
+Optional bootloader refresh actions:
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --force --rebuild-grub
+sudo zypper-auto-helper scrub-ghost --force --update-sdboot
+```
+
+Generate completion (no root required):
+```bash path=null start=null
+zypper-auto-helper scrub-ghost --completion zsh
+zypper-auto-helper scrub-ghost --completion bash
+```
+
+#### Backups & restore
+Backups are stored under:
+- `/var/backups/scrub-ghost/`
+
+Common restore flow:
+```bash path=null start=null
+sudo zypper-auto-helper scrub-ghost --list-backups
+sudo zypper-auto-helper scrub-ghost --validate-latest
+sudo zypper-auto-helper scrub-ghost --restore-best
+```
+
+Restore danger flags (use only when you understand the consequences):
+- `--clean-restore` deletes extra current entries not present in the backup
+- `--restore-anyway` bypasses failed validation
+
+#### WebUI: Ghost-Scrub Wizard (overlay) + crash-safe background jobs
+The dashboard WebUI includes a **Rocket-style overlay wizard** for scrub-ghost (minimizable overlay + bottom-right background-job bubble).
+
+Important behavior:
+- The WebUI runs scrub-ghost in a background `systemd-run` job so it can **resume after browser reload/crash**.
+- The overlay groups flags into **recommended / advanced / danger zone**, and interactive-only modes (like `--menu` / rescue flows) remain **copy-only** for safety.
+
+Where the WebUI job writes state/logs (useful for troubleshooting):
+- Full log: `/var/log/zypper-auto/service-logs/webui-scrub-<jobid>.log`
+- Status (key/value): `/var/lib/zypper-auto/webui-scrub-<jobid>.status`
+
+The WebUI log panel shows a **tail view** (latest output). If you need everything, open the file above.
+
+#### WebUI confirmation phrases (server-side enforced)
+Some actions require typing a phrase before the WebUI will run them:
+- `SCRUB` – normal apply in backup mode
+- `DELETE` – permanent delete mode
+- `KERNELS` – prune uninstalled-kernel entries
+- `NOBACKUP` – apply without filesystem backup copy (`--no-backup`)
+- `RESTORE` – restore flow
+- `CLEAN` – `--clean-restore`
+- `ANYWAY` – `--restore-anyway`
+
+#### Advanced notes
+- Pinning: entries listed in `ENTRIES_DIR/.scrub-ghost-pinned` are never moved/deleted.
+- Immutable/transactional systems: scrub-ghost can attempt temporary remount `rw` while applying changes; disable that behavior with `--no-remount-rw`.
+
+<a id="configuration"></a>
+### Configuration File: `/etc/zypper-auto.conf`
+
+The installer reads an optional config file at `/etc/zypper-auto.conf` on every run.
+If the file does not exist, it generates a documented default template. You can
+safely edit this file and re-run `sudo ./zypper-auto.sh install` to apply
+changes.
+
+Security note: the installer sets `/etc/zypper-auto.conf` to **mode `600`** (root-only)
+because it can contain secrets such as `WEBHOOK_URL`.
+
+Key options include:
+
+#### Configuration quick navigation
+
+- [Post-update helpers](#cfg-post-update-helpers)
+- [Timer intervals](#cfg-timer-intervals)
+- [Verification snapshot policy](#cfg-verify-safety-snapshots)
+- [Self-update](#cfg-self-update)
+- [Zypper Turbo (performance)](#cfg-zypper-turbo)
+- [Journal auto-vacuum (hygiene)](#cfg-journal-auto-vacuum)
+- [Snapper safety (retention optimizer caps)](#cfg-snapper-safety)
+- [Snapper cleanup safety](#cfg-snapper-cleanup-safety)
+- [Snapper cleanup Deep Clean](#cfg-snapper-deep-clean)
+- [System Deep Scrub (Option 4 extras)](#cfg-system-deep-scrub)
+- [System Health Automator (Option 5 extras)](#cfg-system-health-automator)
+- [Boot menu hygiene](#cfg-boot-menu-hygiene)
+- [Kernel package cleanup](#cfg-kernel-package-cleanup)
+- [Caching / snooze](#cfg-caching-snooze)
+- [Zypper solver flags](#cfg-zypper-solver-flags)
+- [Lock handling & downloader behaviour](#cfg-lock-handling)
+
+<a id="cfg-post-update-helpers"></a>
+#### Post-update helpers
+
+- **Post-update helpers**
+  - `ENABLE_FLATPAK_UPDATES` / `ENABLE_SNAP_UPDATES` / `ENABLE_SOAR_UPDATES` /
+    `ENABLE_BREW_UPDATES` / `ENABLE_PIPX_UPDATES` – `true` / `false` flags to
+    control whether Flatpak, Snap, Soar, Homebrew, and pipx helpers run after
+    `zypper dup`. When `ENABLE_PIPX_UPDATES=true` and `pipx` is installed, the
+    wrapper and Ready‑to‑Install helper automatically run `pipx upgrade-all`
+    after system updates to keep Python command‑line tools up to date.
+  - `OPTIONAL_UPDATES_ALWAYS_REFRESH` – `true` / `false` (default: `false`).
+    Controls whether the optional app refresh steps above run:
+    - `false` (recommended): only run them when `zypper dup` actually changed
+      system packages (skips when zypper prints "Nothing to do.")
+    - `true`: always run them after a successful `zypper dup`, even if there
+      were no system updates
+
+
+<a id="cfg-timer-intervals"></a>
+#### Timer intervals
+
+- **Timer intervals**
+  - `DL_TIMER_INTERVAL_MINUTES` – how often the root downloader runs
+    (allowed **only**: `1,5,10,15,30,60`; any other value is ignored and
+    replaced with a safe default).
+  - `NT_TIMER_INTERVAL_MINUTES` – how often the user notifier runs (same
+    allowed set and behaviour as above).
+  - `VERIFY_TIMER_INTERVAL_MINUTES` – how often the root verification/auto‑repair
+    service runs (again, allowed **only**: `1,5,10,15,30,60`).
+  - Current default template/schema value for `VERIFY_TIMER_INTERVAL_MINUTES` is `30` minutes (lower background impact baseline).
+- The installer converts these into appropriate `OnCalendar` values, e.g.
+  `*:0/10` for every 10 minutes or `hourly` for 60.
+<a id="cfg-verify-low-impact"></a>
+#### Verification low-impact mode (adaptive)
+
+- **Verification low-impact mode (adaptive)**
+  - `VERIFY_LOW_IMPACT_ENABLED` – enables adaptive low-impact behavior for
+    background verification runs (default: `true`).
+  - `VERIFY_LOW_IMPACT_FAIL_STREAK` – number of consecutive failed verify runs
+    before low-impact mode activates (default: `2`).
+  - `VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES` – cooldown window used to
+    defer expensive deep checks during repeated failure periods (default: `45`).
+  - `VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES` – delay for follow-up verify runs
+    while low-impact mode is active (default: `30`).
+- Behavior summary:
+  - Low-impact mode is intended for repeated background/systemd verify failures.
+  - It lowers verify CPU/IO priority and temporarily defers heavy deep-repair
+    checks until cooldown expires.
+  - Interactive/manual verify runs continue to use normal behavior.
+<a id="cfg-verify-safety-snapshots"></a>
+#### Verification snapshot policy
+
+- Routine verify mode (`zypper-auto-helper --verify`, including `zypper-auto-verify.timer`) skips automatic pre/post Snapper Safety Net snapshot creation.
+- Install/update verification flow also skips automatic pre/post Safety Net snapshots (for example `zypper-auto-helper install`) to keep helper auto-repair snapshot-neutral.
+- This policy avoids repeated EFI `initrd-*` artifact growth and ensures helper-driven verification/auto-repair does not create additional Btrfs snapshots.
+
+
+<a id="cfg-self-update"></a>
+#### Self-update
+
+- **Self-update**
+  - `SELF_UPDATE_CHANNEL` – controls which channel is used by `sudo zypper-auto-helper --self-update` (allowed: `rolling` or `stable`).
+    - `rolling` downloads from the latest commit on the `main` branch.
+    - `stable` downloads from the latest GitHub Release tag.
+
+
+<a id="cfg-zypper-turbo"></a>
+#### Zypper Turbo (performance)
+
+- **Zypper Turbo (performance)**
+  - `ZYPPER_TURBO_TUNER_ENABLED` – when `true`, verification can tune `/etc/zypp/zypp.conf` for faster downloads (parallel connections + DownloadInAdvance).
+
+
+<a id="cfg-journal-auto-vacuum"></a>
+#### Journal auto-vacuum (hygiene)
+
+- **Journal auto-vacuum (hygiene)**
+  - `VERIFY_JOURNAL_AUTO_VACUUM_ENABLED` – when `true` (default), verification will vacuum the systemd journal if `/var/log/journal` grows beyond ~500MB.
+
+
+<a id="cfg-snapper-safety"></a>
+#### Snapper safety (retention optimizer caps)
+
+- **Snapper safety (retention optimizer caps)**
+  - `SNAP_RETENTION_OPTIMIZER_ENABLED` – when `true` (default), running
+    `zypper-auto-helper snapper auto` will *also* apply preventative tuning to
+    `/etc/snapper/configs/*` so Snapper doesn’t fill your disk.
+  - The `SNAP_RETENTION_MAX_*` values are **maximum caps** (safe maxima). The
+    helper will **only lower** config values that exceed these caps; it never
+    increases your retention.
+    - Example: if your Snapper config has `NUMBER_LIMIT="2-50"` and your cap is
+      `SNAP_RETENTION_MAX_NUMBER_LIMIT=15`, it becomes `NUMBER_LIMIT="2-15"`.
+    - Setting a cap higher effectively disables capping for that key.
+    - `SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY=0` means “keep no yearly snapshots”.
+
+
+<a id="cfg-snapper-cleanup-safety"></a>
+#### Snapper cleanup safety
+
+- **Snapper cleanup safety**
+  - `SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED` – when `true` (default), Snapper cleanup
+    warns if background cleanup appears to already be running.
+  - `SNAP_CLEANUP_BUSY_WAIT_SECONDS` – WebUI/non-interactive Snapper cleanup will wait
+    up to N seconds for Snapper to become idle (instead of failing immediately when
+    `snapper-cleanup.service` is active).
+  - `SNAP_CLEANUP_BUSY_POLL_SECONDS` – polling interval (seconds) used while waiting.
+  - `SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE` – **dangerous**: if `true`, and
+    Snapper is still busy after waiting, WebUI cleanup proceeds anyway (risk:
+    overlapping cleanup runs).
+  - `SNAP_CLEANUP_CRITICAL_FREE_MB` – if free space on `/` is below this threshold,
+    the helper will warn and require confirmation before running Snapper cleanup.
+  - **Smart behavior:** when you run Snapper cleanup from the helper menu, it also
+    does a best‑effort config self‑heal:
+    - If snapper timers are enabled, ensure `TIMELINE_CREATE=yes` / `BOOT_CREATE=yes`
+      in `/etc/snapper/configs/*` so the timers actually create snapshots.
+    - If `SNAP_RETENTION_OPTIMIZER_ENABLED=true`, apply the configured retention caps
+      (only lowers; never increases) before cleanup runs.
+  - **Before/after reporting:** Snapper menu cleanup prints a compact snapshot list
+    *before* and *after* the cleanup, and highlights snapshots that were removed.
+    Kernel purge and boot-entry pruning also show KEEP/REMOVE plans in color when
+    run interactively.
+
+
+<a id="cfg-snapper-deep-clean"></a>
+#### Snapper cleanup Deep Clean (Emergency Space Recovery)
+
+- **Snapper cleanup Deep Clean (Emergency Space Recovery)**
+  - `SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED` – when `true`, Snapper menu cleanup can run an
+    extra “broken snapshot hunter” step to find and delete snapshots whose descriptions
+    match a keyword regex (best‑effort).
+  - `SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX` – regex used to match descriptions (default:
+    `aborted|failed`).
+  - `SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM` – ask once before deleting anything (default:
+    `true`).
+  - When btrfs is available and cleanup reclaimed >~1GB, the helper prints a **tip**
+    suggesting a btrfs balance command (it does not run balance automatically).
+
+
+<a id="cfg-system-deep-scrub"></a>
+#### System Deep Scrub (Option 4 extras: caches, logs, apps)
+
+- **System Deep Scrub (Option 4 extras: caches, logs, apps)**
+  - **Audit reports:** Option 4 can write an additional “what happened” report under
+    `CLEANUP_REPORT_DIR` so you can review what was deleted later.
+    - `CLEANUP_REPORT_ENABLED` / `CLEANUP_REPORT_DIR` / `CLEANUP_REPORT_FORMAT` /
+      `CLEANUP_REPORT_MAX_FILES`
+  - `ZYPPER_CACHE_CLEAN_ENABLED` / `ZYPPER_CACHE_CLEAN_CONFIRM` – optionally run
+    `zypper clean --all` after Snapper cleanup to clear cached RPMs/metadata.
+  - `JOURNAL_VACUUM_ENABLED` / `JOURNAL_VACUUM_DAYS` / `JOURNAL_VACUUM_SIZE_MB` /
+    `JOURNAL_VACUUM_CONFIRM` – optionally vacuum systemd journals (keep last N days,
+    or keep under N MB when size is set).
+  - `COREDUMP_VACUUM_ENABLED` / `COREDUMP_VACUUM_MAX_SIZE_MB` / `COREDUMP_VACUUM_CONFIRM` –
+    optionally vacuum systemd coredumps (crash dumps) via `coredumpctl`.
+  - `FLATPAK_UNUSED_CLEAN_ENABLED` / `FLATPAK_UNUSED_CLEAN_CONFIRM` – optionally prune
+    unused Flatpak runtimes (best-effort for both system and the desktop user).
+  - `SNAP_REFRESH_RETAIN_TUNE_ENABLED` / `SNAP_REFRESH_RETAIN_VALUE` /
+    `SNAP_REFRESH_RETAIN_TUNE_CONFIRM` – optionally tune snapd revision retention
+    (`snap set system refresh.retain=2` is a common desktop space saver).
+  - `USER_THUMBNAILS_CLEAN_ENABLED` / `USER_THUMBNAILS_CLEAN_DAYS` /
+    `USER_THUMBNAILS_CLEAN_CONFIRM` – optionally delete cached thumbnails for the
+    desktop user. When days is set, only removes files not accessed recently.
+
+
+<a id="cfg-system-health-automator"></a>
+#### System Health Automator (Option 5 extras: btrfs maintenance + SSD health)
+
+- **System Health Automator (Option 5 extras: btrfs maintenance + SSD health)**
+  - **Health Score diagnostics:** Option 5 prints a best-effort “System Health Score” (0–100)
+    before and after applying changes, listing any detected issues.
+  - `BTRFS_MAINTENANCE_TIMERS_ENABLED` / `BTRFS_MAINTENANCE_TIMERS_CONFIRM` – when Snapper
+    AUTO enable is used, optionally enable btrfs maintenance timers if available
+    (scrub/balance/trim/defrag), to reduce long-term btrfs “metadata full” issues.
+  - `FSTRIM_TIMER_ENABLED` / `FSTRIM_TIMER_CONFIRM` – optionally enable `fstrim.timer`
+    (recommended for SSDs; safe no-op on unsupported setups).
+  - `BTRFS_MAINTENANCE_TUNE_ENABLED` / `BTRFS_MAINTENANCE_TUNE_CONFIRM` – optionally tune
+    `/etc/sysconfig/btrfsmaintenance` (best-effort) to reduce desktop slowdowns from
+    overly-frequent balance/scrub schedules.
+
+
+<a id="cfg-boot-menu-hygiene"></a>
+#### Boot menu hygiene (auto-clean old kernel entries)
+
+- **Boot menu hygiene (auto-clean old kernel entries)**
+  - `BOOT_ENTRY_CLEANUP_ENABLED` – when `true` (default), Snapper cleanup also prunes
+    old kernel *boot menu entry files* (BLS entries) so the boot menu stays clean.
+  - The helper prints a KEEP/REMOVE/UNKNOWN plan first; this output is safe even when
+    the UNKNOWN list is empty (no crashes under `set -u`).
+  - `BOOT_ENTRY_CLEANUP_KEEP_LATEST` – keep the latest N installed kernels in the menu
+    (the running kernel is always kept).
+  - `BOOT_ENTRY_CLEANUP_MODE` – `backup` (default; moves old entries to a backup dir)
+    or `delete` (permanent; not recommended).
+  - `BOOT_ENTRY_CLEANUP_ENTRIES_DIR` – optional override of the BLS entries directory.
+  - `BOOT_ENTRY_CLEANUP_CONFIRM` – ask once for confirmation before pruning entries.
+
+
+<a id="cfg-kernel-package-cleanup"></a>
+#### Kernel package cleanup (purge old kernels via zypper purge-kernels)
+
+- **Kernel package cleanup (purge old kernels via zypper purge-kernels)**
+  - `KERNEL_PURGE_ENABLED` – when `true`, Snapper cleanup also runs
+    `zypper purge-kernels` to remove old kernel *packages*.
+  - This respects your retention policy in:
+    `/etc/zypp/zypp.conf` → `multiversion.kernels`.
+  - `KERNEL_PURGE_MODE` – `auto` (default), `zypper` (direct), or `systemd` (touches
+    `/boot/do_purge_kernels` then starts `purge-kernels.service`).
+  - `KERNEL_PURGE_CONFIRM` – ask once for confirmation before purging kernels.
+  - `KERNEL_PURGE_DRY_RUN` – when `true`, uses `--dry-run` (prints what would be removed).
+  - `KERNEL_PURGE_DETAILS` – when `true`, adds `--details` for a more verbose summary.
+  - `KERNEL_PURGE_TIMEOUT_SECONDS` – best-effort timeout for the purge step.
+  - Lock contention handling: when another `zypper`/zypp client holds the system lock,
+    kernel purge now waits with backoff, retries once on lock-race, and then exits
+    with a clear non-fatal skip message/audit marker instead of noisy hard-failure logs.
+
+
+<a id="cfg-caching-snooze"></a>
+#### Caching / snooze
+
+- **Caching / snooze**
+  - `CACHE_EXPIRY_MINUTES` – how long a cached `zypper dup --dry-run` result
+    is considered valid before forcing a fresh check.
+  - `SNOOZE_SHORT_HOURS`, `SNOOZE_MEDIUM_HOURS`, `SNOOZE_LONG_HOURS` – actual
+    durations used by the `1h` / `4h` / `1d` snooze buttons in the desktop
+    notification.
+
+
+<a id="cfg-zypper-solver-flags"></a>
+#### Zypper solver flags
+
+- **Zypper solver flags**
+  - `DUP_EXTRA_FLAGS` – extra arguments appended to every `zypper dup` invocation
+    run by the helper, for **both** the background downloader (`dup --download-only`)
+    and the notifier (`dup --dry-run`). This is the right place to add flags such
+    as `--allow-vendor-change` or `--from <repo>` without editing the scripts.
+  - Do **not** include `--non-interactive`, `--download-only`, or `--dry-run` here;
+    those are added automatically by the helper where appropriate.
+
+
+<a id="cfg-lock-handling"></a>
+#### Lock handling & downloader behaviour
+
+- **Lock handling & downloader behaviour**
+  - `LOCK_RETRY_MAX_ATTEMPTS` – how many times the Ready-to-Install helper should
+    retry when zypper/Yast holds the system management lock before giving up and
+    showing a friendly message. Each attempt waits a bit longer than the previous
+    one. Default: `10`.
+  - `LOCK_RETRY_INITIAL_DELAY_SECONDS` – base delay (in seconds) used for the first
+    lock retry. Subsequent retries multiply this base (1×, 2×, 3×, …). Set to `0`
+    to fail fast when the lock is held. Default: `1`.
+  - `LOCK_REMINDER_ENABLED` – when `true` (default), the notifier shows a small
+    "Updates paused while zypper is running" notification on every check while
+    zypper/YaST holds the system management lock. When `false`, lock situations
+    are logged but no desktop popup is shown.
+  - `NO_UPDATES_REMINDER_REPEAT_ENABLED` – when `true` (default), identical
+    "No updates found" notifications may be re-shown on later checks while the
+    system remains fully up to date. When `false`, the "No updates" message is
+    shown once per state and then suppressed until new updates appear.
+  - `UPDATES_READY_REMINDER_REPEAT_ENABLED` – when `true` (default), identical
+    "Snapshot XXXX Ready" / "Updates ready" notifications may be re-shown on
+    later checks while the same snapshot is still pending. When `false`, each
+    "Updates ready" state only generates one popup until the snapshot changes.
+  - `INSTALL_CLICK_SUPPRESS_MINUTES` – after you click **Install Now**, the notifier
+    writes a small marker file under `~/.cache/zypper-notify` and suppresses
+    further popups while the interactive Ready-to-Install window is running.
+    This prevents duplicate “Updates Ready” notifications during installation.
+    Set to `0` to disable.
+  - `VERIFY_NOTIFY_USER_ENABLED` – when `true` (default), the periodic
+    verification/auto‑repair service sends a short desktop notification when it
+    detects and fixes at least one issue; when `false`, verification remains
+    fully automatic but quiet.
+  - `DOWNLOADER_DOWNLOAD_MODE` – controls how the background downloader behaves.
+    This value is **case-sensitive** and must be exactly:
+      - `full`        – (default) run `zypper dup --download-only` to prefetch all
+        packages into the cache.
+      - `detect-only` – only run `zypper dup --dry-run` to detect whether updates
+        are available; no pre-download is done. Useful on bandwidth-limited
+        systems or when you only want notifications and manual installs.
+
+If any values are invalid, the installer falls back to safe defaults, logs the
+warnings, updates `last-status.txt`, and attempts to show a small desktop
+notification suggesting `zypper-auto-helper --reset-config`.
+
+### Config Health & Stale Configs
+
+Over time, new versions add new keys to `/etc/zypper-auto.conf`. To keep
+behaviour predictable, the installer performs a basic **config health check**
+whenever it runs:
+
+- If the config file is **missing** → a fresh, fully documented template is
+  generated.
+- If the config file **exists but is missing newer keys** (for example
+  `DUP_EXTRA_FLAGS`) → the installer:
+  - Detects which keys are missing.
+  - Logs a warning listing each missing key and a short description of the
+    affected feature.
+  - Adds the warning to `CONFIG_WARNINGS` so it appears in
+    `/var/log/zypper-auto/last-status.txt`.
+  - Tries to send a desktop notification suggesting:
+    `zypper-auto-helper --reset-config`.
+  - Applies safe defaults for those keys at runtime so the installer and
+    services continue to work.
+
+If you see a warning that `/etc/zypper-auto.conf` is from an older version and
+lists missing keys, the **recommended fix** is:
+
+```bash
+zypper-auto-helper --reset-config
+sudo ./zypper-auto.sh install
+```
+
+This backs up your existing config and regenerates it with all current options
+and comments.
+
+-----
+
+<a id="duplicate-rpm-cleanup"></a>
+## 🛡️ Safe Duplicate RPM Cleanup & Conflict Resolution
+
+Broken third‑party RPMs (especially those with buggy `%preun`/`%postun` scripts) can block `zypper dup` with errors like "failed to execute /usr/bin/fish" or "package specifies multiple versions". The helper includes a **two‑layer duplicate cleanup system** designed to fix these problems safely.
+
+### Modes and Configuration
+
+Controlled via `/etc/zypper-auto.conf`:
+
+- `AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES="insync ..."`
+  - Whitelist of package **names** that are allowed to be auto‑cleaned when multiple versions are installed.
+  - Intended for leaf, third‑party apps you know are safe to remove with `--noscripts` (e.g. `insync`).
+- `AUTO_DUPLICATE_RPM_MODE="whitelist|thirdparty|both"`
+  - `whitelist` (default, safest): only cleans packages in `AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES`.
+  - `thirdparty`: auto‑detects duplicate packages whose **Vendor** is *not* SUSE/openSUSE/Packman/NVIDIA/Intel/OBS and attempts to clean older versions.
+  - `both`: runs whitelist cleanup first, then third‑party cleanup.
+
+### Safety Rails (Apply to Both Wrapper & CLI)
+
+Regardless of mode, duplicate cleanup obeys the following guard rails:
+
+- **Arch-aware duplicates:** Duplicates are detected per `NAME + ARCH` so legitimate multi‑arch installs (e.g. `foo.x86_64` + `foo.i686`) are preserved.
+- **Critical package protection:** Names matching
+  `^kernel-`, `glibc`, `systemd`, `grub`, `shim`, `mokutil`, `nvidia`, `filesystem`
+  are never touched, even in third‑party mode.
+- **GPG key protection:** Packages starting with `gpg-pubkey` are always skipped.
+- **Trusted vendor whitelist:** Vendors containing `openSUSE`, `SUSE`, `Packman`, `NVIDIA`, `Intel`, `obs://build.opensuse.org`, etc. are considered trusted; their duplicates are **never** auto‑removed in third‑party mode.
+- **Dependency pre-flight:** Every candidate removal runs
+  `rpm -e --test --noscripts` (via sudo when needed). If the test reports
+  dependency failures, the package is skipped and logged.
+- **Sanity limit:** If more than 10 distinct duplicate `(NAME, ARCH)` pairs are
+  detected, the cleanup aborts with a warning instead of performing mass
+  deletions (this is treated as a sign of a possibly corrupted RPM database).
+
+### Automatic Cleanup (Wrapper: `zypper-with-ps`)
+
+When you run `zypper dup` (or, in Fish, even `sudo zypper dup`) the helper
+actually invokes the wrapper script `~/.local/bin/zypper-with-ps`, which:
+
+1. Publishes a short "downloading" status for the GUI notifier.
+2. Waits with lock-detail retries if another zypper/YaST instance holds the system management lock, and retries once automatically if a lock race happens during command execution.
+3. Runs **whitelist and/or third‑party duplicate cleanup** according to
+   `AUTO_DUPLICATE_RPM_MODE` and the safety rails above.
+4. In `thirdparty`/`both` modes, takes a **Snapper single snapshot** (`-t single -p`)
+   before cleaning third‑party duplicates, when `snapper` is available and idle.
+5. Runs your requested `zypper` command (`dup`, `dist-upgrade`, or `update`).
+6. Executes the post‑update helper chain (Flatpak, Snap, Soar, Homebrew, pipx).
+7. Runs `zypper ps -s` and the modern reboot check (`zypper needs-reboot`) and
+   prints a clear summary of services to restart and whether a full reboot is
+   required.
+
+All automatic duplicate cleanups performed by the wrapper are written to a
+persistent audit log:
+
+- **Audit file:** `/var/log/zypper-auto/duplicate-cleanup.log`
+  - Includes timestamps, whether the cleanup came from the wrapper or manual
+    CLI, which packages were removed or skipped, vendor information, and
+    snapshot creation status.
+
+### Manual Cleanup (CLI: `zypper-auto-helper --rm-conflict`)
+
+Sometimes you want to **fix conflicts first**, then run updates normally. For
+that, use the dedicated CLI mode:
+
+```bash
+# Run as root or via the installed alias (which adds sudo automatically)
+zypper-auto-helper --rm-conflict
+```
+
+This command:
+
+1. Prints the current duplicate cleanup mode (`whitelist`, `thirdparty`, or `both`).
+2. Attempts to create a **Snapper single snapshot** with description
+   `zypper-auto: duplicate RPM cleanup (--rm-conflict)` before any changes
+   (if `snapper` is installed and not already running).
+3. Runs the same whitelist + optional third‑party cleanup logic as the wrapper
+   (including all safety rails: critical package/GPG/vendor protection,
+   arch‑aware duplicates, dependency pre‑flight, and sanity limits).
+4. Logs all actions both to the normal install log and to the unified audit log
+   at `/var/log/zypper-auto/duplicate-cleanup.log` with a `[rm-conflict]` tag.
+
+**Recommended workflow when you hit a stubborn RPM conflict:**
+
+```bash
+# 1. Clean up safe duplicates first
+zypper-auto-helper --rm-conflict
+
+# 2. Then run your normal upgrade
+zypper dup
+# or if you prefer explicit sudo (especially in Fish)
+sudo zypper dup
+```
+
+In Fish, the installed `sudo` wrapper ensures that `sudo zypper ...` still goes
+through the safe `zypper-with-ps` wrapper, so you get the same duplicate cleanup,
+post‑update helpers, and reboot guidance as with plain `zypper ...`.
+
+-----
+
+<a id="usage"></a>
+## 🏃 Usage
+
+1.  **Wait.** The services run in the background. By default, both the downloader and notifier run every hour (60 minutes). You can change their frequency via `/etc/zypper-auto.conf` (`DL_TIMER_INTERVAL_MINUTES` / `NT_TIMER_INTERVAL_MINUTES`) and re-run `sudo ./zypper-auto.sh install`.
+2.  **Get Notified.** You will get a notification *only* when new updates are pending.
+3.    > **Snapshot 20251110-0 Ready**
+4.    > 12 updates are pending. Click 'Install' to begin.
+5.  **Install.** Click the **"Install"** button in the notification. This will open a terminal and prompt you for authentication to run `zypper dup`.
+
+### Quick Status & Safe Reset
+
+You can check the current status and, if needed, safely clear stale state:
+
+```bash
+# Run comprehensive health check and auto-repair
+zypper-auto-helper --verify
+
+# Check installation/system status
+cat /var/log/zypper-auto/last-status.txt
+
+# Check notifier status
+cat ~/.local/share/zypper-notify/last-run-status.txt
+
+# Check download progress
+cat /var/log/zypper-auto/download-status.txt
+
+# If notifications or status get "stuck", clear cached state and restart timers
+zypper-auto-helper --reset-downloads   # alias: --reset-state
+```
+
+### Debugging
+
+If you want more verbose logging from the notifier script (for example, to see detailed `upower`/`nmcli` decisions), enable debug mode:
+
+```bash
+export ZNH_DEBUG=1
+systemctl --user restart zypper-notify-user.service
+journalctl --user -u zypper-notify-user.service -n 50 --no-pager
+```
+
+### Verifying the Services
+
+```bash
+# 1. Check Root Timer (Downloader)
+# Should show "active" and the next scheduled run time
+systemctl list-timers zypper-autodownload.timer
+
+# 2. Check User Timer (Notifier)
+# Must be run as your regular user. Should show "active" and the next scheduled run time.
+systemctl --user list-timers zypper-notify-user.timer
+
+# 3. Check the status of the last DOWNLOADER run
+systemctl status zypper-autodownload.service
+
+# 4. View the detailed logs from the smart notification script
+journalctl --user -u zypper-notify-user.service
+
+# 5. Change schedules via the config file (recommended):
+sudoedit /etc/zypper-auto.conf
+# Adjust DL_TIMER_INTERVAL_MINUTES / NT_TIMER_INTERVAL_MINUTES, then re-run:
+sudo ./zypper-auto.sh install
+
+# 6. (Advanced) Reload timers manually if you edited units yourself:
+sudo systemctl daemon-reload
+sudo systemctl restart zypper-autodownload.timer
+systemctl --user daemon-reload
+systemctl --user restart zypper-notify-user.timer
+```
+
+-----
+
+<a id="dev-testing"></a>
+## 👩‍💻 Developer / Contributor Testing
+
+This repository includes two small helpers designed to make reproducing and
+debugging behaviour easier for contributors:
+
+### 1. Notification UI Test Harness (`test.py`)
+
+Located in the repo root, `test.py` exercises the full notification flow
+without touching systemd units or zypper itself:
+
+```bash
+python3 test.py
+```
+
+What it does:
+
+- Simulates the main **happy path** notification stages:
+  - "Checking for updates…"
+  - "Downloading updates…" with a progress bar
+  - "✅ Downloads Complete!" summary
+  - Persistent "Snapshot XXXXXXXX Ready" notification with **Install**,
+    **View Changes**, and **Snooze 1h/4h/1d** buttons.
+- Simulates the main **error/edge-case** notifications:
+  - Solver/interaction error ("Updates require your decision") with an
+    **Install Now** action.
+  - PolicyKit/authentication failure ("Update check failed").
+  - Config warning ("zypper-auto-helper config warnings – run
+    `zypper-auto-helper --reset-config`").
+- Uses the same `on_action` callback shape as the real notifier so that
+  clicking **Install** attempts to run `~/.local/bin/zypper-run-install` or,
+  if missing, falls back to opening `konsole`.
+
+All activity is logged to `test.log` in the repo root (ignored by Git). Each
+run is wrapped in clear markers:
+
+```text
+================ RUN 20260105-212612 START ================
+...
+================ RUN 20260105-212612 END ==================
+```
+
+The log includes:
+
+- Python version and key environment variables (`DISPLAY`, `WAYLAND_DISPLAY`,
+  `XDG_SESSION_TYPE`, `USER`, `HOME`, `PWD`).
+- For each notification: title, body preview, icon name, timeout, and (when
+  relevant) the helper script path that would be launched.
+- For each action click: action id, resolved script path, whether it exists and
+  is executable, PID of any launched helper/terminal process, and full
+  tracebacks for any failures.
+
+### 2. Integration Test Script (`integration-test.sh`)
+
+Also in the repo root, `integration-test.sh` performs a higher-level
+integration test of the installed helper, timers and configuration.
+
+> **Important:** This script is **non-destructive** with respect to your
+> persistent configuration. It temporarily tweaks `/etc/zypper-auto.conf` to
+> inject a known-bad value, but always restores your original config before
+> exiting (even if a later step fails).
+
+Run it as root:
+
+```bash
+cd /path/to/zypper-automatik-helper-
+sudo ./integration-test.sh
+```
+
+What it checks:
+
+- Presence and executability of core components:
+  - `/usr/local/bin/zypper-auto-helper`
+  - `/usr/local/bin/zypper-download-with-progress`
+  - User scripts such as `~/.local/bin/zypper-notify-updater.py`,
+    `~/.local/bin/zypper-run-install`, `~/.local/bin/zypper-with-ps` (if
+    installed for the primary user).
+- Root/systemd units:
+  - `zypper-autodownload.timer` / `zypper-autodownload.service` (enabled/active).
+  - `zypper-cache-cleanup.timer` / `zypper-cache-cleanup.service`.
+- User systemd units (for the primary non-root user, when detectable):
+  - `zypper-notify-user.timer` (enabled/active).
+- CLI health:
+  - `zypper-auto-helper --check` (syntax/self-check).
+  - `zypper-auto-helper --verify` (50‑point verification and auto‑repair).
+
+Config validation test:
+
+- Ensures `/etc/zypper-auto.conf` exists (running `zypper-auto-helper install`
+  if needed).
+- Backs it up to a timestamped file such as
+  `/etc/zypper-auto.conf.integration-backup-YYYYMMDD-HHMMSS`.
+- Rewrites `DOWNLOADER_DOWNLOAD_MODE` to an intentionally invalid value
+  (`"INVALID-MODE"`).
+- Runs a full `zypper-auto-helper install` to force `load_config` and
+  `CONFIG_WARNINGS` to execute.
+- Locates the newest `install-*.log` in `/var/log/zypper-auto/` and verifies
+  that:
+  - An `Invalid DOWNLOADER_DOWNLOAD_MODE=...` line appears.
+  - An aggregate warning about one or more invalid settings in
+    `/etc/zypper-auto.conf` was recorded.
+- Restores the original `/etc/zypper-auto.conf` from the backup and runs a
+  final `zypper-auto-helper --check` to confirm the restored config is healthy.
+
+The integration script writes a concise, timestamped console log and is safe to
+run repeatedly on development systems.
+
+### 3. Snapper Disable-Intent Guard Regression Smoke Test (`test_snapper_disable_verify_guard.sh`)
+
+Located under `regressions/`, this root-only smoke test validates the exact
+regression path for Snapper disable intent:
+
+1. Runs `snapper auto-off` through the helper.
+2. Confirms marker creation at
+   `/var/lib/zypper-auto/snapper-auto-disabled.intent`.
+3. Runs helper verification (`--verify`).
+4. Confirms verification did **not** re-enable `snapper-cleanup.timer` while
+   the marker exists.
+
+Run it as root:
+
+```bash
+cd /path/to/zypper-automatik-helper-
+sudo ./regressions/test_snapper_disable_verify_guard.sh
+```
+
+Useful options:
+
+```bash
+# Skip the verify step (quick pre/post auto-off check)
+sudo ./regressions/test_snapper_disable_verify_guard.sh --skip-verify
+
+# Keep resulting timer/marker state after the test (no automatic restore)
+sudo ./regressions/test_snapper_disable_verify_guard.sh --keep-state
+
+# Override helper path or verify timeout
+sudo ./regressions/test_snapper_disable_verify_guard.sh --helper /usr/local/bin/zypper-auto-helper --verify-timeout 1800
+```
+
+Safety behavior:
+- By default, the script captures baseline state and restores timer + marker
+  state automatically on exit.
+- It tracks Snapper + related maintenance timers so running the test does not
+  leave side effects unless `--keep-state` is used.
+
+### 4. Snapper Timer WebUI Browser Regression (`test_snapper_timer_playwright_regression.py`)
+
+Located under `regressions/`, this browser-level regression uses Playwright
+(Chromium) to verify Snapper timer WebUI state sync behavior.
+
+What it checks:
+- Timer badges + Option 5/6 button states after a timer-toggle action.
+- Stale `status-data.json` live polls do not immediately regress freshly
+  toggled states.
+- Throttled authoritative `/api/snapper/timers` re-sync reconciles CLI-side
+  changes and keeps button/badge state aligned.
+
+Run it in an isolated venv (recommended, fish-safe commands):
+
+```bash
+python3 -m venv /tmp/zah-playwright-venv
+/tmp/zah-playwright-venv/bin/python -m pip install playwright
+/tmp/zah-playwright-venv/bin/python -m playwright install chromium
+/tmp/zah-playwright-venv/bin/python -m unittest -v regressions/test_snapper_timer_playwright_regression.py
+```
+Or bootstrap/update the project-local regression venv in one command:
+```bash
+bash scripts/bootstrap_playwright_regression.sh
+```
+Then run the suite as usual (optional Playwright test auto-detects this venv):
+```bash
+bash run_regression_suite.sh zypper-auto.sh
+```
+
+If Playwright is unavailable, the test is skipped automatically instead of
+failing unrelated test runs.
+
+### 5. Boot Kernel Inventory Regression Smoke Test (`test_boot_kernel_inventory_regression.sh`)
+
+Located under `regressions/`, this smoke test guards kernel counting logic used by
+Snapper Manager Boot/EFI stats and kernel purge safety checks.
+
+What it checks:
+- `/api/boot/stats` kernel inventory counts only module trees that have
+  `modules.dep` (bootable installed kernels).
+- Raw module-directory count is still exposed separately for diagnostics
+  (`raw_dirs_count`).
+- Boot/EFI UI text reflects bootable installed kernel versions and shows extra
+  module directories when present.
+- Kernel-family purge and kernel-purge safety counting use the same
+  `modules.dep`-filtered logic.
+
+Run it:
+
+```bash
+bash regressions/test_boot_kernel_inventory_regression.sh zypper-auto.sh
+```
+
+### 6. Stale Module-Dir Helper Regression Smoke Test (`test_stale_module_dirs_helper_regression.sh`)
+
+Located under `regressions/`, this smoke test guards stale module helper safety and
+wiring behavior.
+
+What it checks:
+- `run_stale_module_dirs_only` keeps `audit` as the safe default.
+- Quarantine mode enforces explicit confirmation and blocks unsafe root
+  quarantine paths.
+- Quarantine actions use non-destructive moves with restore guidance.
+- CLI parser/help text/completion templates include `--stale-module-dirs`.
+
+Run it:
+
+```bash
+bash regressions/test_stale_module_dirs_helper_regression.sh zypper-auto.sh
+```
+
+### 7. Stale Module-Dir Runtime Regression (`test_stale_module_dirs_runtime_regression.sh`)
+
+Located under `regressions/`, this runtime regression executes the stale module-dir
+helper in an isolated temporary module-tree sandbox.
+
+What it checks:
+- Audit mode is non-destructive and reports stale non-bootable module dirs.
+- Non-interactive quarantine fails without explicit `--yes` guard.
+- Quarantine mode (`--yes`) moves stale module dirs into timestamped quarantine
+  paths and keeps bootable module dirs intact.
+- A follow-up audit reports zero stale versions after quarantine.
+
+Run it:
+
+```bash
+bash regressions/test_stale_module_dirs_runtime_regression.sh zypper-auto.sh
+```
+### 8. Snapper Service-Status Regression Smoke Test (`test_snapper_status_services_regression.sh`)
+
+Located under `regressions/`, this focused static regression validates Snapper
+Manager status/service reporting wiring.
+
+What it checks:
+- Snapper menu Option 1 status label exists and routes to
+  `__znh_snapper_status`.
+- `__znh_snapper_status` emits timer service-state fields in
+  `enabled=... active=... preset=...` format with guidance hints.
+- Snapper status block includes timer schedule output via
+  `systemctl list-timers`.
+- Dashboard API route `/api/snapper/status` maps to helper command
+  `snapper status` and returns HTTP 200 with `{ok, rc, output}` payload.
+
+Run it:
+
+```bash
+bash regressions/test_snapper_status_services_regression.sh zypper-auto.sh
+```
+### 9. Central Regression Suite Runner (`run_regression_suite.sh`)
+
+Located in the repo root, this convenience runner executes grouped regressions
+from `regressions/` as one suite.
+
+How it selects tests:
+- Auto-discovers shell tests from `regressions/test_*.sh`.
+- Auto-discovers Python tests from `regressions/test_*.py`.
+- Ensures discovered regression files are executable (`chmod +x`) when missing execute bits; already-executable files are skipped unchanged.
+- Runs all discovered non-stateful tests by default.
+- Skips tests tagged `# RUNNER_STATEFUL=1` unless `--include-stateful` is used.
+- Treats tests tagged `# RUNNER_OPTIONAL=1` as warn-only on failure.
+- Supports per-test runtime tag `# RUNNER_RUNTIME=playwright` for Playwright-specific Python tests.
+- Supports selection filters:
+  - `--only PATTERN` (repeatable shell-glob include filter on test basename)
+  - `--exclude PATTERN` (repeatable shell-glob exclude filter on test basename)
+- Runs built-in preflight checks before tests:
+  - shared syntax baseline via `scripts/syntax-check.sh`:
+    - `bash -n` syntax checks (runner + target + selected shell regressions)
+    - `shellcheck` lint checks (runner + selected shell regressions)
+    - default-runtime `python -m py_compile` checks for selected Python regressions
+  - runtime-specific `python -m py_compile` checks for runtime-tagged Python regressions (for example `RUNNER_RUNTIME=playwright`)
+- If needed, shellcheck preflight can be temporarily skipped with:
+  - `RUNNER_SKIP_SHELLCHECK=1`
+
+Current metadata tags in this repo:
+- `regressions/test_snapper_disable_verify_guard.sh`:
+  - `# RUNNER_STATEFUL=1`
+  - `# RUNNER_REQUIRES_ROOT=1`
+  - `# RUNNER_NEEDS_TARGET=0`
+- `regressions/test_snapper_timer_playwright_regression.py`:
+  - `# RUNNER_OPTIONAL=1`
+  - `# RUNNER_RUNTIME=playwright`
+- `regressions/test_webui_blank_guard_playwright_regression.py`:
+  - `# RUNNER_OPTIONAL=1`
+  - `# RUNNER_RUNTIME=playwright`
+
+Run it:
+
+```bash
+bash run_regression_suite.sh zypper-auto.sh
+```
+To include stateful/root-impact regressions explicitly:
+```bash
+sudo bash run_regression_suite.sh --include-stateful zypper-auto.sh
+```
+Run only selected tests (examples):
+```bash
+bash run_regression_suite.sh --only 'test_snapper_*' zypper-auto.sh
+bash run_regression_suite.sh --only 'test_*_runtime_*' --exclude '*playwright*' zypper-auto.sh
+```
+If needed, refresh the optional Playwright venv/runtime first:
+```bash
+bash scripts/bootstrap_playwright_regression.sh
+```
+You can also force a specific interpreter for the optional Playwright test:
+```bash
+PLAYWRIGHT_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
+```
+You can force the required Python runtime regression interpreter too:
+```bash
+RUNTIME_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
+```
+Or force both required + optional Python runtimes together:
+```bash
+RUNTIME_TEST_PYTHON=/path/to/python PLAYWRIGHT_TEST_PYTHON=/path/to/python bash run_regression_suite.sh zypper-auto.sh
+```
+CI also includes a runtime matrix workflow (`.github/workflows/regression-runtime-matrix.yml`) that runs the regression suite with multiple Python runtime targets via `RUNTIME_TEST_PYTHON`.
+For manual workflow runs, you can override the runtime matrix via `workflow_dispatch` input `runtime_pythons` (JSON array), for example:
+```bash
+["3.11","3.12","3.13"]
+```
+
+### 10. Runner Python-Target Preflight Wiring Regression (`test_runner_python_target_preflight_regression.sh`)
+
+Located under `regressions/`, this focused static regression guards the shared preflight integration between `run_regression_suite.sh` and `scripts/syntax-check.sh`.
+
+What it checks:
+- `scripts/syntax-check.sh` supports explicit `--python-target` parsing and compile execution.
+- Runner preflight forwards default-runtime Python tests through `--python-target` into the shared syntax baseline script.
+- Runner keeps runtime-tagged Python compile checks (for example `RUNNER_RUNTIME=playwright`) in runner-side preflight.
+
+Run it:
+
+```bash
+bash regressions/test_runner_python_target_preflight_regression.sh
+```
+
+### 11. WebUI Blank-Screen Guard Regression (`test_webui_blank_guard_regression.sh`)
+
+Located under `regressions/`, this focused static regression guards the WebUI multi-tab blank-screen prevention path.
+
+What it checks:
+- `_znhMiHardBlockShow` only hides `#main-content` when the blocker page was actually shown.
+- `_znhMiPreventBlankScreen` exists and restores main content when both blocker and main content are hidden.
+- `_znhMiTick` and `znhMultiInstanceInit` invoke the prevention helper.
+
+Run it:
+
+```bash
+bash regressions/test_webui_blank_guard_regression.sh
+```
+
+### 12. WebUI Blank-Screen Playwright Runtime Regression (`test_webui_blank_guard_playwright_regression.py`)
+
+Located under `regressions/`, this optional runtime browser regression executes real extracted WebUI JS guard functions in a Playwright harness.
+
+What it checks:
+- Both-hidden state recovery: when `#main-content` and the blocker page are both hidden, `_znhMiPreventBlankScreen()` restores main content and emits recovery signals.
+- Missing-blocker safety: `_znhMiHardBlockShow()` keeps main content visible when blocker DOM is unavailable.
+- Tick-path guard call: `_znhMiTick()` invokes blank-screen prevention and schedules the next heartbeat.
+
+Run it:
+
+```bash
+python3 regressions/test_webui_blank_guard_playwright_regression.py
+```
+
+-----
+
+<a id="diagnostics"></a>
+## 🧪 Advanced Diagnostics & CLI Tools
+
+The helper includes a small diagnostics toolkit built around aggregated log followers, one-shot snapshots, and compact bundles. These tools are especially useful when filing bug reports or debugging tricky issues.
+
+### Diagnostics quick navigation
+
+- [Core diagnostics commands](#diag-core-commands)
+- [Logging & monitoring](#logging-monitoring)
+- [Reporting issues on GitHub](#reporting-issues)
+- [Troubleshooting common issues](#troubleshooting)
+
+<a id="diag-core-commands"></a>
+### Core Diagnostics Commands
+
+- `zypper-auto-helper --logs`
+  - Prints the last ~40 lines from:
+    - The most recent installer log under `/var/log/zypper-auto/install-*.log`
+    - All helper service logs under `/var/log/zypper-auto/service-logs/*.log`
+    - The notifier log `~/.local/share/zypper-notify/notifier-detailed.log` (when present)
+  - Safe to run repeatedly; does not follow logs, just shows current tails.
+
+- `zypper-auto-helper --live-logs`
+  - Follows logs in real time until you press `Ctrl+C`.
+  - If the diagnostics follower is running and today's aggregated file exists, it follows:
+    - `/var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log`
+  - Otherwise, it follows the same set of logs as `--logs` (installer + service + notifier logs) with `tail -F`.
+
+- `zypper-auto-helper --diag-logs-on` / `--diag-logs-off`
+  - `--diag-logs-on` starts a tiny background systemd unit (`zypper-auto-diag-logs.service`) that:
+    - Follows helper service logs and the notifier log (when present).
+    - Also follows the helper's `trace.log`, which includes mirrored structured install/verify output.
+      This ensures the aggregated diagnostics log continues to capture new installs even though each
+      install uses a new `install-YYYYMMDD-HHMMSS.log` filename.
+    - Uses a low-noise multiplexer (single `tail -F` process for tracked sources) and follows only the
+      most-recent service logs by default to reduce long-lived background process churn.
+      - Tune cap (config/WebUI Settings): `ZNH_DIAG_MAX_SERVICE_LOGS` (default `6`) and
+        `ZNH_LIVE_LOGS_MAX_SERVICE_LOGS` (default `8` for interactive live-log fallback views).
+    - Tags each line with its source (`[SRC=INSTALL]`, `[SRC=DOWNLOADER]`, `[SRC=NOTIFIER]`, etc.).
+    - Writes everything into a daily diagnostics file:
+      - `/var/log/zypper-auto/diagnostics/diag-YYYY-MM-DD.log`
+      - The writer is **auto-rotating**: at midnight it seamlessly starts writing to the new day's file
+        without needing a service restart.
+    - Keeps only ~10 days of diagnostics logs, pruning older files automatically.
+  - `--diag-logs-off` stops the background follower and marks diagnostics as disabled in `last-status.txt`.
+
+- `zypper-auto-helper --snapshot-state`
+  - Captures a one-shot snapshot of the helper and system state into today's diagnostics log, including:
+    - `systemctl status` for core system units (`zypper-autodownload.*`, `zypper-auto-verify.*`).
+    - `systemctl --user status` for the notifier units (for the primary user).
+    - The current `download-status.txt` contents and metadata (mtime, size).
+    - The user's `last-run-status.txt` from the notifier (when present).
+    - Root filesystem free space and basic NetworkManager connectivity summary.
+    - A truncated (`head -n 50`) `zypper dup --dry-run` preview.
+  - All of this is appended under a clearly delimited `SNAPSHOT STATE` block with the current `RUN=...` identifier.
+
+- `zypper-auto-helper --diag-bundle`
+  - Creates a single compressed tarball containing the most relevant diagnostics artifacts, written to your home directory:
+    - `~/zypper-auto-diag-YYYYMMDD-HHMMSS.tar.xz`
+  - Contents typically include:
+    - All diagnostics logs from `/var/log/zypper-auto/diagnostics/` (last ~10 days).
+    - The current `last-status.txt` summary.
+    - Up to the 3 most recent `install-*.log` files.
+    - The notifier's `notifier-detailed.log` and `last-run-status.txt` (when present).
+    - The current `/etc/zypper-auto.conf` and the installer script itself for version context.
+  - Ideal for attaching to GitHub issues (after redacting any personal data).
+
+- `zypper-auto-helper --show-logs`
+  - Ensures `/var/log/zypper-auto/diagnostics/` exists and is user-readable.
+  - When `xdg-open` is available, opens the diagnostics folder in your default file manager as the primary user, so you can browse logs graphically.
+
+- `zypper-auto-helper --test-notify`
+  - Runs a self-test of the desktop notification pipeline for the primary user.
+  - Uses the real notifier Python script (`zypper-notify-updater.py --test-notify`) to send a test notification via D-Bus.
+  - Useful to confirm GUI/notification wiring without waiting for real updates.
+
+- `zypper-auto-helper debug` (or `--debug-menu`)
+  - Launches an interactive TUI-style menu with options to:
+    - Toggle the diagnostics follower on/off.
+    - View live diagnostics logs (either the aggregated daily log or raw installer/service/notifier logs).
+    - Capture a diagnostics snapshot (`--snapshot-state`).
+    - Create a diagnostics bundle (`--diag-bundle`).
+    - Open the diagnostics logs directory in a file manager.
+    - Run the notification self-test (`--test-notify`).
+  - Designed for humans: it avoids killing the helper process when exiting log views and always returns cleanly to the menu.
+
+These tools do **not** modify your configuration or timers; they only read logs, inspect status, and, in the case of the follower, create additional diagnostics log files under `/var/log/zypper-auto/diagnostics/`.
+
+<a id="logging-monitoring"></a>
+## 📊 Logging & Monitoring (v47)
+
+Version 47 introduces comprehensive logging to help you understand what's happening without needing to run commands.
+
+### Log Locations
+
+#### System Logs (Root Services)
+**Location:** `/var/log/zypper-auto/`
+
+| File | Purpose | What It Contains |
+|------|---------|------------------|
+| `install-YYYYMMDD-HHMMSS.log` | Installation logs | Complete log of each installation run with timestamps, all commands executed, and their results |
+| `last-status.txt` | Current status | The most recent status message (e.g., "SUCCESS: Installation completed") |
+| `service-logs/downloader.log` | Downloader output | Output from the background download service (`zypper refresh` and `zypper dup --download-only`) |
+| `service-logs/downloader-error.log` | Downloader errors | Error output from the downloader service |
+
+#### User Logs (Notifier Service)
+**Location:** `~/.local/share/zypper-notify/`
+
+| File | Purpose | What It Contains |
+|------|---------|------------------|
+| `notifier-detailed.log` | Complete notifier activity | All notifier operations: environment checks, safety decisions, update checks, errors with full tracebacks |
+| `notifier-detailed.log.old` | Previous log backup | Previous log file (created when main log exceeds 5MB) |
+| `last-run-status.txt` | Last run status | Status of the most recent notifier run (e.g., "Updates available: Snapshot 20251110-0 Ready") |
+| `notifier.log` | Systemd stdout | Standard output captured by systemd |
+| `notifier-error.log` | Systemd stderr | Standard error captured by systemd |
+
+### What Gets Logged
+
+#### Installation Phase
+- ✅ Sanity checks (root privileges, user detection)
+- ✅ Dependency verification and installation
+- ✅ Old service cleanup
+- ✅ Service/timer creation
+- ✅ File permissions and ownership
+- ✅ Syntax validation
+- ✅ Final status summary
+
+#### Runtime (Notifier Service)
+- ✅ **Environment Detection:** Form factor (laptop/desktop), battery status, AC power state
+- ✅ **Safety Checks:** Why updates are allowed or skipped (battery, metered connection, etc.)
+- ✅ **Update Checks:** When zypper runs, what it finds, how many packages
+- ✅ **Notifications:** What notifications are shown to the user
+- ✅ **User Actions:** When the Install button is clicked
+- ✅ **Errors:** Full error messages with Python tracebacks for debugging
+
+### How to Access Logs
+
+#### View Current Status (No Commands Needed)
+```bash
+# System/installation status
+cat /var/log/zypper-auto/last-status.txt
+
+# Notifier status (what's happening with update checks)
+cat ~/.local/share/zypper-notify/last-run-status.txt
+```
+
+#### View Full Installation Log
+```bash
+# View the most recent installation
+ls -lt /var/log/zypper-auto/install-*.log | head -1 | awk '{print $NF}' | xargs cat
+
+# Or specify a date
+cat /var/log/zypper-auto/install-20251119-183000.log
+```
+
+#### View Downloader Service Logs
+```bash
+# See what the background downloader is doing
+sudo cat /var/log/zypper-auto/service-logs/downloader.log
+
+# Check for download errors
+sudo cat /var/log/zypper-auto/service-logs/downloader-error.log
+
+# Or use journalctl for systemd-managed logs
+journalctl -u zypper-autodownload.service
+```
+
+#### View Notifier Logs
+```bash
+# View detailed notifier activity log
+cat ~/.local/share/zypper-notify/notifier-detailed.log
+
+# View just recent entries (last 50 lines)
+tail -50 ~/.local/share/zypper-notify/notifier-detailed.log
+
+# Watch the log in real-time
+tail -f ~/.local/share/zypper-notify/notifier-detailed.log
+
+# View systemd service logs
+journalctl --user -u zypper-notify-user.service
+
+# View just the last run
+journalctl --user -u zypper-notify-user.service -n 50 --no-pager
+```
+
+#### Search Logs for Specific Issues
+```bash
+# Find all errors in notifier log
+grep "\[ERROR\]" ~/.local/share/zypper-notify/notifier-detailed.log
+
+# Check why updates were skipped
+grep "SKIPPED" ~/.local/share/zypper-notify/notifier-detailed.log
+
+# See environment detection history
+grep "Form factor detected" ~/.local/share/zypper-notify/notifier-detailed.log
+
+# Find when updates were available
+grep "packages to upgrade" ~/.local/share/zypper-notify/notifier-detailed.log
+```
+
+### Log Rotation & Cleanup
+
+**Automatic cleanup happens on every installation:**
+- Installation logs: Keep only the **last 10** log files
+- Service logs: Rotate when exceeding **50MB**
+- Notifier logs: Rotate when exceeding **5MB**
+
+No manual maintenance required!
+
+### Understanding Log Entries
+
+#### Helper (Installer / Verify / Repair) Log Format
+
+The bash helper writes structured log lines like:
+
+```text
+[INFO] 2026-02-08 20:29:27 [RUN=R20260208T202927-12345] Starting installation...
+[WARN] 2026-02-08 20:29:30 [RUN=R20260208T202927-12345] Config key missing: DUP_EXTRA_FLAGS (using safe default)
+[ERROR] 2026-02-08 20:29:34 [RUN=R20260208T202927-12345] zypper dup failed: lock held by YaST
+```
+
+Notes:
+- `RUN=...` is a per-invocation correlation ID. It lets you grep *all* related lines across install logs, the aggregated daily diagnostics log, and the journal.
+- When a GUI action triggers a root operation, some lines may also include `TID=...` (Trace ID) so you can correlate the click/action with the backend work.
+
+#### Notifier (Python) Log Format
+
+The notifier’s detailed log now includes a run tag too:
+
+```text
+[2026-02-08 20:29:35] [INFO] [RUN=...] Starting notifier check
+```
+
+- If the notifier is started by systemd, it will automatically use systemd’s `INVOCATION_ID` as its RUN ID.
+- If the helper triggers a notifier action directly (e.g. `--test-notify`), it passes `ZNH_RUN_ID` so the Python log lines share the same `RUN=...` value as the helper.
+
+#### Severity Levels
+- `INFO` - Normal operation, status updates
+- `WARN` - Non-fatal issues and degraded states (safe fallbacks)
+- `DEBUG` - Detailed troubleshooting output (only emitted when debug mode is enabled)
+- `ERROR` - Something went wrong, includes details
+- `SUCCESS` - Operation completed successfully
+
+#### Guarded command execution (installer / verify)
+
+Most critical operations (systemctl enable/restart, zypper maintenance commands, etc.) are executed via a guarded wrapper that captures stdout/stderr. By default it logs a clean SUCCESS/ERROR summary line; if a command fails, its full captured output is immediately dumped to both the install log and stderr so you can see *why* it failed without tailing.
+
+Notes:
+- To also persist successful command output (very verbose), run with `--debug` or set `ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1`.
+  - You can set it in `/etc/zypper-auto.conf` (values: `1` or `true`).
+- To enable maximum backend trace verbosity (shell xtrace into `/var/log/zypper-auto/trace.log`), set:
+  - `ZYPPER_AUTO_DEBUG_LEVEL=trace`
+  - This can be set as an environment variable or inside `/etc/zypper-auto.conf`.
+
+#### Journald / syslog integration (best-effort)
+
+The helper emits structured lines to the system journal (without changing the existing file logs), tagged as `zypper-auto-helper`. In addition:
+- The root downloader emits key lifecycle/error summaries as `[DOWNLOADER] ...` lines.
+- The Python notifier emits **ERROR** lines to the journal by default (errors-only), so crashes are visible in `journalctl`.
+
+Useful commands:
+
+```bash
+# Root/system journal (structured helper + downloader summaries + notifier errors)
+journalctl -t zypper-auto-helper -n 200 --no-pager
+
+# User notifier unit journal (stdout/stderr from the user service)
+journalctl --user -u zypper-notify-user.service -n 200 --no-pager
+```
+
+#### Remote monitoring (webhooks)
+
+You can optionally configure a webhook endpoint to receive success/failure notifications.
+
+1) Edit `/etc/zypper-auto.conf` and set:
+- `WEBHOOK_URL="..."` (leave empty to disable)
+
+Supported formats are auto-detected:
+- Discord webhooks
+- Slack incoming webhooks
+- ntfy.sh topics
+
+Test it (one-shot):
+
+```bash
+sudo WEBHOOK_TITLE="Test" WEBHOOK_MESSAGE="Hello from zypper-auto-helper" zypper-auto-helper --send-webhook
+```
+
+Security note: treat `WEBHOOK_URL` like a secret token.
+
+#### Extensibility (pre/post hook scripts)
+
+Easiest quickstart (enables example hooks + opens dashboard):
+
+```bash
+sudo zypper-auto-helper --dash-install
+```
+
+Open dashboard only (opens **live mode** via a local http server):
+
+```bash
+zypper-auto-helper --dash-open
+```
+
+Desktop shortcut:
+- The installer creates a launcher in your desktop environment menus:
+  `~/.local/share/applications/zypper-auto-dashboard.desktop`
+  - Search keywords: update/upgrade/check/suse/maintenance/snapshot/repair/health
+  - Right-click Quick Actions: Install Updates, **Check Now**, **Auto-Repair (Verify)**, **Health Report**, Stop Server, Open User Logs
+    - **Install Updates** and **Health Report** keep the terminal open until you press Enter (so the window doesn't disappear immediately)
+    - **Check Now** shows a small desktop bubble (when `notify-send` is available)
+  - Uses native YaST icons when available and includes basic translations (de/fr/es)
+- If you have a Desktop folder, it also drops a clickable shortcut:
+  `~/Desktop/Zypper Auto Dashboard.desktop`
+- The helper also auto-heals these shortcuts when you open the dashboard.
+
+Force a specific browser (optional):
+
+```bash
+zypper-auto-helper --dash-open firefox
+# or
+ZYPPER_AUTO_DASHBOARD_BROWSER=google-chrome zypper-auto-helper --dash-open
+```
+
+Drop executable hook scripts into:
+- `/etc/zypper-auto/hooks/pre.d/`  (runs before interactive updates)
+- `/etc/zypper-auto/hooks/post.d/` (runs after successful interactive updates)
+
+The installer also drops safe **template examples** (not executable) so users can quickly enable hooks:
+- `/etc/zypper-auto/hooks/pre.d/00-example-pre.sh.example`
+- `/etc/zypper-auto/hooks/post.d/00-example-post.sh.example`
+- Developer/forensics (optional): `/etc/zypper-auto/hooks/pre.d/99-debug-dump.sh.example`
+  - When enabled, it appends a small state dump into `dashboard-api.log` so WebUI telemetry and backend state line up in one timeline.
+
+Enable a template by copying it to a new filename and making it executable:
+
+```bash
+sudo cp /etc/zypper-auto/hooks/pre.d/00-example-pre.sh.example /etc/zypper-auto/hooks/pre.d/10-my-pre-hook.sh
+sudo chmod +x /etc/zypper-auto/hooks/pre.d/10-my-pre-hook.sh
+
+sudo cp /etc/zypper-auto/hooks/post.d/00-example-post.sh.example /etc/zypper-auto/hooks/post.d/90-my-post-hook.sh
+sudo chmod +x /etc/zypper-auto/hooks/post.d/90-my-post-hook.sh
+```
+
+Hook failures are **non-fatal** and will be logged.
+
+#### HTML status dashboard
+
+A simple static status page is generated (when `DASHBOARD_ENABLED=true`):
+- Root copy: `/var/log/zypper-auto/status.html`
+- User copy: `~/.local/share/zypper-notify/status.html`
+
+It is designed as a quick-glance dashboard (card layout + dark mode support) and includes:
+- Color-coded status badge (success/active vs errors)
+- Pending updates count (parsed from the cached dry-run output: `/var/log/zypper-auto/dry-run-last.txt`)
+- Visual feature toggles (Flatpak/Snap/Soar/Brew/Pipx on/off)
+- A **Self-Update** panel to show/toggle the update channel (**rolling** vs **stable**) and fetch the latest changelog from GitHub
+  - Status labels:
+    - **Up to date**: your installed build matches the remote ref for the selected channel.
+    - **Update available**: your installed ref is known and differs from the remote ref (same channel).
+    - **Install available**: the remote ref is known, but the installed ref is unknown (common after local/manual installs). Installing is allowed, but it is not labeled as an “update”.
+    - **Switch available**: you changed channel (stable ↔ rolling). This is treated as a channel switch (not an update), because stable tags and rolling commit SHAs are not directly comparable.
+    - **Managed by system**: the installed helper appears to be installed outside `/usr/local/bin/` (for example a distro/RPM managed path). In this case the dashboard disables self-update to avoid overwriting OS-managed files (this is enforced in both the WebUI and the localhost Dashboard API endpoints).
+    - **(local edits)**: a best-effort warning suffix when the installed helper file SHA256 differs from the last recorded install/update. Self-update is still allowed, but it will overwrite manual edits.
+  - Detail line: the Self-Update panel shows a short server-side reason text (from the localhost Dashboard API) so the UI doesn’t need to guess why a button is enabled/disabled.
+- A **Settings drawer** (slide-open panel) that lets you toggle common options, timer intervals, and **Snapper safety caps** (retention/timeline limits + deep-clean safety) without editing `/etc/zypper-auto.conf` by hand (auto-saves changes; failures show a prompt offering Factory Reset)
+- A **Snapper Manager** panel (root actions via localhost API) that exposes Snapper menu options **1–6**:
+  - Status, list recent snapshots, create snapshot, full cleanup, AUTO enable timers, AUTO disable timers
+  - Actions that change system state require an explicit confirmation phrase (e.g. CLEANUP / ENABLE / DISABLE)
+  - Note about systemd timer status: some commands show a `preset` value (vendor default), which is **not** the current state.
+    - Example: `snapper-boot.timer enabled=enabled active=active preset=disabled` means the timer **is enabled and running**, but the distro preset default is “disabled”. This is normal and safe.
+    - What matters for functionality is `enabled=` and `active=`.
+    - If you really want to override the vendor preset, you can add a local preset file under `/etc/systemd/system-preset/` (optional; not required for Snapper to work).
+- "Command Center" quick actions: big buttons that **copy** the correct helper command to your clipboard (verify/fix, install updates, health report, logs, reset downloads/config, refresh/open dashboard, diagnostics)
+- Service health indicators for the downloader/verify/notifier timers
+- Basic system metrics (kernel version, uptime, disk usage for `/`, and memory used/total)
+- The **most recent Flight Report** (executive summary + snapshot IDs) extracted from the latest install/verify log
+- Pro UX: disk usage progress bar, live "time ago" counter, copy-to-clipboard buttons, automatic keyword highlighting in logs, theme toggle (auto/light/dark), subtle JS effects (toast notifications, ripple clicks, and live-update highlights), plus Recent Activity Log **view switching** (Live / Logs tail / Verify/Repair / Diagnostics / API / journalctl) and quick-copy log tools.
+
+Quickstart (enable example hooks + generate/open dashboard):
+
+```bash
+sudo zypper-auto-helper --dash-install
+```
+
+Open dashboard only:
+
+```bash
+zypper-auto-helper --dash-open
+```
+
+`--dash-open` will also (best-effort) **apply new changes** by generating/refreshing the dashboard first:
+- If `~/.local/share/zypper-notify/status.html` is missing, it runs `sudo zypper-auto-helper --dashboard` automatically.
+- If the installed helper (`/usr/local/bin/zypper-auto-helper`) is newer than `status.html`, it regenerates the dashboard before opening.
+- Tip: if you installed the default shell wrapper, the equivalent command is `zypper-auto-helper --dashboard` (no `sudo`). When launched from the desktop (no terminal), it may use `pkexec` instead of `sudo` for the admin prompt.
+
+You can disable the auto-refresh with:
+- `ZNH_DASH_OPEN_NO_REFRESH=1 zypper-auto-helper --dash-open`
+
+This starts a background local server on `127.0.0.1:8765` serving `~/.local/share/zypper-notify/` so the dashboard can poll live data files.
+
+Safeguards (applies to `--dash-open`):
+- The local web server always binds to `127.0.0.1` (localhost only).
+- If port `8765` is already in use, the helper will pick the next free port in the range `8765-8790`.
+- The Settings API CORS allowlist supports that same port range (`8765-8790`) so Settings won’t break when the dashboard uses a fallback port.
+- Startup errors for the local web server (if any) are written to: `~/.local/share/zypper-notify/dashboard-http.err`
+- The web server and browser launch are started detached (best-effort `nohup` / `setsid`) so closing the terminal won’t kill the dashboard.
+- The local web server is multi-threaded (Python `ThreadingHTTPServer`) so parallel polling requests don’t block each other.
+- **Security:** the local web server blocks access to sensitive local-only files (tokens, pid/port/err files, dotfiles).
+- Requires `python3` (`sudo zypper install python3`).
+
+It also starts a root-only **Dashboard API** on `127.0.0.1:8766` so the dashboard can:
+- read/write `/etc/zypper-auto.conf` safely (Settings drawer)
+- run Snapper Manager actions (options 1–6) via a strict allowlist + confirmation phrases
+- **Refresh the dashboard from the WebUI** (Quick Actions → “Run: Refresh Dashboard”), which regenerates the root dashboard and then your open tab reloads (the sync worker copies it into your user dashboard directory)
+- **Resume running jobs:** when the WebUI starts a long-running job (Self-update or System Update wizard), the page shows a bottom-right “background job bubble” (spinning indicator) so if you minimize/close the overlay or reload the page, you can click the bubble to reopen the job view and continue watching progress.
+
+<a id="server-history-sqlite"></a>
+##### Server history (SQLite) (Managers tab)
+
+There are 3 ways to view server-side job history. If you are not technical, use **Option 1**.
+
+Option 1 (easiest): WebUI
+- Open the dashboard
+- Open **Managers**
+- Open the **Server (SQLite)** tab
+
+Option 2 (advanced): Dashboard API (JSON)
+- Token file: `/var/lib/zypper-auto/dashboard-api.token`
+- Example:
+  ```bash
+  curl -H "X-ZNH-Token: $(sudo cat /var/lib/zypper-auto/dashboard-api.token)" http://127.0.0.1:8766/api/history/health
+  ```
+
+Option 3 (advanced): open the DB with sqlite3
+- SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
+- Example:
+  ```bash
+  sudo sqlite3 /var/lib/zypper-auto/dashboard-history.sqlite3 \
+    "select job_id, job_type, rc, stage from jobs order by started_ts desc limit 20;"
+  ```
+
+Important: **Browser refresh vs WebUI refresh**
+- Your browser’s reload button (or `Ctrl+R`) only reloads the *already-generated* `status.html`.
+- The dashboard button **Quick Actions → “Run: Refresh Dashboard”** triggers the helper to **regenerate** the dashboard (equivalent to running `sudo zypper-auto-helper --dashboard` (or `zypper-auto-helper --dashboard` when using the installed shell wrapper)), then reloads the page so you see the new content.
+- After helper updates (Self-Update or reinstall), the dashboard may gain new UI features. If your open tab is outdated, the WebUI shows a banner: **“✨ Dashboard update available”** with buttons to refresh/regenerate and reload.
+  - It also detects when a *new* dashboard file was regenerated in the background (via a small `status-meta.json` sidecar), even if the helper version did not change.
+
+Troubleshooting: **JS health indicator (Live mode / tabs not working)**
+- The dashboard header shows a small badge: `JS: loading…` → `JS: OK`.
+- If it shows `JS: FAIL`, open **Recent Activity Log → “🧪 JS health (debug)”** to see the captured error text and debug breadcrumbs.
+- Optional: enable verbose JS/network diagnostics by adding `?debug=1` to the dashboard URL.
+  - This prints `[ZNH-DEBUG] ...` lines to DevTools → Console and also mirrors key lines into the JS health panel.
+- Option-based verbose mode (no URL needed): set `DASHBOARD_JS_VERBOSE_DEBUG=true` in **Settings** (or in `/etc/zypper-auto.conf`).
+- Practical UI toggle: in **Recent Activity Log → “🧪 JS health (debug)”**, use the button **“Verbose debug: ON/OFF”** to toggle `DASHBOARD_JS_VERBOSE_DEBUG` directly (no need to hunt in Settings).
+  - Note: if you also have `?debug=1` in the URL, debug stays on because URL debug is forced.
+
+Screenshot example (Recent Activity Log + JS health debug tools):
+
+![Recent Activity Log (JS health debug + view switching)](icon/Screenshot_20260302_211452.png)
+
+- The **first red error** in DevTools → Console is usually the root cause.
+
+Troubleshooting: **Advanced dashboard debugging toolkit (window.ZNH + Debug HUD + crash logs + mock mode)**
+This is a “pro” debug layer built into the dashboard JavaScript.
+
+- **Global debug context:** open DevTools → Console and use `window.ZNH`.
+  - `ZNH.dumpState()` prints a small state snapshot.
+  - `ZNH.getState()` returns a JS object snapshot (safe for copy/paste into bug reports).
+- **Persistent crash logs (survive reload):**
+  - `ZNH.crash.list()` shows recent JS errors (saved in `localStorage`).
+  - `ZNH.crash.clear()` clears the persistent crash history.
+- **Debug HUD (on-screen overlay):**
+  - Toggle: `Ctrl+Alt+H` or `Ctrl+Backquote`.
+  - Auto-open via URL: append `?hud=1` (or `?znh_hud=1`).
+  - Console helpers: `ZNH.hud.show()`, `ZNH.hud.hide()`, `ZNH.hud.clear()`.
+  - The HUD shows recent crash-log entries when you open it (handy when the page breaks).
+- **URL mock mode (UI testing / screenshots):**
+  - Enable: append `?znh_mock=1`.
+  - Examples:
+    - `?live=1&znh_mock=1&znh_mock_download_state=downloading`
+    - `?znh_mock=1&znh_mock_self_update_status=update_available`
+    - `?znh_mock=1&znh_mock_token_missing=1` (forces the token repair banner)
+  - Notes:
+    - Mock mode only simulates dashboard-local file/API states to help debug UI flows.
+    - It does not run system commands from the browser.
+
+- **Network latency simulation (throttling):**
+  - Purpose: reproduce UI bugs that only happen when disk/CPU is under load and `fetch()` is slow.
+  - Usage: append `?throttle=1500` (milliseconds).
+  - Example: `?live=1&throttle=1500`
+
+- **Visual DOM update flashing (performance debug):**
+  - Purpose: quickly spot *which elements* are updating and catch accidental “full re-render” behaviour.
+  - Usage: append `?domflash=1` (or `?znh_domflash=1`).
+
+- **Event-driven debug (Pub/Sub):**
+  - The polling layer dispatches browser events:
+    - `znh-data-updated` (detail = parsed `status-data.json` object)
+    - `znh-network-error` (detail = `{ source, error, failures }`)
+  - You can inject fake UI state without the network by running this in DevTools Console:
+    - `document.dispatchEvent(new CustomEvent('znh-data-updated', { detail: { last_status: 'testing...', pending_count: 123 } }))`
+
+- **Black Box Flight Recorder (UI diagnostics exporter):**
+  - Purpose: export a single JSON report you can attach to bug reports when the dashboard breaks.
+  - UI button: **Quick Actions → More actions… → “Download UI Diagnostics”**
+  - Hotkey: `Ctrl+Shift+D`
+  - DevTools Console: `ZNH.exportDiagnostics()`
+  - The report bundles (bounded):
+    - `ZNH.stateHistory` (time-travel snapshots)
+    - persistent crash logs (`localStorage`, via `ZNH.crash.list()`)
+    - bounded network error history (`ZNH.netErrors`)
+    - JS health log + Debug HUD log
+    - a bounded DOM snapshot of `#main-content` (so you can see the rendered UI state)
+  - Note: the report may include log text / HTML. Review it before sharing publicly.
+
+- **Copy JS debug log (no DevTools needed):**
+  - In **Recent Activity Log → “🧪 JS health (debug)”**, click **“Copy JS debug log”** to copy the captured error/breadcrumb log.
+
+Predefined allowed values (enums/intervals/min-max ranges) are served from a root-owned schema file generated by the helper:
+- `/var/lib/zypper-auto/dashboard-schema.json`
+
+Authentication is done via a random token written to:
+- `~/.local/share/zypper-notify/dashboard-token.txt` (legacy: older builds fetched this over HTTP)
+- **Security note (newer builds):** when opened via `--dash-open`, the token is passed via the URL fragment (not sent to the web server), stored in `localStorage`, and the local HTTP server **blocks** direct access to `dashboard-token.txt`.
+
+##### Settings change logging (audit trail)
+Settings loads/saves (including auto-save) are logged with the same structured levels as the rest of the project.
+- Root log: `/var/log/zypper-auto/service-logs/dashboard-api.log`
+- UI mirror: `~/.local/share/zypper-notify/dashboard-api.log`
+
+The API logs include:
+- endpoint calls (`GET /api/config`, `POST /api/config`)
+- which keys were patched (debug)
+- invalid keys that were auto-healed back to defaults (warn)
+- UI-side “save ok / save failed” events, including from→to diffs for the keys changed (best-effort)
+
+To stop the Settings API:
+
+```bash
+sudo zypper-auto-helper --dash-api-off
+```
+
+Stop the server:
+
+```bash
+zypper-auto-helper --dash-stop
+```
+
+Force a specific browser (optional):
+
+```bash
+zypper-auto-helper --dash-open firefox
+# or
+ZYPPER_AUTO_DASHBOARD_BROWSER=google-chrome zypper-auto-helper --dash-open
+```
+
+Open it in your browser:
+
+```bash
+xdg-open ~/.local/share/zypper-notify/status.html
+```
+
+You can regenerate it anytime:
+
+```bash
+sudo zypper-auto-helper --dashboard
+```
+
+##### Live mode (realtime-ish)
+The dashboard also writes small sidecar files alongside the HTML:
+- `/var/log/zypper-auto/status-data.json`
+- `~/.local/share/zypper-notify/dashboard-live.log` (realtime log stream for Live mode)
+  - **Safety/UX:** the sync worker keeps this bounded by copying only the most recent ~2500 lines into the user dashboard directory, so long-lived tabs don’t end up pulling a multi-megabyte log forever.
+- `~/.local/share/zypper-notify/dashboard-verify-tail.log` (tail of auto-repair/verification service log for the Recent Activity view)
+- `~/.local/share/zypper-notify/dashboard-run-install-tail.log` (tail of the Ready-to-Install helper log so lock failures are visible in the WebUI)
+- `~/.local/share/zypper-notify/dashboard-api.log` (Settings API log mirror for the UI)
+- `/var/log/zypper-auto/last-verify-summary.txt` (key=value summary so the dashboard can show the last verify/auto-repair counts)
+
+If you open the dashboard through a local web server (recommended), you can enable **Live mode** in the UI and it will:
+- poll `status-data.json` every ~5 seconds to update the cards
+- poll `download-status.txt` every ~2 seconds to show realtime background download progress
+- poll `perf-data.json` every ~2 seconds to show **performance charts** (CPU% + memory) for helper-related systemd services
+
+Quickstart (serve + open live):
+
+```bash
+python3 -m http.server --directory ~/.local/share/zypper-notify 8765
+xdg-open http://127.0.0.1:8765/status.html?live=1
+```
+
+Note (important for Settings/Snapper Manager):
+- The dashboard Settings API requires a token.
+- Newer builds intentionally **block** `dashboard-token.txt` from being served over HTTP.
+- Use `zypper-auto-helper --dash-open` (recommended) so the token is injected securely via URL fragment and stored in the browser.
+- The token is also stored in a cookie (best-effort) so it survives port changes (8765 → 8766, etc.) when the helper picks a fallback port.
+- If you open the dashboard via a manual URL/bookmark and the token is missing, the WebUI will show a **Token Repair** banner with a copy button for the fix command.
+
+#### Console output (interactive)
+
+When you run the helper manually in a terminal, it also prints a readable, color-coded console stream, while keeping the on-disk logs plain text.
+
+-----
+
+<a id="additional-resources"></a>
+## 📚 Additional Resources
+
+<a id="reporting-issues"></a>
+### Reporting Issues on GitHub
+
+**If you encounter a problem, please include these logs in your GitHub issue:**
+
+#### For Installation Problems:
+```bash
+# 1. Most recent installation log (REQUIRED)
+cat $(ls -t /var/log/zypper-auto/install-*.log | head -1)
+
+# 2. Installation status (REQUIRED)
+cat /var/log/zypper-auto/last-status.txt
+```
+
+#### For Notification/Update Check Problems:
+```bash
+# 1. Detailed notifier log (REQUIRED)
+cat ~/.local/share/zypper-notify/notifier-detailed.log
+
+# 2. Last run status (REQUIRED)
+cat ~/.local/share/zypper-notify/last-run-status.txt
+
+# 3. Systemd service status (HELPFUL)
+systemctl --user status zypper-notify-user.service
+
+# 4. Recent systemd logs (HELPFUL)
+journalctl --user -u zypper-notify-user.service -n 100 --no-pager
+```
+
+#### For Download Problems:
+```bash
+# 1. Downloader logs (REQUIRED)
+sudo cat /var/log/zypper-auto/service-logs/downloader.log
+sudo cat /var/log/zypper-auto/service-logs/downloader-error.log
+
+# 2. Service status (HELPFUL)
+systemctl status zypper-autodownload.service
+```
+
+**Also include:**
+- Your openSUSE Tumbleweed version: `cat /etc/os-release`
+- Python version: `python3 --version`
+- Description of the problem and what you expected to happen
+
+**⚠️ IMPORTANT:** Please **redact any personal information** (usernames, hostnames, network names) before posting logs publicly!
+
+<a id="troubleshooting"></a>
+### Troubleshooting Common Issues
+
+**Problem: Updates not being downloaded**
+- Check if the downloader timer is active: `systemctl status zypper-autodownload.timer`
+- Check the downloader log for errors: `sudo cat /var/log/zypper-auto/service-logs/downloader-error.log`
+- Verify conditions are met (AC power, not metered): Check systemd conditions
+
+**Problem: Interactive update failed ("Update failed. Capturing system state...")**
+- The Ready-to-Install update window prints the log destinations (including clickable `file://...` links).
+- In the WebUI, open **Recent Activity Log** and switch to: **View: Install helper** (shows a bounded tail of the Ready-to-Install helper log).
+- Check the Ready-to-Install helper log: `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+  - If the failure is a zypp lock, the log should include the lock file path + PID + process name (best-effort) and retry attempts.
+  - The log also includes the full `pkexec zypper dup` output so you can see the exact error.
+- For full system helper logs (may require sudo): `/var/log/zypper-auto/`
+- Easy opener (file manager): `zypper-auto-helper --show-logs`
+
+<a id="rocket-conflict-quick-flow"></a>
+### Rocket conflict quick flow
+- If Rocket reports a solver conflict, run the fallback shown in the panel:
+  - `sudo zypper dup --allow-vendor-change`
+- When zypper asks for a solution, choose the numeric solver option (`1/2/3/4`) that matches your intent:
+  - `1` keeps the first proposal.
+  - `2` selects the second proposal.
+  - `3` selects the third proposal.
+  - `4` often includes deinstallation/replacement proposals, so review that one carefully.
+- Re-check the install helper output if needed:
+  - `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+- If dashboard counters look stale after a successful run, force a refresh:
+  - `sudo zypper-auto-helper --dashboard`
+
+**Problem: Not receiving notifications**
+- Check notifier timer: `systemctl --user status zypper-notify-user.timer`
+- Check for errors: `cat ~/.local/share/zypper-notify/notifier-detailed.log | grep ERROR`
+- Check last run status: `cat ~/.local/share/zypper-notify/last-run-status.txt`
+- Verify PyGObject is installed: `python3 -c "import gi"`
+
+**Problem: "Install Now" action does nothing / closes immediately**
+- Check the Ready-to-Install helper log: `tail -n 200 ~/.local/share/zypper-notify/run-install.log`
+- Safe smoke test (does NOT run updates):
+  - `ZYPPER_TRACE_ID=TEST-123 ZNH_RUN_ID=TEST-123 ~/.local/bin/zypper-run-install --selftest`
+  - Or, to mimic the notifier launch style: `systemd-run --user --scope --setenv=ZYPPER_TRACE_ID=TEST-123 --setenv=ZNH_RUN_ID=TEST-123 ~/.local/bin/zypper-run-install --selftest`
+
+**Problem: Updates skipped on laptop**
+- Check if on battery: `cat ~/.local/share/zypper-notify/notifier-detailed.log | grep "AC power"`
+- Check for metered connection: `grep "metered" ~/.local/share/zypper-notify/notifier-detailed.log`
+- The system is working as designed - updates only run on AC power and unmetered connections
+
+### Version History
+
+- **Unreleased (next build):**
+  - _TBD_
+
+- **v71** (2026-04-02): **Stability, Rocket UX, Snapper manager, and WebUI reliability release**
+  - 🐛 **FIXED:** Self-Update WebUI wiring now defines `bgNotifyBtn` before guard/listener checks in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
+  - 🔄 **IMPROVED:** status-only WebUI auto-fetch now also checks self-update status automatically in the background, so opening the dashboard keeps Self-Update state fresh without manual clicks.
+  - ⏱️ **IMPROVED:** WebUI background auto-fetch remains user-configurable via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes) and now uses lower-impact hidden-tab behavior (longer hidden cadence + timer jitter + lightweight fetch path).
+  - 🔔 **NEW:** self-update status checks now raise deduplicated WebUI update-availability notifications for stable/rolling channels (`update` / `install` / `switch`) in Notification Center plus best-effort browser desktop notifications (when permission is granted).
+  - 🎛️ **NEW:** added `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=true|false` so users can disable background self-update availability notifications without disabling background self-update status checks.
+  - 🖱️ **IMPROVED:** Self-Update panel now includes a one-click quick toggle button (`Notify updates: ON/OFF`) for `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED` so users can change this behavior without opening full Settings.
+  - 🧾 **IMPROVED:** self-update WebUI recovery/status endpoints now return effective-full log output (bounded full view) instead of tail-only payloads, so long update sessions keep usable context.
+  - ✅ **FIXED:** self-update completion now falls back to systemd terminal state (`ActiveState`/`SubState` + `ExecMainStatus`) when status files lag, preventing 99% “stuck finishing” overlays.
+  - 📡 **IMPROVED:** self-update SSE stream reset now loads effective-full initial log text, then continues with incremental append streaming for new output.
+  - 🐛 **FIXED:** embedded Dashboard API Python heredoc parsing regression caused by a duplicated `_recover_self_update_job` payload fragment (`IndentationError` during runtime API regression loading).
+  - 🐛 **FIXED:** `/api/self-update/job` now returns effective-full `output` and `output_truncated` fields correctly in both lock/no-lock paths (eliminates HTTP 500 from undefined `tail` variable).
+  - 🧪 **NEW:** `test_self_update_api_runtime_regression.py` now includes `EmbeddedDashboardApiSyntaxRegressionTest`, which AST-parses the embedded `DASH_API_BIN` Python heredoc to catch parse/indentation regressions early.
+  - 🧰 **IMPROVED:** install now adds a compatibility PATH shim at `/usr/bin/zypper-auto-helper` (symlink to `/usr/local/bin/zypper-auto-helper`) so the helper command remains discoverable in environments where `/usr/local/bin` is not in PATH.
+  - 🧹 **IMPROVED:** uninstall now removes that compatibility symlink only when it points to the helper, and also removes full `zypper-auto-helper` wrapper function blocks from `.bashrc` / `.zshrc` (not just alias lines).
+  - 🛡️ **CHANGED:** verification Safety Net snapshot policy now skips pre/post Snapper snapshot creation for routine `--verify` runs (including `zypper-auto-verify.timer`) to avoid repeated EFI initrd artifact growth during background verification loops.
+  - 🛡️ **CHANGED:** install/update verification flow now also keeps Safety Net snapshots disabled (`run_smart_verification_with_safety_net ... never`) so auto-repair never creates extra Btrfs snapshots.
+  - 🐛 **FIXED:** stale downloader-status auto-fix command now correctly escapes its temporary file variable under `set -u`, preventing `tmp: unbound variable` failures in verification/install flows.
+  - 🧪 **NEW:** added `test_verify_snapshot_policy_regression.sh` and included it in `run_regression_suite.sh` to guard verify-vs-install Safety Net snapshot behavior.
+  - ⏱️ **CHANGED:** default downloader/notifier cadence now uses `DL_TIMER_INTERVAL_MINUTES=60` and `NT_TIMER_INTERVAL_MINUTES=60` in the built-in config template/fallback paths (hourly baseline by default).
+  - 🛡️ **IMPROVED:** `zypper-with-ps` lock handling now includes lock-detail wait/retry before run plus a one-time retry when lock contention appears during the actual `zypper` execution (race-safe path for `dup`/`dist-upgrade`/`update`).
+  - 🧪 **NEW:** added regression smoke test `test_wrapper_lock_race_regression.sh` to guard wrapper lock-helper wiring, pre-run wait logic, retry-on-lock-race behavior, and final lock-detail messaging.
+  - 🧿 **IMPROVED:** Snapper timer disable state now renders as an intentional warning/checkmark (not an error) across WebUI + CLI status panels (`✓ disabled`, `⚠ partial`).
+  - 🧿 **FIXED:** Snapper timer badges in WebUI now keep short-lived authoritative `/api/snapper/timers` state after timer toggles, so stale `status-data.json` polls no longer revert freshly changed enable/disable states before dashboard data catches up.
+  - 🧿 **FIXED:** Snapper WebUI Option 5/6 buttons now also sync their live enabled/disabled state from timer status (with state styling + guard-disable when already in target state), so controls stay persistent and match CLI/systemd timer reality.
+  - 🧿 **IMPROVED:** Snapper timer state normalization now accepts verbose/legacy state strings (for example `enabled=enabled active=active ...`) and boolean aliases (`on/off`, `true/false`, `yes/no`) to keep WebUI state parsing consistent across mixed data sources.
+  - 🧿 **IMPROVED:** successful Snapper timer toggles now apply an immediate optimistic action override to timer badges/buttons before the authoritative refresh returns, reducing transient UI mismatch windows.
+  - 🧿 **IMPROVED:** Snapper Manager now keeps a passive visibility-aware timer sync loop in the WebUI so long-lived tabs stay aligned with out-of-band CLI/systemd timer changes.
+  - 🧪 **NEW:** browser-level regression `test_snapper_timer_playwright_regression.py` now validates Snapper timer badge/button persistence through stale live polls and throttled authoritative API re-sync behavior.
+  - 🧪 **NEW:** added regression smoke test `test_diag_follower_low_noise_regression.sh` to guard low-noise diagnostics follower multiplexing and service-log source caps.
+  - 🧪 **IMPROVED:** static regression `test_snapper_timer_controls_regression.sh` now also guards verbose state normalization, optimistic override wiring, passive timer-sync initialization paths, and Snapper status service-state output formatting (`enabled=... active=... preset=...`).
+  - 🧪 **NEW:** added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, Snapper service-state output formatting/hints, and `/api/snapper/status` helper API contract.
+  - 🧪 **NEW:** added central runner `run_regression_suite.sh` for non-destructive regression execution (includes Snapper service-status regression and optional Playwright run).
+  - 🧪 **NEW:** added `scripts/syntax-check.sh` as a dedicated unified syntax baseline runner (`bash -n`, `shellcheck`, Python `py_compile`, optional Node.js `node --check`) with `--include-regressions` and `--install-missing` support.
+  - 🧪 **IMPROVED:** `scripts/syntax-check.sh` now auto-applies `chmod u+x` to discovered shell/python script targets during scan/check flow (`SYNTAX_AUTO_CHMOD` controls this behavior; enabled by default).
+  - 🧪 **IMPROVED:** `scripts/syntax-check.sh` now supports explicit `--no-auto-chmod` for one-off runs and prints clearer skip diagnostics when auto-chmod cannot be applied (for example, target not writable or chmod failure).
+  - 🧠 **IMPROVED:** AI Smart Report (`/api/ai/smart-report`) now runs a unified normalized-signal pipeline (deduped log/job signals), incident grouping with severity/confidence scoring, recommendation ranking with local history learning weights, and a structured explainability section (`top_actions`, score breakdown, evidence/source refs) plus payload schema validation flags.
+  - 🧠 **IMPROVED:** WebUI unusual-activity crash watcher notifications now include normalized incident metadata (incident id, severity, confidence, window, occurrence count) so browser-side alerts align with server-side AI incident language.
+  - 🧠 **NEW:** Managers → Server → AI Smart Report now includes an in-panel **Incident summary** card showing top incidents (severity/confidence/occurrences) and the currently suggested repair action, alongside the raw text/JSON output.
+  - 🎛️ **NEW:** WebUI unusual-activity watcher now supports configurable repeat-alert suppression windows via `WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS` and `WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS` (available in Settings and applied live from config refresh paths).
+  - 🧪 **NEW:** added runtime regression `regressions/test_ai_smart_report_runtime_regression.py` to execute `/api/ai/smart-report` in a mocked runtime harness and verify incident severity presence plus recommendation ordering in `top_actions`.
+  - 🧪 **IMPROVED:** `run_regression_suite.sh` preflight now delegates bash/shellcheck baseline checks to `scripts/syntax-check.sh` (single shared syntax baseline), and also routes selected default-runtime Python compile targets through the same script while keeping runtime-tagged Python compile routing in the runner.
+  - 🧪 **NEW:** added focused static regression `test_runner_python_target_preflight_regression.sh` to guard shared preflight wiring (`--python-target` forwarding for default-runtime Python tests and runner-side runtime-tagged fallback compile checks).
+  - 🧪 **IMPROVED:** `run_regression_suite.sh` optional Playwright regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
+  - 🧪 **NEW:** added `scripts/bootstrap_playwright_regression.sh` helper to create/update the local Playwright regression venv + Chromium runtime in one command.
+  - 🧪 **IMPROVED:** `run_regression_suite.sh` now supports unified Python runtime overrides across runtime regressions (`RUNTIME_TEST_PYTHON` for required runtime API tests + `PLAYWRIGHT_TEST_PYTHON` for optional browser runtime tests).
+  - 🧪 **NEW:** added GitHub Actions runtime matrix workflow `.github/workflows/regression-runtime-matrix.yml` to run `run_regression_suite.sh` across multiple Python runtime targets.
+  - 🧪 **IMPROVED:** runtime matrix workflow manual runs now support `workflow_dispatch` input `runtime_pythons` (JSON array) so you can choose runtime versions dynamically per run.
+  - ⚡ **IMPROVED:** diagnostics follower now uses a low-noise single-tail multiplexer and caps followed service logs to most-recent entries by default (`ZNH_DIAG_MAX_SERVICE_LOGS`), now exposed in WebUI Settings.
+  - ⚡ **IMPROVED:** interactive debug-menu/CLI live-log fallback paths now cap service-log source fanout (`ZNH_LIVE_LOGS_MAX_SERVICE_LOGS`) to avoid temporary tail-process spikes, now exposed in WebUI Settings.
+  - 🧰 **NEW:** added `zypper-auto-helper --stale-module-dirs` helper command (safe audit default) with optional quarantine mode, explicit confirmation phrase, and non-interactive `--yes` guard.
+  - 🧪 **NEW:** added regression smoke test `test_stale_module_dirs_helper_regression.sh` to validate stale module helper safety behavior, CLI/help wiring, and shell completion exposure.
+  - 🧰 **FIXED:** early helper option fast-path now recognizes `--stale-module-dirs` / `--stale-modules` so stale-module helper invocations are not rejected as unknown options before parser dispatch.
+  - 🧪 **NEW:** added runtime regression `test_stale_module_dirs_runtime_regression.sh` using isolated temporary module roots (`ZNH_STALE_MODULE_LIB_ROOT` / `ZNH_STALE_MODULE_USR_LIB_ROOT`) to validate real audit/quarantine behavior without touching system module directories.
+  - 🧿 **FIXED:** Boot/EFI installed-kernel inventory now counts only bootable installed kernels (module trees with `modules.dep`) instead of all raw `/lib/modules` directory names, avoiding false high counts from leftover/devel module dirs.
+  - 🧪 **NEW:** added regression smoke test `test_boot_kernel_inventory_regression.sh` to guard bootable-kernel-only inventory counting and related kernel purge safety checks.
+  - 🔄 **IMPROVED:** Dashboard now auto-syncs `status-data.json` once on page load even when Live mode is OFF, and also re-syncs on tab focus/visibility resume. This auto-corrects stale Snapper timer cards without requiring manual hard refresh.
+  - 🛡️ **FIXED:** explicit `snapper auto-off` now writes a disable-intent marker (`/var/lib/zypper-auto/snapper-auto-disabled.intent`) so `--verify` no longer silently re-enables `snapper-cleanup.timer`.
+  - 🧰 **IMPROVED:** verify check 48 now removes stale disable markers when `snapper-cleanup.timer` is active again, keeping timer state + intent metadata consistent.
+  - 🧹 **IMPROVED:** uninstaller cleanup now removes the Snapper disable-intent marker file from `/var/lib/zypper-auto/`.
+  - ⚡ **NEW:** adaptive low-impact verification mode for repeated background verify failures.
+    - Tracks verify fail streak + heavy-check cooldown state in `verify-smart-state.env`.
+    - Defers expensive deep checks during cooldown windows and lowers verify CPU/IO priority.
+    - Adds configurable follow-up delay and exposes new `VERIFY_LOW_IMPACT_*` settings in config/WebUI.
+  - ⏱️ **CHANGED:** default `VERIFY_TIMER_INTERVAL_MINUTES` is now `15` (from `5`) to reduce repeated verify pressure on busy systems.
+  - ⏱️ **CHANGED:** default `VERIFY_TIMER_INTERVAL_MINUTES` is now `30` (from `15`) in the current config template/schema and fallback validation path.
+  - 🧪 **IMPROVED:** notifier syntax validation in self-check/verify/install now uses a read-only-safe AST parser helper (`python_ast_syntax_check`) to avoid false failures caused by `__pycache__` writes under hardened mounts.
+  - 🧰 **IMPROVED:** Ready-to-Install (`zypper-run-install`) now writes clearer zypp lock diagnostics into `run-install.log` (lock file/PID/process) and streams full `zypper dup` output into the log for easier debugging.
+  - 🧿 **NEW:** WebUI Recent Activity Log now includes **View: Install helper** (shows `dashboard-run-install-tail.log`) so Ready-to-Install failures are visible in the dashboard.
+  - 🧿 **IMPROVED:** WebUI scrub-ghost Smart Analyze (AUTO) readability:
+    - Larger log/report windows (stretches much closer to full overlay height)
+    - Colored status overview scorecard (Boot Storage / Redundancy / Default Entry / GRUB config + key counts)
+    - Default Entry no longer shows confusing `N/A` (now reports `NOT GRUB` or `UNKNOWN`)
+  - 🧰 **IMPROVED:** WebUI Settings button label now says **“Save / Apply”** to make it clearer that saving immediately applies changes to `/etc/zypper-auto.conf`.
+  - 🐛 **FIXED:** WebUI **Factory Reset** now immediately applies the reset config response (so toggles like `KERNEL_PURGE_ENABLED` flip back to defaults instantly) and forces `no-store` caching on Settings API GETs to prevent stale UI values.
+  - 🐛 **FIXED:** WebUI Settings auto-save no longer fails with `Read-only file system: /etc/zypper-auto.conf` after a config reset (dashboard API unit now allows `/etc` writes so the Settings API can safely rewrite config + create backups).
+  - 🧰 **IMPROVED:** CLI completions now include `scrub-ghost` and its flags for `zypper-auto-helper` (bash/zsh/fish). Standalone completions for `scrub-ghost`/`zypper-scrub-ghost` are also installed.
+  - 🧠 **CHANGED:** scrub-ghost **AUTO** now maps to **Smart Auto-Fix** (recommended) in the WebUI (in-page panel + wizard) and Dashboard API.
+    - AUTO is an adaptive loop: it re-scans after each step.
+    - In the WebUI, AUTO runs **step-by-step** (1 step per run) so you can review the log and click **Continue Auto-Fix** after each step.
+    - WebUI advanced: you can change **AUTO steps/run** (default: 1) in the wizard if you want fewer/more steps per click.
+    - New CLI flag: `scrub-ghost --smart-auto-fix`
+    - New advanced flag: `scrub-ghost --smart-auto-fix-max-steps N`
+  - 🧿 **NEW:** scrub-ghost **Smart Analyze (WebUI)**
+    - New CLI flag: `scrub-ghost --smart-analyze` (emits a machine-readable JSON analysis + recommendations report)
+    - New Dashboard API endpoint: `POST /api/scrub/smart-analyze`
+    - WebUI Ghost-Scrub Wizard AUTO now shows the **analysis screen first** and displays action buttons (FIX / ALL / K / Show)
+    - Clicking a button runs **only that step** in a background job (no stdin / no hidden non-interactive loop)
+    - Safety: when kernel redundancy is **CRITICAL**, the analysis disables stale snapshot pruning actions (mirrors the CLI guard)
+  - 🐛 **FIXED:** WebUI Ghost-Scrub Wizard **Copy output** button now reliably copies the output tail to clipboard.
+  - 🧿 **IMPROVED:** Ghost-Scrub Wizard overlay can now be **minimized** during the whole flow (config/confirm/running), not only while the job is running.
+  - 🧰 **IMPROVED:** WebUI Settings now does a passive refresh on tab focus/visibility (when there are no unsaved edits), so if you reset config from CLI the dashboard updates indicators like `KERNEL_PURGE_ENABLED` automatically.
+  - 🛡️ **IMPROVED:** Snapper system config tuning options (`SNAP_RETENTION_*`) are now treated as **Danger zone** settings in the WebUI (requires Advanced unlock + danger zone unlock + per-setting confirmation phrase).
+  - 🐛 **FIXED:** Full install after WebUI self-update no longer logs a scary `cp: ... are the same file` error when the helper is already running from `/usr/local/bin/zypper-auto-helper` (the command install step now skips self-copy).
+  - 🐛 **FIXED:** Rocket Update Wizard now writes the transient-unit script to disk before calling `systemd-run` (avoids potential argv/D-Bus size issues that can cause errors like "Failed to start transient service unit: Connection reset by peer" on some systems).
+  - 🐛 **FIXED:** Rocket Update Wizard now **streams zypper output live** into the WebUI log (instead of buffering until the command finishes), so it no longer looks “stuck” at 0% during long runs.
+  - 🧰 **IMPROVED:** Rocket preview now retries `systemd-run` without `--pipe` and captures output via a log file on transient-unit start failures (improves compatibility on some systems).
+  - 🧰 **IMPROVED:** Dashboard API systemd unit now includes `/run` and `/var/run` in `ReadWritePaths` (helps `systemd-run` reliability under hardening).
+  - 🧾 **IMPROVED:** Rocket Update Wizard Result view now shows `zypper ps -s` output in a separate, taller, scrollable window.
+  - 🎨 **IMPROVED:** Rocket header icon glow is now stronger when updates are available (pending updates > 0), and remains strongest in the "downloads complete" state.
+  - 🧿 **NEW:** WebUI **Quick Actions** can now run allowlisted helper commands directly from the dashboard in a terminal-like overlay (with **minimize/close** and live log output), instead of only copying commands.
+    - Dangerous state-changing actions require a typed confirmation phrase (server-side enforced).
+    - Confirmation dialogs now include a Rocket-style explanation block (**What this will do** + **Warning**) for state-changing actions.
+    - Interactive actions that need stdin (menus, live tails, etc.) remain copy-only for safety.
+    - **Diag Logs ON/OFF** buttons now show the current service state (glow/disable) and auto-refresh after toggling so it’s obvious whether diagnostics logging is enabled.
+  - 🧠 **NEW:** Managers → Server (SQLite) now marks AI-launched quick actions clearly (`[AI launched]`) and shows AI launch source metadata.
+    - AI launch metadata is preserved in quick-action status/history (`ai_triggered`, `ai_source`) and survives resume/reopen flows.
+  - 🐛 **FIXED:** Snapper Manager / cleanup now returns HTTP 200 with `rc` + output so the WebUI shows the full report even when Snapper returns non-zero (instead of a generic `HTTP 500`).
+  - 🧿 **IMPROVED:** Snapper Manager confirmations (like Cleanup) now use an in-page wizard-style modal (typed phrase → Run button unlock) instead of a browser popup prompt.
+    - Includes a **Copy output** button so the Snapper console log is easy to attach to bug reports.
+  - 🧵 **IMPROVED:** WebUI Snapper cleanup now runs as a **background systemd job** with **live log polling** (so long cleanups no longer look “stuck” at `Running: cleanup ...`).
+    - New localhost API endpoints: `/api/snapper/start` + `/api/snapper/job`.
+    - Also reduces expensive syntax-highlighting on huge logs to prevent UI freezes.
+  - ⚡ **IMPROVED:** Snapper WebUI execution paths are now lower impact:
+    - `/api/snapper/start` background units run with low-priority scheduling (`Nice=19`, idle I/O class) and low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
+    - `/api/snapper/run` direct execution now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
+  - 🧿 **NEW (danger):** WebUI Snapper Manager now supports **Rollback** (one-click recovery):
+    - Enter a snapshot ID and click **Rollback**.
+    - Confirmation phrase: **ROLLBACK** (typed in the in-page Snapper confirmation modal).
+    - Runs `snapper rollback <ID>` as a background systemd job (minimize + resume supported).
+    - After success: the UI shows **“reboot required”** (rollback changes root filesystem state).
+  - 🧰 **IMPROVED:** Snapper "Smart config sync" now detects when `/etc/snapper/configs` is on a read-only filesystem and skips tuning with clear hints (instead of emitting confusing backup errors).
+  - 🧰 **IMPROVED:** When Snapper config sync is skipped due to read-only mounts, the helper now prints automatic mount diagnostics (`findmnt` output) and the System Health Score will flag if `/` is mounted read-only.
+  - 🧨 **NEW (advanced):** `AUTO_REPAIR_TRY_REMOUNT_RW` (WebUI Settings toggle) can attempt `mount -o remount,rw` when `/` (or the Snapper config mount) is read-only. Default is **false** for safety.
+  - 🧰 **IMPROVED:** WebUI job polling (Rocket + self-update overlays) now retries across transient fetch/API errors instead of aborting on the first failure.
+  - 🧿 **NEW:** WebUI **Unusual Activity Watchers** now create persistent Notification Center alerts when:
+    - job polling gives up after too many reconnect attempts (Self-update / Rocket / Quick Actions / scrub-ghost)
+    - WebUI JavaScript errors are recorded in the persistent crash log
+    - (already existing) WebUI network/API errors occur (with issue-report guidance + diagnostics exporter)
+    - Includes quick link buttons: **Post issue** (GitHub Issues) and **Download diagnostics**.
+  - 🧰 **IMPROVED:** the **“🧪 JS health (debug)”** panel now includes a **Clear crash log** button to reset the persistent crash log stored in your browser.
+  - 🧪 **IMPROVED:** the **“🧪 JS health (debug)”** log is now persistent in your browser (localStorage) and keeps the last ~500 lines (with a Clear button).
+  - 🧵 **IMPROVED:** dashboard Recent Activity Log now uses **SSE (Server-Sent Events)** for live log updates when opened via `--dash-open` (Live mode), reducing fetch/polling churn and CPU usage (with automatic fallback to polling).
+  - 🧵 **IMPROVED:** WebUI overlay job log viewers now prefer **push streaming** (SSE-over-`fetch()` with auth headers) instead of 650–900ms polling loops:
+    - Rocket / system update (`system-dup`)
+    - Self-update
+    - Quick Actions
+    - scrub-ghost
+    - Snapper cleanup
+    - Fallback: if streaming isn’t supported or the stream errors, the existing polling logic is used automatically. On completion, the UI does a small bounded final fetch to show canonical results.
+  - ⚡ **IMPROVED:** WebUI log highlighting is now **debounced** during streaming/rapid updates (reduces UI freezes on large/fast logs).
+  - ⚡ **IMPROVED:** WebUI multi-tab detection now prefers **BroadcastChannel** heartbeats when available (reduces `localStorage` JSON churn).
+  - 🧰 **IMPROVED:** dashboard **Recent Activity Log → View: Verify/Repair** now appends a small **failure summary** (with extracted ERROR/WARN lines) when verification fails, so it’s easier to see what caused the failure.
+  - 🧠 **IMPROVED:** WebUI **AI Smart Report (offline)** now scans the same persisted log artifacts shown in **Recent Activity Log** (Live + Install/Verify/Diag tails + API log + journal tail) so bug reports include what you see in the dashboard.
+  - ⚡ **NEW:** `DASHBOARD_PERFORMANCE_MODE` (**powersaving** default) lets you choose **Performance / Balanced / PowerSaving**.
+    - Tunes WebUI polling cadence + bounded UI buffers (Recent Activity tail size + perf chart points) to avoid CPU/RAM hogging in long-lived tabs.
+    - Also adjusts `--dash-open` sync/perf worker cadence so background dashboard workers are lower-impact in PowerSaving mode.
+  - 🧾 **IMPROVED:** WebUI **Update manager (self-update)** now shows a detailed **Update preview** before install (release notes/commits + download URL + destination path) and a detailed **Verification** block after completion (refs + sha256 match).
+  - 🔒 **IMPROVED:** Switching self-update channel (**stable ↔ rolling**) now requires typing **`switchs`** (confirmation phrase **SWITCHS**) so you don’t accidentally downgrade/upgrade when changing channels.
+  - 🐛 **FIXED:** WebUI Settings token caching now auto-recovers on `401/403` by invalidating the cached token and retrying once (helps after API restarts / regenerated tokens).
+  - 🧹 **NEW:** Snapper Manager Full Cleanup now supports mode **`force-prune`** to proactively delete older snapshots while keeping the newest snapshots per snapper config.
+    - New WebUI/Settings key: `SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST` (Danger zone).
+    - Force-prune now respects the keep-newest preference (it does **not** depend on Snapper `TIMELINE_LIMIT_*` / `NUMBER_LIMIT` rules).
+  - 🧰 **IMPROVED:** Snapper CLI menu now exposes a **FORCE-PRUNE Cleanup** option (advanced) so it’s discoverable outside the WebUI.
+  - 🧰 **IMPROVED:** Snapper Manager actions run in **non-interactive mode** when triggered from the WebUI (no blocking prompts; confirmation handled by the WebUI typed phrase).
+  - 🐛 **FIXED:** WebUI Snapper cleanup no longer fails just because Snapper is busy (e.g. `snapper-cleanup.service` active).
+    - It now waits up to `SNAP_CLEANUP_BUSY_WAIT_SECONDS` (poll: `SNAP_CLEANUP_BUSY_POLL_SECONDS`) before refusing.
+    - Optional (danger): `SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE=true` can override and run anyway.
+  - 🐛 **FIXED:** Snapper cleanup busy detection no longer false-matches the helper’s own argv (`zypper-auto-helper snapper cleanup ...`).
+    - This prevented a bug where WebUI cleanup could get stuck in “busy wait” for the full timeout and then refuse, even when no other Snapper cleanup was actually running.
+  - 🧿 **NEW:** Snapper cleanup confirmation modal now includes a **Force low-space override** checkbox.
+    - When enabled for cleanup, WebUI sends `force_low_space=true`, and backend jobs export `ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1`.
+    - This provides an explicit, user-visible override path for low-space hysteresis/critical guard scenarios.
+  - 🧵 **IMPROVED:** repeated WebUI Snapper start requests are now **coalesced** onto an existing running Snapper job (same action), returning the existing `job_id` instead of spawning duplicate jobs.
+  - 🧹 **IMPROVED:** Snapper WebUI start now performs best-effort stale artifact cleanup (old `snapper-web-*.status/.log/.sh` files) and surfaces cleanup stats via `artifact_gc` in API responses.
+  - 🧰 **IMPROVED:** WebUI background job launch flow is now consolidated through a shared API helper (`_launch_background_systemd_job`) for `/api/self-update/start`, `/api/snapper/start`, and `/api/scrub/start`, keeping transient-unit startup/error/status handling aligned.
+  - 🧪 **IMPROVED:** contract coverage now asserts shared-launcher routing for self-update/snapper/scrub start paths and validates quick-action history payload constraints against the top-level shared quick launcher.
+  - 🧿 **NEW:** Snapper cleanup now supports an explicit **preflight API** (`GET /api/snapper/preflight?action=cleanup`) used by the WebUI before running cleanup.
+    - Preflight reports free-space thresholds, hysteresis latch state, and busy/zypp-lock signals.
+    - If cleanup is already running, the WebUI now reuses/reopens the active Snapper overlay instead of starting a duplicate job.
+  - 🗄️ **IMPROVED:** Snapper cleanup jobs now persist low-space guard telemetry into server history (force flag, guard reason, hysteresis flags, free/critical/high MB), and Managers → Server (SQLite) receives the same fields via history APIs.
+  - 🛡️ **IMPROVED:** server history upsert now enforces low-space telemetry as **snapper-only** metadata and strips those keys from non-snapper jobs (prevents cross-job contamination in Managers → Server).
+  - 🧪 **NEW:** added focused contract test `test_snapper_start_contract.py` to ensure `/api/snapper/start` success payloads always include `job_id`, `coalesced`, `artifact_gc`, and `preflight`.
+  - 🧰 **IMPROVED:** direct Snapper API runs (`/api/snapper/run`) now also honor cleanup `force_low_space` and propagate it into helper environment.
+  - ⚡ **IMPROVED:** Snapper cleanup now supports configurable **phase pacing** between heavy cleanup phases and force-prune delete batches (`SNAP_CLEANUP_PHASE_PACING_SECONDS`) to reduce burst load.
+  - 🧿 **NEW:** Managers → **Server (SQLite)** tab now uses visibility-aware auto-refresh pacing:
+    - Polling runs only while the Managers overlay is open and the Server tab is active.
+    - Visible tab uses faster cadence; hidden tab uses slower backoff.
+    - Poll timer stops when overlay closes/minimizes or when switching away from Server tab.
+  - 🧾 **IMPROVED:** Kernel package cleanup can now run during WebUI-triggered Snapper cleanup when `KERNEL_PURGE_ENABLED=true` (configurable in WebUI Settings).
+    - WebUI now shows a small **Kernel purge: true/false** status indicator (green/red) so it’s obvious whether the setting is enabled.
+    - New config: `KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE` (default: true) can run kernel cleanup automatically in Snapper cleanup mode `force-prune` even when `KERNEL_PURGE_ENABLED=false`.
+    - New config: `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED` (default: true) can run a safe `scrub-ghost` boot-menu hygiene pass after Snapper cleanup in mode `force-prune` (quarantines duplicates/stale snapshot entries; optional GRUB rebuild).
+  - 🧨 **NEW (danger):** Snapper Full Cleanup now supports removing an entire kernel <em>family</em> (flavor) via `KERNEL_FAMILY_PURGE_*` (force-prune only by default).
+    - The running kernel package provider is protected.
+    - Safety guard: kernel purge/family purge will refuse to run if it could leave the system with only one installed kernel.
+    - WebUI: Snapper Option 4 panel now includes a **Customize cleanup behavior** section to configure kernel purge / scrub-ghost hygiene / kernel family purge settings.
+    - WebUI layout update: Option 4 card now stays compact (mode selector + run button + status badges), and the full cleanup description/customization controls are shown in the cleanup confirmation modal.
+    - Added regression smoke test: `test_snapper_option4_modal_layout.sh` verifies Option 4 card stays compact and that `snopt-*` customization controls are modal-only.
+    - Snapper Manager Option 5/6 now also includes per-timer controls for `snapper-timeline.timer`, `snapper-cleanup.timer`, and `snapper-boot.timer` (individual enable/disable in addition to all-at-once).
+    - Snapper Manager timer badges now refresh immediately after successful enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, so status changes appear without waiting for dashboard sync polling.
+    - Snapper Manager Boot/EFI stats now show installed kernel inventory (kernel count + per-kernel package/version labels).
+    - Snapper Option 4 cleanup modal now includes a detected installed-kernel-family dropdown (`KERNEL_FAMILY_PURGE_TARGETS` helper) populated from `/api/boot/stats`, while keeping manual target input available.
+    - Snapper confirmation modal now auto-refreshes confirm tokens when they expire while the dialog is open (for both direct run and background start paths), preventing `missing/expired confirm token` failures after longer review/customization time.
+    - Added regression smoke test: `test_snapper_timer_controls_regression.sh` verifies per-timer Snapper controls are wired across WebUI, API, and helper subcommands.
+    - WebUI Settings drawer also includes the `KERNEL_FAMILY_PURGE_*` keys (Advanced + Danger zone).
+  - 🥾 **NEW:** Snapper Manager now shows **Boot/EFI storage + boot entry stats**:
+    - EFI/Boot usage: used% + (used/total) + a progress bar
+    - BLS entry file counts (total + snapper subset)
+    - GRUB entry counts (detects **GRUB BLS/blscfg mode** and shows effective entry count)
+    - After Snapper cleanup or scrub-ghost apply, it shows a best-effort **Δ affected by prune** (counts + percent change + approx freed space).
+    - Note: on systemd-boot installs (no `grub.cfg` present), GRUB stats will show **n/a** — you do *not* need to switch bootloaders just for this.
+    - Tip: click the **GRUB menu entries** tile for an explanation popup (what it means + why switching bootloaders is not recommended just to satisfy this stat).
+  - 🧹 **NEW:** Boot entry scrubber tool **scrub-ghost** is now embedded into `zypper-auto.sh` and installed automatically:
+    - CLI: `sudo zypper-auto-helper scrub-ghost --dry-run`
+    - Installed binaries: `/usr/local/bin/zypper-scrub-ghost` and `/usr/local/bin/scrub-ghost`
+  - 🧰 **NEW:** WebUI Snapper Manager now includes **Boot Entry Scrub (scrub-ghost)** actions (scan/auto/apply/list/validate/restore) via new Dashboard API endpoints (`/api/scrub/*`).
+    - **AUTO (recommended)** preselects safe backup mode + common prune options.
+    - Apply supports safe **backup** mode (move ghosts to backup) or dangerous **delete** mode, plus extra prune options.
+    - WebUI exposes additional advanced toggles (maps to scrub-ghost flags like no-remount-rw, verify toggles, path overrides).
+  - 🧿 **NEW:** WebUI **Ghost-Scrub Wizard (overlay)** (Rocket-style):
+    - Minimizable overlay window (bottom-right task bubble) with **live log output**.
+    - Runs scrub-ghost in a background `systemd-run` job so it can **resume polling after browser reload/crash**.
+    - Wizard groups flags into **recommended / advanced / danger zone**, and supports extra restore/validate/complete options (full CLI flag coverage; interactive-only modes remain copy-only).
+  - 🧰 **NEW:** WebUI **Managers** overlay (minimizable) for **Update manager + Rocket manager**:
+    - Replaces “every load” browser popups with a persistent **notification bell** + job history.
+    - Stores recent job IDs in the browser so you can reopen logs after installs.
+  - 🗄️ **NEW:** WebUI Managers **Server (SQLite)** tab (Dashboard API job history):
+    - Persistent across reloads/reboots and across browsers (server-side, not just `localStorage`).
+    - Supports search/filtering, basic stats (last 7 days), and a bounded log tail for fast searching.
+  - 📈 **NEW:** Managers → Server (SQLite) now includes a lightweight **timeline chart** (canvas; no external libs):
+    - Shows OK vs Fail counts per day.
+    - Filters: job type and day range (7/30/90).
+    - API: `/api/history/stats` now supports `job_type=` filtering (used by the chart).
+  - 🧠 **NEW:** Managers → Server now includes an **AI Smart Report (offline)** generator:
+    - Scans **recent log tails** under `/var/log/zypper-auto/*` and extracts ERROR/WARN lines.
+    - Also includes **recent failed jobs** from the local SQLite history (when available).
+    - Output is safe + bounded to avoid hogging CPU/RAM, and can be copied or downloaded as JSON.
+    - API endpoint: `POST /api/ai/smart-report` (requires `X-ZNH-Token`).
+    - New deterministic error→repair mapping output: `repair_plan` (selected quick action, confidence, evidence, confirmation requirements).
+    - Optional safe initiation path: request body `initiate_repair=true` can auto-start allowlisted no-confirm quick actions; confirmation-required actions are intentionally blocked and reported in `initiated_repair.blocked_reason`.
+  - 🧰 **IMPROVED:** quick-action spawning now uses one shared backend launcher for both manual `/api/quick/start` and AI smart-report initiation, so status files, logs, and history metadata stay aligned.
+  - 🧪 **IMPROVED:** contract tests now explicitly enforce that both quick-start and AI initiation routes go through the shared launcher path.
+  - 🗄️ **IMPROVED:** dashboard Recent Activity Log now includes a visible **SQLite viewer** button that jumps directly to **Managers → Server (SQLite)** for discoverability.
+    - Retention is controlled by `WEBUI_HISTORY_RETENTION_DAYS` (7/30/90) + a manual cleanup/integrity action in the Server tab.
+    - SQLite DB: `/var/lib/zypper-auto/dashboard-history.sqlite3`
+    - API: `GET /api/history/health`, `GET /api/history/jobs`, `GET /api/history/job`, `GET /api/history/stats`, `POST /api/history/cleanup`
+    - How to view history:
+      - Option 1 (easiest): **WebUI** → open dashboard → **Managers** → **Server (SQLite)** tab.
+      - Option 2 (advanced): query the API directly (requires token header `X-ZNH-Token`):
+        - Token file: `/var/lib/zypper-auto/dashboard-api.token`
+        - Example: `curl -H "X-ZNH-Token: $(sudo cat /var/lib/zypper-auto/dashboard-api.token)" http://127.0.0.1:8766/api/history/health`
+      - Option 3 (advanced): open the SQLite DB directly:
+        - `sudo sqlite3 /var/lib/zypper-auto/dashboard-history.sqlite3 'select job_id, job_type, rc, stage from jobs order by started_ts desc limit 20;'`
+  - 📚 **DOCS:** README now includes a dedicated **Boot Entry Scrub (scrub-ghost)** user guide section (workflow, guardrails, WebUI wizard behavior, log locations, and confirmation phrases).
+  - ⚡ **IMPROVED:** dashboard sync worker default interval reduced (now configurable via `ZNH_DASHBOARD_SYNC_INTERVAL_SECONDS`, default: 2s) so WebUI refreshes feel less laggy.
+  - ⚡ **IMPROVED:** dashboard sync worker now uses **idle backoff** (event-driven with inotify when available) so it uses less CPU when the dashboard is idle.
+    - Optional cap: `ZNH_DASHBOARD_SYNC_MAX_IDLE_SECONDS` (default: 30)
+  - 🐛 **FIXED:** dashboard sync worker now updates dashboard artifacts **atomically** (copy → rename) to prevent partial reads / JSON parse errors in Live mode.
+  - 🐛 **FIXED:** dashboard generator now writes `status.html` + `status-data.json` (and pre-rendered tail logs) **atomically** to avoid the sync worker ever copying a partial/truncated file.
+  - 🐛 **FIXED:** dashboard Live mode poller now parses `status-data.json` more defensively (lenient JSON recovery) and avoids recording transient poll failures as persistent WebUI crash logs.
+  - ⚡ **IMPROVED:** dashboard Live mode polling now uses non-overlapping `setTimeout` loops with in-flight guards to avoid fetch request pile-up on slow responses.
+  - 🐛 **FIXED:** dashboard Live mode no longer auto-reloads the entire page on repeated polling failures (prevents reload loops + losing visible log output); it pauses Live mode and shows a hint instead.
+  - ⚡ **IMPROVED:** dashboard sync worker now prefers **inotify-driven** sync when available (instant updates on file changes; timeout fallback).
+  - 🐛 **FIXED:** dashboard sync worker now includes an **inotify debounce** (prevents CPU spikes during rapid log writes).
+  - 🐛 **FIXED:** stopping dashboard workers now also kills child watcher processes (prevents orphaned/zombie inotify processes).
+  - 🐛 **FIXED:** Rocket Update Wizard job polling now uses recursive `setTimeout` scheduling (avoids interval-style lag/stuck behaviour under load).
+  - 🐛 **FIXED:** Dashboard API now self-cleans transient Rocket Update unit scripts (`/var/lib/zypper-auto/webui-dup-*.sh`) to prevent disk clutter over time.
+  - ⚡ **IMPROVED:** Live log view now prefers **append rendering** when possible (reduces DOM churn / scroll jank).
+  - 🐛 **FIXED:** dashboard now applies stored theme in the `<head>` (prevents “flash of wrong theme” on load).
+  - 🐛 **FIXED:** Dashboard API confirm-token cache is now protected by a lock to prevent crashes under concurrent clicks / multiple tabs.
+  - 🛡️ **NEW:** dashboard WebUI now detects when it’s open in **multiple tabs/windows** and **hard-blocks** the page with a warning until you close the other tab(s) and reload.
+  - 🐛 **FIXED:** multi-tab hard-block now guards against accidental blank screens by hiding `#main-content` only when the blocker page is actually visible, and by self-healing if both blocker + main content are hidden.
+  - 🧪 **NEW:** added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init calls).
+  - 🧪 **NEW:** added focused static regression `test_self_update_bg_notify_wiring_regression.sh` to guard `_wireSelfUpdateUI` `bgNotifyBtn` declaration/ordering safety (declaration before guard/listener usage and no stale pre-declaration guard), preventing recurrence of `ReferenceError: bgNotifyBtn is not defined`.
+  - 🧪 **NEW:** added focused static regression `test_self_update_channel_autodetect_hash_fallback_regression.sh` to guard `run_self_update_only` channel auto-detection (`last_update_channel`/`install_source` state metadata) and stable+rolling content-hash truth fallback wiring.
+  - 🧪 **NEW:** added optional Playwright runtime regression `test_webui_blank_guard_playwright_regression.py` that executes extracted WebUI multi-tab guard functions in-browser to verify both-hidden recovery, missing-blocker safety, and `_znhMiTick` guard invocation.
+  - 🧰 **IMPROVED:** Snapper cleanup now supports **minimize + resume** via the bottom-right job bubble (useful for long cleanups).
+  - 🧰 **IMPROVED:** scrub-ghost (in-page Run button) now runs confirmed actions as a **background job** and opens a minimizable overlay viewer (same bubble/resume behavior as the wizard).
+  - 🧯 **NEW:** WebUI panic screen (blue-screen style): if the UI freezes/crashes during long-running jobs, it shows a full-page warning with **Copy issue report** + **Download diagnostics (JSON)** + **Open GitHub issues**.
+  - 🧯 **IMPROVED:** Panic screen now also catches **“almost freeze”** stalls during running jobs and saves an **aftermath report** locally.
+    - After you reload, Notification Center will show: **“Previous WebUI crash/freeze detected”** with a one-click **Open report** button.
+    - Panic screen now includes **Quick report** vs **Full report** + **Download report (.txt)**.
+  - 🐛 **FIXED:** reduced UI freezes during huge Snapper/scrub output by bounding log rendering and skipping redundant updates.
+  - 🐛 **FIXED:** `--dash-open` dashboard HTTP server now sends **no-cache headers** so `status.html` updates after installs without requiring a hard refresh.
+  - 🔒 **IMPROVED:** dashboard API subprocess execution now uses a minimal allowlisted environment (avoids leaking inherited vars when invoked via `sudo -E`).
+  - 🧰 **IMPROVED:** `--dash-open` local dashboard HTTP server now prefers a `ThreadingHTTPServer` implementation for better parallel fetches (falls back to legacy `python3 -m http.server`).
+  - 🔒 **FIXED:** local dashboard HTTP server no longer exposes `dashboard-token.txt` (token is now passed via URL fragment and stored in localStorage; server blocks token/pid/err/port files).
+  - 🧯 **FIXED:** user-visible `dashboard-live.log` is now capped to the most recent ~2500 lines by the sync worker to prevent browser/resource blow-ups.
+  - 🖱️ **IMPROVED:** Recent Activity log polling no longer fights the user’s scroll position (updates are staged while scrolled up).
+  - 🐛 **FIXED:** Recent Activity log polling no longer clears the visible log output when a log file is temporarily missing/empty (HTTP 404/416); it keeps the last visible text until the file is available again.
+  - 🧰 **IMPROVED:** When `DASHBOARD_JS_VERBOSE_DEBUG=true`, the WebUI now forwards extra telemetry into `dashboard-api.log`:
+    - UI interactions (click/change metadata)
+    - Settings API request/response traces (method/path/status/duration)
+    - JS runtime crashes (uncaught errors + unhandled promise rejections)
+    - Optional: Console forwarding (URL: `&console=1` for warn+error, or `&console=all` for log+warn+error)
+      - UI toggle: **Recent Activity Log → “🧪 JS health (debug)” → “Console forward”** button (cycles **OFF → WARN+ERR → ALL**; persisted in `localStorage`; active only when verbose debug is enabled)
+  - 🧰 **IMPROVED (dev/forensics):** default `/etc/zypper-auto.conf` template now documents ultra-verbose backend knobs:
+    - `ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1` (persist stdout/stderr even on successful commands)
+    - `ZYPPER_AUTO_DEBUG_LEVEL=trace` (enable maximum backend trace logging)
+    - New optional hook template: `/etc/zypper-auto/hooks/pre.d/99-debug-dump.sh.example`
+  - 🧪 **DEV (advanced):** Debug HUD overlay is available in the dashboard:
+    - Toggle: `Ctrl+Alt+H` (or `Ctrl+Backquote`)
+    - URL: `&hud=1` auto-opens it
+    - URL: `&domflash=1` highlights UI elements when they update (render tracing)
+  - 🧿 **NEW:** when a Self-update or System Update job is running, the dashboard shows a bottom-right “background job bubble” (spinner + name like “Update system”) so accidental overlay closes don’t lose the running job view.
+  - 🐛 **FIXED:** after a successful System Update (Rocket Wizard), the dashboard immediately updates Pending Updates → `0` (and triggers a dashboard refresh) so the counter doesn’t appear stuck.
+  - 🐛 **FIXED:** Rocket Update Wizard preview now syncs the dashboard pending count when zypper reports **"Nothing to do"** (it updates the cached dry-run output under `/var/log/zypper-auto/dry-run-last.txt` and applies a short-lived UI override in Live mode to avoid stale counts).
+  - 🧰 **IMPROVED:** Rocket Update Wizard preview now also returns a `reboot_required` flag so the WebUI can say “Up to date, but reboot required” when applicable.
+  - 🟡 **CHANGED:** dashboard now shows **Reboot Required** as a separate warning badge (via `reboot_required` in `status-data.json`) instead of encoding it as `FAILED: Reboot Required` in `last-status.txt`.
+  - 🔒 **NEW:** dashboard header now shows a **Zypper lock badge**, and live mode exposes `zypp_lock_*` fields in `status-data.json`.
+  - 🐛 **FIXED:** dashboard log auto-scroll uses zoom/subpixel-safe bottom detection to reduce flaky “stuck scroll” behaviour.
+  - 🧰 **IMPROVED:** Self-Update status API now returns a consolidated `evaluation.action_type` + message so the WebUI doesn’t need to guess (update vs install vs switch).
+  - 🧰 **IMPROVED:** Self-Update now detects "managed by system" installs (outside `/usr/local/bin/`) and disables self-update to avoid overwriting OS/RPM-managed files (enforced in both WebUI and localhost API endpoints).
+  - 🧰 **IMPROVED:** Self-Update state now tracks installed helper SHA256 so the WebUI can warn on **(local edits)** before overwriting manual changes.
+  - 🧭 **IMPROVED:** `zypper-auto-helper --self-update` without an explicit channel now auto-detects the currently installed channel (`rolling`/`stable`) from self-update state metadata (`last_update_channel`/`install_source`) before falling back to config defaults.
+  - 🧠 **IMPROVED:** self-update now applies a content-hash truth fallback for both stable and rolling refs: when remote ref metadata changes but downloaded helper payload is byte-identical, it seeds state and reports up-to-date instead of repeatedly attempting no-op updates.
+  - 🧰 **IMPROVED:** Self-Update panel now shows a short detail line (server-side reason text) under the buttons for clearer UX.
+  - 🧰 **IMPROVED:** Rolling channel now has a checksum fallback for raw script installs: when no git SHA is known, the API hashes the installed helper and the remote `main` script and compares them to decide up-to-date vs update available (eliminates “unknown install” false positives).
+  - 🧰 **IMPROVED:** Self-update CLI now blocks overwriting **local manual edits** unless you pass `--force` (hash mismatch trap).
+  - 🧰 **IMPROVED:** Self-update CLI now refuses to overwrite system-managed paths like `/usr/bin` and `/bin` (use your package manager or reinstall into `/usr/local/bin`).
+  - 🧰 **IMPROVED:** Rolling self-update CLI now supports a raw-script hash-match fallback: if local content matches remote rolling exactly, it seeds the rolling SHA into state (prevents “unknown SHA → update available” loops).
+  - 🧰 **IMPROVED:** Self-update now has a concurrency guard (`flock`) so double-clicks / multiple terminals can’t run two updates at once.
+  - 🧰 **IMPROVED:** Self-update backups now also snapshot `/etc/zypper-auto.conf` alongside the script backup for safer rollback.
+  - 🧰 **IMPROVED:** Self-update now prunes old backup archives (keeps the most recent backups) to prevent disk bloat over time.
+  - 🧰 **IMPROVED:** Self-update download logic now retries on transient network failures to reduce flaky-connection failures.
+  - 🧰 **NEW:** `--self-update-rollback` restores the most recent self-update backup (script + config snapshot).
+  - 🧰 **FIXED:** Rocket Update Wizard (system updates) can now resume job polling after a dashboard API restart, avoiding "job not found" reconnect loops.
+  - 🧰 **FIXED:** WebUI Self-Update now runs in a dedicated transient systemd unit and can resume polling after a dashboard API restart (no more "job not found" during GitHub downloads).
+  - 🛡️ **IMPROVED:** WebUI Self-Update is now *fool-proof locked* against mid-flight channel switching: while a self-update status check is running (or while the update job itself is running), the UI disables Stable/Rolling switching and the API rejects `SELF_UPDATE_CHANNEL` changes until the job finishes.
+  - 🧿 **NEW:** Self-update panel shows a visible **LOCKED** badge during checks/runs so users understand why buttons are disabled.
+  - 🧾 **IMPROVED:** after a successful self-update, the post-reload “Update installed successfully” dialog now preserves the live log tail (and offers a Copy button) and adds a short “Verified:” message when checksums/tags match.
+  - 🧾 **IMPROVED:** the post-success dialog notes header is now channel-aware (shows **Rolling commits** when on rolling, and **Stable release notes** when on stable), so it’s obvious what you’re looking at.
+  - 🧰 **NEW:** self-update install step now has an **After update** mode: Quick update only, Verify & Fix (recommended), or Full install (recreate services/wrappers).
+  - 🧠 **NEW:** Self-update status now computes **layered SHA256 fingerprints** for key helper sections and returns `post_action_recommendation` (`none` / `verify` / `install`) with reason + changed layers + `confidence` + `risk_level`.
+  - 🧿 **IMPROVED:** Self-update install overlay now preselects the **After update** mode automatically, shows an expandable **Why recommended?** explanation (plain-language changed-layer labels), and warns visibly when manual post-action override deviates from recommendation.
+  - 🧭 **IMPROVED:** Self-update recommendation metadata now supports `switch_to_rolling` when install-origin evidence indicates rolling-commit lineage while stable remains configured.
+  - 🧾 **IMPROVED:** Self-update status payload now includes explicit install-origin + channel-advice objects (`install_origin`, `channel_recommendation`), and the WebUI surfaces this context in status detail/verification text.
+  - 🧭 **IMPROVED:** Stable self-update semantics are now explicit-policy driven (`SELF_UPDATE_STABLE_POLICY=release|candidate|prerelease`) with provenance surfaced end-to-end (selected policy, fallback reason, source URL(s)) across backend API, CLI self-update flow, and WebUI release-notes/changelog fetchers.
+  - 🧰 **IMPROVED:** Snapper WebUI timer status API now reads authoritative systemd state directly (`systemctl show` + `is-enabled` + `is-active`) and includes richer per-timer truth fields (`next_trigger_utc`, `last_trigger_utc`, `last_result`, `partial_reason`) alongside compatibility state fields.
+  - 🧪 **NEW:** Added runtime API regression coverage (`test_self_update_api_runtime_regression.py`) for mocked failure paths: GitHub rate-limit/selection failures, missing remote script fingerprints, ambiguous section markers, and missing Snapper timer units.
+  - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
+  - 🧠 **IMPROVED:** Rolling self-update status is now **content-based** (SHA256 compare of installed helper vs remote raw script), so docs-only commits won’t trigger fake “Update available” prompts.
+  - 🧰 **IMPROVED (advanced):** when Advanced settings are unlocked, the self-update panel shows a small technical line (remote raw path + short SHA256 prefixes) so you can verify exactly what it compared.
+  - 🛡️ **IMPROVED:** Dashboard API now blocks starting a second self-update job while one is already running (prevents double-click / multi-tab damage).
+  - 🧰 **IMPROVED:** Rocket Update Wizard now exits early when there are no updates ("Nothing to do"), instead of asking for confirmation.
+  - 🧰 **IMPROVED:** Rocket Update Wizard now waits for the zypp/zypper lock (e.g. YaST, packagekit, background refresh) instead of failing instantly.
+  - 🧰 **IMPROVED:** Rocket preview now detects common solver-conflict patterns and shows a dedicated "Conflict detected" warning in the WebUI.
+  - 🧰 **IMPROVED:** Rocket conflict guidance now includes explicit `sudo zypper dup --allow-vendor-change` fallback instructions and solver-choice quick guidance (`1/2/3/4`) directly in both preview and final result conflict panels.
+  - 🎨 **IMPROVED:** Rocket conflict warning visuals now include a pulsing red danger indicator to better surface manual-intervention-required states.
+  - 🧰 **IMPROVED:** Rocket result conflict panel now exposes one-click solver choice helper buttons (`1`, `2`, `3`, `4`) matching zypper prompt options, with copy/toast feedback.
+  - 🎛️ **NEW (advanced):** Rocket Wizard setting `ROCKET_WIZARD_ALLOW_VENDOR_CHANGE` adds `--allow-vendor-change` to Rocket preview + install runs (useful for vendor-switch conflicts).
+  - 🛡️ **IMPROVED:** In Rocket preview, enabling vendor change is now gated behind the **manual-intervention acknowledgement** checkbox (so you must explicitly confirm you understand solver conflicts before turning it on).
+  - 🧪 **IMPROVED:** Rocket **Simulation mode** is now labeled as a **dry-run test** (clearer button label + a short note explaining what it tests).
+  - 🎨 **IMPROVED:** Dashboard header Rocket button flame effect is now aligned diagonally with the rocket icon (clearer “thrust” look during downloads/refresh).
+  - 🔁 **IMPROVED:** "Run: Refresh Dashboard" now schedules an **auto-reload** with a visible **countdown** (so it’s clear when the refreshed dashboard will load).
+  - 🧠 **IMPROVED:** The "Dashboard update available" banner now only triggers for **newer helper/UI builds** (not for normal timer-based dashboard regenerations).
+  - 🧰 **IMPROVED:** WebUI self-update status polling is now more resilient to brief localhost API restarts/outages (auto-retries "Failed to fetch" a couple of times and shows clearer guidance for file:// or non-localhost origins).
+  - 🧾 **IMPROVED:** When Rocket install fails due to solver conflicts, the Result view now shows an interactive fallback command (copyable) so you can run `zypper-run-install` (recommended) or `sudo zypper dup` and choose a solution.
+  - 🧰 **IMPROVED:** Rocket Update Wizard now supports real progress percentages via zypper `--xmlout` (WebUI still shows readable logs via best-effort XML text extraction).
+  - 📈 **IMPROVED:** Rocket system-update progress now emits explicit stage markers across install flow (`running-zypper`, optional updates, restart check, dashboard refresh, finalizing) so progress no longer appears stuck at early percentages and now reaches clean completion behavior.
+  - 🔄 **IMPROVED:** Rocket post-install flow now performs a best-effort dashboard refresh trigger so pending-update counters and status cards converge faster after successful installs.
+  - 🎛️ **NEW:** Rocket Wizard now has WebUI Settings defaults (and allowed values) for common behaviors:
+    - `ROCKET_WIZARD_DEFAULT_SIMULATE` (opens with Simulation mode pre-selected by default)
+    - `ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS` + `ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS` (lock wait timeouts)
+    - `ROCKET_WIZARD_MIN_FREE_MB` (pre-flight safety: blocks Rocket install if / is critically low)
+    - `ROCKET_WIZARD_USE_XMLOUT` (toggle xmlout progress mode)
+    - `ROCKET_WIZARD_FORCE_RESOLUTION` (dangerous: adds `--force-resolution`)
+  - 🧾 **IMPROVED:** Rocket job log tail shown in the WebUI is now XML-prettified (more readable when `--xmlout` is enabled).
+  - 🛡️ **IMPROVED:** When `ROCKET_WIZARD_FORCE_RESOLUTION=true`, the Rocket Wizard now requires an extra typed confirmation inside the wizard ("I UNDERSTAND") before enabling Install.
+  - 🎚️ **IMPROVED:** Progress bars now use smoother width easing and show a subtle pulse animation for waiting/reconnecting stages.
+  - 🛡️ **IMPROVED:** WebUI Settings drawer now hides **Advanced** settings by default, requires typing a confirmation phrase (`ADVANCED`) to reveal them (per page load), requires an explicit temporary **Unlock danger zone** toggle, and (hard mode) each dangerous setting change requires typing its own confirmation phrase (example: `REMOUNT`, `FORCE`).
+  - 🧰 **IMPROVED:** `Enable Dev Mode / Logs` now also gates Settings drawer visibility, so advanced controls and settings stay hidden together for non-technical users until explicitly enabled.
+  - 🧪 **IMPROVED:** Verification checks now include conditional Flatpak corruption repair (`flatpak repair --dry-run --system` probe, repair only when corruption indicators are detected), avoiding unnecessary repair runs on healthy systems.
+  - 🧰 **IMPROVED (optional/CI):** the helper now includes a `__ZNH_EMBEDDED_SHA=\"unknown\"` placeholder. If you stamp it during release builds (GitHub Actions), rolling installs done via raw script copy can still know their exact build SHA even without a `.git` folder.
+
+- **v70** (2026-02-18): **Revolutionary: Rocket Update Wizard + Smart Optional Updates**
+  - 🧾 **Release notes page:** `~/Desktop/v70`
+  - 🚀 **Revolutionary:** Rocket Update Wizard (preview → confirm → run → stream logs → restart check) + dedicated Dry-run simulation mode.
+  - ⚡ **Revolutionary:** Optional post-update refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when there are no system updates (`OPTIONAL_UPDATES_ALWAYS_REFRESH=false` by default).
+  - 🧵 **IMPROVED:** Dashboard Settings API is now **multi-threaded** so slow requests (large logs, Snapper actions) don’t freeze the whole dashboard UI.
+  - 🧷 **FIXED:** Dashboard API command output decoding is now forced to UTF‑8 with replacement to avoid crashes on weird/binary log data.
+  - 🐛 **FIXED:** self-update overlay readability (proper modal background, improved scrolling, and consistent warning banner styling).
+  - 🐛 **FIXED:** suppressed noisy "Read-only file system" errors when mirroring `dashboard-live.log` into the user dashboard directory (best-effort under systemd hardening / read-only home mounts).
+  - 🐛 **FIXED:** Soar detection in `zypper-with-ps` now works correctly when the wrapper is launched via `sudo`/`pkexec` (detects per-user installs under `~/.local/bin` / `~/pkgforge` and runs Soar as the invoking user).
+  - 🚀 **NEW:** Command Center rocket button is now **animated** in Live mode (downloading / complete / error states) and opens a **Rocket Update Wizard**: preview `zypper dup --dry-run --details`, confirm via checkbox + phrase, stream install logs + progress, then show `zypper ps -s` restart check.
+  - 🧪 **NEW:** Rocket Update Wizard supports an explicit **Dry-run simulation** mode in the WebUI:
+    - Quick Action: **“Simulate: System Update (Dry-run)”** opens the wizard with simulation pre-selected.
+    - URL auto-open: `status.html?live=1&ru=1&ru_dry=1` (opens wizard in dry-run simulation mode).
+  - 🧰 **IMPROVED:** Snapper status output now clearly shows timer *enabled vs active* (avoids confusion with `systemctl list-unit-files` “STATE PRESET” columns like `enabled disabled`).
+  - ⚡ **NEW:** optional post-update app refresh steps (Flatpak/Snap/Soar/Brew/pipx) can now be CPU-saving when no system updates occurred:
+    - New config: `OPTIONAL_UPDATES_ALWAYS_REFRESH` (and WebUI Settings toggle)
+    - Default: only run optional app refresh steps when `zypper dup` actually changed system packages (skips when zypper prints "Nothing to do.")
+  - 🔄 **IMPROVED:** verification now surfaces a **“Reboot Required”** status in the dashboard when a reboot is pending after kernel/core updates.
+  - ⏱️ **IMPROVED:** after critical auto‑repairs (like restarting the dashboard API), a one‑off follow‑up verification is scheduled ~5 minutes later.
+  - 📈 **NEW:** dashboard performance charts (CPU% + memory) for helper services when opened via `--dash-open` (Live mode reads `perf-data.json`).
+  - 🧰 **IMPROVED:** dashboard now shows the **last verify/auto-repair counts** (auto-repairs executed / remaining issues) in the Service Health panel.
+  - 🐛 **FIXED:** dashboard Live mode now parses downloader `complete:DURATION:PKGS` correctly and shows clearer text when no new downloads were needed (already cached / detect-only).
+  - ⚡ **IMPROVED:** background services now also include **systemd resource caps** (CPU/IO weight + memory high/max) to further reduce performance spikes.
+  - ⚡ **IMPROVED:** downloader progress tracker is now **event-driven** when `inotifywait` is available (from `inotify-tools`). It sleeps indefinitely until cache files change (with a 300s timeout fallback).
+  - ⚡ **IMPROVED:** downloader metered-network checks are now **cached** (short TTL) to avoid calling `nmcli` on every minutely run when the network state is stable.
+  - ⚡ **IMPROVED:** cache cleanup is now **triggered** by real activity: a marker file is created after real downloads / successful installs, and `zypper-cache-cleanup.service` only runs when that marker exists.
+  - ⚡ **IMPROVED:** dashboard components are now true "background" priority:
+    - dashboard API unit includes systemd CPU/IO/memory caps + low priority
+    - dashboard HTTP server + sync/perf workers run with best-effort `ionice -c3` + `nice(19)` (when tools are available)
+  - 🖥️ **IMPROVED:** `--dash-open` now auto-refreshes the dashboard when it is missing or outdated (so new dashboard/UI changes are applied automatically).
+  - 🧰 **IMPROVED:** auto-repair (`--verify`) now also detects stale/missing dashboard artifacts and regenerates the dashboard automatically.
+  - 🧰 **IMPROVED:** auto-repair (`--verify`) now probes the Dashboard API via `GET /api/ping` and will restart the API service if needed so new WebUI endpoints (like dashboard refresh) work immediately after upgrades.
+  - 🖱️ **NEW:** dashboard Quick Actions now include **Run: Refresh Dashboard** (WebUI button) to regenerate dashboard artifacts through the localhost API.
+  - 🐛 **FIXED:** dashboard API systemd hardening now allows safe logging + snapper actions:
+    - `ProtectHome=read-only` (instead of `true`) so user home paths are visible when needed
+    - `ReadWritePaths` now includes `/var/log/zypper-auto` so the API can create `/var/log/zypper-auto/service-logs/dashboard-api.log`
+    - auto-repair (`zypper-auto-helper --verify`) will patch older/broken unit files automatically
+  - 🧰 **IMPROVED:** Snapper menu and dashboard now show **snapper timer status** (`snapper-*.timer`) with the same green/yellow/red state colors as the AUTO option.
+  - ⚡ **IMPROVED:** installer log cleanup trims uncompressed `install-*.log` files using a single directory scan (avoids repeated `find | wc -l` passes).
+  - 🧹 **IMPROVED:** `zypper-auto.sh` now passes `shellcheck -x` cleanly (removed `ls`-based file listings, removed truly-unused variables, and suppressed the one unavoidable config-source follow warning).
+  - ⚡ **IMPROVED:** auto-repair (`--verify` timer/service) now runs early after boot by default:
+    - First run occurs ~30 seconds after boot (instead of waiting a full interval)
+    - Default interval is now **5 minutes**
+    - The verification service runs at low/background CPU/I/O priority to avoid desktop performance spikes
+  - 🔐 **IMPROVED:** installing now also drops a Polkit action file so `pkexec` prompts for "System Verification and Repair" look trusted/official (instead of a generic "run /usr/local/bin/..." prompt). The uninstaller removes it.
+  - 🩺 **IMPROVED:** `zypper-auto-helper --verify` now also verifies the dashboard desktop/start-menu shortcut and auto-regenerates it if it was deleted or is outdated.
+  - 🖥️ **IMPROVED:** desktop/start-menu dashboard shortcut Quick Actions now have better UX:
+    - **Check Now** shows a desktop bubble (when `notify-send` exists) before waking the notifier service.
+    - **Install Updates** and **Health Report** now keep the terminal window open until you press Enter.
+  - 🔔 **FIXED:** the "Updates Ready" notification no longer re-appears while you are already installing updates (install action now suppresses notifier popups via an install-in-progress marker; configurable via `INSTALL_CLICK_SUPPRESS_MINUTES`).
+  - 🐟 **FIXED:** `zypper-auto-helper --show-logs/--show-loggs` no longer crashes with `local: can only be used in a function`.
+  - 🧰 **IMPROVED:** dashboard Recent Activity log now also includes a **Verify/Repair** view (tail of `verify.log`) so auto-repair runs are visible in the timeline.
+  - 🧾 **NEW:** optional kernel package cleanup via `zypper purge-kernels` after Snapper cleanup (disabled by default; respects `/etc/zypp/zypp.conf:multiversion.kernels`).
+  - 🥾 **NEW:** boot-menu hygiene: Snapper cleanup can prune old systemd-boot/BLS entry files to keep the boot menu clean (backup/delete modes).
+  - 🗂️ **IMPROVED:** `--show-logs` now prints a clickable `file://...` path (highlighted in color when supported) and uses the same robust folder opener as the debug menu (tries `xdg-open`, `systemd-run --user`, and common file managers).
+  - 🎛️ **IMPROVED:** debug menu option **5** always prints a clickable `file://...` link even when auto-open succeeds/fails, so you can open the folder manually.
+  - 🐬 **IMPROVED:** folder opener logic now tries KDE tools first (`kioclient5` / `kde-open5`) and falls back to XFCE openers (`exo-open`, `xfce4-open`), `xdg-open`, `gio open`, and common file managers (Dolphin, etc.). The folder opener self-test now correctly detects tools under `sudo`.
+  - 🧹 **IMPROVED:** Snapper menu cleanup now runs a full cleanup (`number`, `timeline`, `empty-pre-post`) across all snapper configs (root/home/etc.). Auto-timers now sync Snapper config files so timeline/boot timers actually create snapshots.
+  - 🛡️ **IMPROVED:** Snapper auto-timers now include preventative self-healing: when enabling timers, it caps overly aggressive retention limits in `/etc/snapper/configs/*` to safer desktop maxima (only lowers values; never increases them) to reduce the risk of disk filling up before cleanup runs.
+  - 🧹 **IMPROVED:** Snapper cleanup now has extra safety and feedback: it checks for concurrent background cleanup, warns when disk free space is critically low (btrfs metadata safety), and reports approximate free-space reclaimed after cleanup.
+  - 🧠 **IMPROVED:** Snapper menu "Full Cleanup" now also does the same smart config sync + retention-cap tuning used by the AUTO timers option (best-effort, interactive-only).
+  - 🧯 **NEW:** optional Snapper cleanup Deep Clean step (broken snapshot hunter) + btrfs balance tip for emergency space recovery.
+  - 🧽 **NEW:** optional “System Deep Scrub” extras after Snapper cleanup: zypper cache clean, journal vacuum, and user thumbnail cache cleanup.
+  - 🧰 **NEW:** optional btrfs maintenance timer auto-enable (scrub/balance/trim) when using Snapper AUTO enable.
+  - 📸 **IMPROVED:** verification/auto-repair safety snapshots (Snapper pre/post) are now guarded with a timeout so the helper won’t hang indefinitely if `snapper create` is slow (e.g. lots of snapshots / filesystem contention). When supported, it also prefers `snapper --no-dbus` to reduce the risk of snapperd/D-Bus hangs. It warns and continues without a snapshot if it times out.
+  - 🧾 **IMPROVED:** Snapper menu/status now prints whether it’s using `snapper` via D-Bus or `snapper --no-dbus` (helps debug hangs).
+  - 🧹 **IMPROVED:** legacy cleanup operations (missing old systemd units, `pkill` when no processes exist) are no longer logged as `[ERROR]` in diagnostics; they are treated as optional/warnings to reduce noise.
+  - 🟡 **CHANGED:** some internal "⚠ Warning" conditions now log as `[WARN]` instead of `[ERROR]` so diagnostics reflect severity more accurately.
+
+- **v64** (2026-02-10): **Command Center Dashboard + Power-Safety + Dependency UX**
+  - 🖥️ **NEW: Live "Command Center" HTML dashboard** – modern UI with dark/light mode, quick-copy actions, service health, downloader progress, and live polling via `status-data.json` + `download-status.txt`.
+  - 🧾 **NEW: Dashboard live logs + log view switching** – dashboard can follow `dashboard-live.log` and switch Recent Activity views (Live / Logs tail / Verify/Repair / Diagnostics / API / journalctl).
+  - 🔋 **IMPROVED: Power safety detection** – installer now ensures `upower` is installed and the notifier uses `/sys/class/power_supply` fallbacks (then upower) for more reliable AC/battery detection.
+  - ✅ **IMPROVED: Dependency prompt UX (default Yes)** – missing required dependencies now prompt with `[Y/n]` (recommended).
+  - 🧰 **NEW: Recommended dev tool prompt** – offers to install `ShellCheck` (optional, default Yes) to help maintain bash code quality.
+
+- **v63** (2026-02-08): **Dashboard Live Mode & Local Serve/Open Workflow**
+  - 🌐 **NEW: `--dash-open` / `--dash-stop` workflow** – starts/stops a local HTTP server so the dashboard can fetch live data (avoids `file://` fetch restrictions).
+  - 🔁 **IMPROVED: Live polling pipeline** – dashboard polls JSON status + downloader progress and updates UI in place.
+
+- **v62** (2026-01-21): **State Reset Helper & Typo-Safe CLI**
+  - 🧼 **NEW: Download/notifier state reset helper** – `zypper-auto-helper --reset-downloads` (alias: `--reset-state`) now clears downloader state files (`download-status.txt`, `download-last-check.txt`, `download-start-time.txt`, `dry-run-last.txt`) and user notifier caches (`last-run-status.txt`, `last_notification.txt`, etc.), then reloads and restarts the core timers/services. This is a safe, "soft" reset for fixing stale "X updates pending" notifications without reinstalling.
+  - 🧯 **IMPROVED: CLI safety for typos** – unknown option-like arguments (such as `--bre` or `-reset`) are now rejected **before** any installation/sanity work runs, printing a short "Unknown option" message and a pointer to `--help` instead of silently falling back to a full install.
+
+- **v61** (2026-01-09): **pipx Integration, Reminder Controls & Smarter Download Completion**
+  - 🐍 **NEW: pipx helper and automatic upgrades** – added a dedicated `zypper-auto-helper --pip-package` (alias: `--pipx`) mode that installs `python3-pipx` via zypper (on request), runs `pipx ensurepath`, and can optionally run `pipx upgrade-all` for the target user. This makes pipx the recommended/default way to manage Python command‑line tools like `yt-dlp`, `black`, `ansible`, and `httpie`.
+  - 📦 **NEW: Config‑driven pipx post‑update step** – a new `ENABLE_PIPX_UPDATES` flag in `/etc/zypper-auto.conf` controls whether the zypper wrapper (`zypper-with-ps`) and the Ready‑to‑Install helper (`zypper-run-install`) run `pipx upgrade-all` after each `zypper dup`, so your pipx‑managed tools stay in sync with system updates.
+  - 🔔 **NEW: Reminder control flags** – added `LOCK_REMINDER_ENABLED`, `NO_UPDATES_REMINDER_REPEAT_ENABLED`, and `UPDATES_READY_REMINDER_REPEAT_ENABLED` so you can choose whether lock notifications, "No updates found" messages, and "Updates ready" popups repeat on every check or only once per state.
+  - 🩺 **NEW: Configurable auto‑verification timer & repair notifications** – added `VERIFY_TIMER_INTERVAL_MINUTES` to control how often the root health‑check service runs (using the same minute‑based presets as other timers) and `VERIFY_NOTIFY_USER_ENABLED` to toggle a short desktop notification whenever the periodic auto‑repair fixes at least one issue.
+  - 🛠️ **IMPROVED: Auto‑repair robustness** – the verification helper now resets failed states on the core systemd units before attempting repairs, cleans up stale `/run/zypp.pid` locks when the recorded PID is no longer running, and runs `zypper clean --all` when free space on `/` falls below ~1 GiB (with a follow‑up check).
+  - 🧠 **IMPROVED: "Downloads Complete" notification logic** – the notifier now re‑runs `pkexec zypper dup --dry-run` when it sees a `complete:` status from the downloader and **suppresses** the "✅ Downloads Complete!" popup if zypper reports "Nothing to do." This prevents misleading completion notifications after you have already installed all updates manually.
+  - 🧹 **FIXED: duplicate Soar summary header** – the zypper wrapper no longer prints a second stray "Soar (stable) Update & Sync" header after the pipx section; Soar’s update/sync block now appears exactly once in the post‑update flow.
+
+- **v59** (2026-01-02): **Ready-to-Install Konsole Fix & Install Helper Diagnostics**
+  - 🪟 **FIXED: "Install Now" window closing immediately in Konsole** – the Ready-to-Install helper now runs via a dedicated `zypper-run-install --inner` mode inside the spawned terminal instead of relying on exported shell functions, so the Konsole window stays open reliably until you press Enter.
+  - 📜 **NEW: `run-install.log` for install helper** – every Ready-to-Install run is logged to `~/.local/share/zypper-notify/run-install.log` with environment, terminal selection, and `pkexec zypper dup` status, making it much easier to debug installer-window issues.
+  - 🧭 **IMPROVED: Soar detection in wrappers & helper** – the Soar post-update steps and the install helper now detect Soar from common per-user locations (like `~/.local/bin/soar` and `~/pkgforge`) before offering to install it, avoiding false "Soar is not installed" prompts when it is actually present.
+  - 🧪 **IMPROVED: Test harness integration** – the Python test script and notifier paths now exercise the same helper/terminal flow as real updates, so Ready-to-Install behaviour can be reproduced and debugged consistently.
+
+- **v58** (2025-12-31): **Scripted Uninstaller, External Config & Log Control**
+  - 📝 **Short:** Safer uninstall, externalised config (including `DUP_EXTRA_FLAGS`), smarter config health warnings, and improved solver-conflict notifications that keep cached downloads and guide you to resolve conflicts.
+  - 🗑️ **NEW: Safe scripted uninstaller** – `sudo ./zypper-auto.sh --uninstall-zypper` (or `zypper-auto-helper --uninstall-zypper`) removes all helper components (root timers/services, helper binaries, user systemd units, helper scripts, aliases, logs and caches) in a single, logged operation with a clear header and summary.
+  - ⚙️ **NEW: Advanced uninstall flags** – `--yes` / `-y` / `--non-interactive` skip the confirmation prompt for automated or non-interactive environments; `--dry-run` shows exactly what **would** be removed without making any changes; `--keep-logs` preserves `/var/log/zypper-auto` install/service logs for debugging while still clearing per-user notifier caches.
+  - 🧹 **IMPROVED: Clean systemd state on uninstall** – system and user units are stopped, disabled, removed from disk, and their "failed" states cleared via `systemctl reset-failed`/`systemctl --user reset-failed` so `systemctl status` no longer reports stale failures after uninstall.
+  - 🧾 **NEW: External configuration file** – `/etc/zypper-auto.conf` now holds documented settings for post-update helpers (Flatpak/Snap/Soar/Brew), log retention, notifier cache/snooze behaviour, timer intervals, and per-installation zypper behaviour, so users can tweak behaviour without editing the script.
+  - 🕒 **NEW: Config-driven timer intervals** – `DL_TIMER_INTERVAL_MINUTES` and `NT_TIMER_INTERVAL_MINUTES` (allowed: `1,5,10,15,30,60`) control how often the downloader and notifier run; the installer converts these into appropriate `OnCalendar` expressions.
+  - 🧩 **NEW: `DUP_EXTRA_FLAGS` support** – a new `DUP_EXTRA_FLAGS` key in `/etc/zypper-auto.conf` lets you append extra solver flags (such as `--allow-vendor-change` or `--from <repo>`) to every `zypper dup` run by the helper (background downloader and notifier) without modifying the scripts.
+  - 🚨 **NEW: Config validation & reset helper** – invalid values in `/etc/zypper-auto.conf` automatically fall back to safe defaults, are logged, surfaced in `last-status.txt`, and trigger a small desktop notification suggesting `zypper-auto-helper --reset-config`. A new `--reset-config` CLI mode resets the config to defaults with a timestamped backup.
+
+- **v57** (2025-12-28): **Soar Stable Updater, Homebrew Integration & Notification UX**
+  - 🧭 **NEW: Smarter Soar stable updater** – the helper and wrapper now compare `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-run the official Soar installer when a newer stable version exists, then run `soar sync` and `soar update`.
+  - 🍺 **NEW: Homebrew `--brew` helper mode** – `sudo ./zypper-auto.sh --brew` (or `zypper-auto-helper --brew`) now installs Homebrew on Linux for the target user if missing, or, when brew is already installed, runs `brew update` followed by `brew outdated --quiet` and `brew upgrade` only when there are outdated formulae, with clear log messages.
+  - 🔗 **NEW: Homebrew wrapper integration** – the `zypper-with-ps` wrapper now treats `dup`, `dist-upgrade` and `update` as full updates and, after Flatpak/Snap/Soar steps, runs `brew update` and conditionally `brew upgrade`, with Soar-style status messages ("Homebrew is already up to date" vs "upgraded N formulae").
+  - 🧩 **IMPROVED: Soar & Homebrew UX** – Soar’s GitHub API check no longer emits noisy `curl: (23)` errors and both Soar and Homebrew remain fully optional; if either tool is not installed, the scripts simply log a short hint instead of failing.
+  - 📡 **IMPROVED: Downloader/Notifier coordination** – the downloader writes structured status (`refreshing`, `downloading:…`, `complete:…`, `idle`), handles zypper locks gracefully (marking itself idle and letting timers retry), and the notifier shows live progress, a cached-aware "✅ Downloads Complete!" notification, and a separate persistent "Snapshot XXXXXXXX Ready" notification for installation.
+  - 🧱 **IMPROVED: Snapper status reporting** – Snapper root configs are detected more reliably; `snapper list` permission errors are treated as "snapshots exist (root-only)" rather than "not configured", and the current Snapper state is always surfaced in the update notification.
+  - ⏱️ **IMPROVED: Timer defaults** – both the root downloader and user notifier timers now default to a simple minutely `OnCalendar` schedule for more predictable behaviour, instead of `OnActiveSec`-based intervals that could end up `active (elapsed)` with no next trigger.
+
+- **v55** (2025-12-27): **Soar Integration, Smarter Detection & Timer Fixes**
+  - 🔗 **NEW: Soar integration** – every `zypper dup` triggered via the helper or the shell wrapper now runs Flatpak updates, Snap refresh, and an optional `soar sync` step so app runtimes and Soar-managed apps stay in sync with system updates.
+  - 🧩 **NEW: Optional Soar guidance & install helper** – if Soar is not installed for the user, the installer logs and (optionally) notifies with the exact install command (`curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh`), suggests `soar sync`, and shows a rich desktop notification with an **"Install Soar"** button that opens a terminal and runs the installer for you.
+  - 🧭 **NEW: Smarter optional-tool detection & stable Soar updater** – Flatpak, Snap, and Soar are now detected using the user's PATH and common per-user locations (like `~/.local/bin` and `~/pkgforge`) to avoid false "missing" warnings; if Soar is already present, the install helper notification is suppressed. When Soar *is* installed, the wrapper/GUI helper now compares `soar --version` against GitHub’s latest stable release tag (`releases/latest`) and only re-runs the Soar installer when a newer stable version exists, then runs `soar sync`.
+  - 📸 **IMPROVED: Snapper detection** – `snapper list-configs` is inspected so the default `root` config on Tumbleweed is recognised, and `snapper list` permission errors ("No permissions.") are treated as "snapper configured (root) but snapshots require root permissions to view" rather than "not configured".
+  - ⏱️ **IMPROVED: Notifier timer behaviour** – the user timer now uses `OnActiveSec` plus an automatic restart after install so it no longer gets stuck in an `active (elapsed)` state with no future trigger.
+- **v54** (2025-12-25): **Robust Conflict Handling & Helper Integration**
+  - 🧠 **NEW: Smarter zypper error handling** that distinguishes PolicyKit/authentication failures, zypper locks, and normal solver/interaction errors.
+  - 🧩 **NEW: "Updates require manual decision" notification** when `zypper dup --dry-run` needs interactive choices (e.g. vendor conflicts), including the first `Problem:` line from zypper output.
+  - 🖱️ **NEW: "Open Helper" action button** on manual-intervention notifications that launches `zypper-run-install` in a terminal so you can resolve issues immediately.
+  - 🔁 **FIXED: Stale downloader status handling** – old `refreshing` / `downloading:` states in `/var/log/zypper-auto/download-status.txt` are ignored after 5 minutes so the notifier always runs a fresh check.
+- **v53** (2025-12-25): **Snooze Controls & Environment-Aware Safety Preflight**
+  - ✨ **NEW: Snooze buttons (1h / 4h / 1d)** in the notification with persistent state under `~/.cache/zypper-notify`, so you can temporarily pause reminders.
+  - 🔔 **NEW: Environment change notifications** when AC/battery or metered status changes, explaining why downloads are paused or allowed.
+  - 🛡️ **NEW: Safety preflight checks** for disk space, Btrfs snapshots (snapper), and basic network quality, with warnings appended to the update notification instead of failing silently.
+  - 👀 **NEW: "View Changes" helper** launched from the notification to show `zypper dup --dry-run --details` in a terminal.
+  - ℹ️ **NEW: Optional Flatpak/Snap detection** after install with a desktop notification describing how to enable them for app updates.
+- **v51** (2025-12-23): **Major Update - Command-Line Interface & Advanced Diagnostics**
+  - ✨ **NEW: `zypper-auto-helper` command** - Installed to `/usr/local/bin` with automatic shell aliases
+  - 🔧 **NEW: Advanced Verification System** - 12-point health check with multi-stage auto-repair
+  - 🚀 **NEW: Real-Time Progress** - Download notifications update every 5 seconds with progress bar
+  - 🎯 **NEW: Smart Cache Detection** - Doesn't notify about downloads if packages already cached
+  - 🔄 **NEW: Manual Update Wrapper** - `sudo zypper dup` automatically runs post-update checks
+  - 🚫 **NEW: Duplicate Prevention** - Synchronous notification IDs prevent popup spam
+  - ⚡ **IMPROVED: Background-Priority Downloads** - runs at low CPU/I/O priority to avoid desktop lag
+  - 🛠️ **IMPROVED: Installation** - Fully automatic, no manual user service enabling required
+  - 📊 **IMPROVED: Status Tracking** - Better progress reporting with percentage and package count
+- **v50** (2025-11-20): Added stage-based download notifications with package count display
+- **v49** (2025-11-20): Smart download detection - only notifies when updates are actually being downloaded
+- **v48** (2025-11-20): Fixed battery detection logic (laptops no longer misidentified as desktops) and notification persistence (popups no longer disappear instantly)
+- **v47** (2025-11-19): Added comprehensive logging system with automatic rotation
+- **v46**: AC battery detection logical fix
+- **v45**: Architecture improvements and user-space notifier
+- **v43**: Enhanced Python notification script
+- **v42**: PolicyKit/PAM error logging enhancements
+- Earlier versions: Initial development and refinements
+
+-----
+
+<a id="uninstallation"></a>
+## 🗑️ Uninstallation
+
+### Uninstallation quick navigation
+
+- [Recommended: Scripted Uninstaller](#uninstall-scripted)
+- [Advanced uninstall flags](#uninstall-advanced-flags)
+- [Manual uninstall (advanced / legacy)](#uninstall-manual)
+
+<a id="uninstall-scripted"></a>
+### Recommended: Scripted Uninstaller (v58+)
+
+Use the built-in uninstaller to safely remove all helper components:
+
+```bash
+# Run from the directory containing zypper-auto.sh (as root)
+sudo ./zypper-auto.sh --uninstall-zypper
+
+# Or using the installed helper command (typically without sudo via shell alias)
+zypper-auto-helper --uninstall-zypper
+```
+
+By default this will:
+- Remove the Polkit action file (if installed): `/usr/share/polkit-1/actions/org.opensuse.zypper-auto.policy`
+- Stop and disable the root timers/services (`zypper-autodownload`, `zypper-cache-cleanup`, `zypper-auto-verify`)
+- Stop and disable the user notifier timer/service for your user
+- Remove all helper systemd unit files and helper binaries
+- Remove user helper scripts, shell aliases, and Fish config snippets (including `~/.config/fish/conf.d/sudo-handler.fish`)
+- Remove custom hook scripts under `/etc/zypper-auto/hooks` (if present)
+- Clear notifier caches and (by default) old helper logs under `/var/log/zypper-auto` (including cleanup audit reports under `cleanup-reports/` and the generated `status.html` dashboard)
+- Remove helper-created backups under `/var/backups/zypper-auto` (boot-entry backups, btrfsmaintenance config backups)
+- Remove server-side Managers history DB (SQLite): `/var/lib/zypper-auto/dashboard-history.sqlite3` (and `-wal` / `-shm`)
+- Remove `/boot/do_purge_kernels` marker (if it was created by the helper)
+- Reload both system and user systemd daemons and clear any "failed" states
+
+<a id="uninstall-advanced-flags"></a>
+#### Advanced Uninstall Flags
+
+You can customise the behaviour with optional flags:
+
+```bash
+# Skip the confirmation prompt (non-interactive)
+sudo ./zypper-auto.sh --uninstall-zypper --yes
+# or
+sudo ./zypper-auto.sh --uninstall-zypper --non-interactive
+
+# Show what WOULD be removed, but make no changes
+sudo ./zypper-auto.sh --uninstall-zypper --dry-run
+
+# Keep logs under /var/log/zypper-auto for debugging (including status.html dashboard)
+sudo ./zypper-auto.sh --uninstall-zypper --yes --keep-logs
+
+# Keep hook scripts under /etc/zypper-auto/hooks
+sudo ./zypper-auto.sh --uninstall-zypper --yes --keep-hooks
+
+# Also disable OS maintenance timers enabled via Snapper Option 5
+# NOTE: this only disables timers; it does NOT delete OS unit files.
+sudo ./zypper-auto.sh --uninstall-zypper --yes --disable-maintenance-timers
+
+# Flags can be combined as needed
+sudo ./zypper-auto.sh --uninstall-zypper --dry-run --keep-logs --keep-hooks
+```
+
+<a id="uninstall-manual"></a>
+### Manual Uninstall (Advanced / Legacy)
+
+If you prefer or need to remove components manually, the equivalent steps are:
+
+```bash
+# 1. Stop and disable the root timers
+sudo systemctl disable --now zypper-autodownload.timer
+sudo systemctl disable --now zypper-cache-cleanup.timer
+sudo systemctl disable --now zypper-auto-verify.timer
+
+# 2. Stop and disable the user timer (run as regular user)
+systemctl --user disable --now zypper-notify-user.timer
+
+# 3. Remove all systemd files and scripts
+sudo rm /etc/systemd/system/zypper-autodownload.service
+sudo rm /etc/systemd/system/zypper-autodownload.timer
+sudo rm /etc/systemd/system/zypper-cache-cleanup.service
+sudo rm /etc/systemd/system/zypper-cache-cleanup.timer
+sudo rm /etc/systemd/system/zypper-auto-verify.service
+sudo rm /etc/systemd/system/zypper-auto-verify.timer
+sudo rm /usr/local/bin/zypper-download-with-progress
+sudo rm /usr/local/bin/zypper-auto-helper
+
+# Replace $HOME with your actual home directory (or run as regular user)
+rm -f $HOME/.config/systemd/user/zypper-notify-user.service
+rm -f $HOME/.config/systemd/user/zypper-notify-user.timer
+rm -f $HOME/.local/bin/zypper-notify-updater.py
+rm -f $HOME/.local/bin/zypper-run-install
+rm -f $HOME/.local/bin/zypper-with-ps
+rm -f $HOME/.local/bin/zypper-view-changes
+rm -f $HOME/.config/fish/conf.d/zypper-wrapper.fish
+rm -f $HOME/.config/fish/conf.d/sudo-handler.fish
+rm -f $HOME/.config/fish/conf.d/zypper-auto-helper-alias.fish
+
+# Remove shell aliases from config files
+sed -i '/# Zypper wrapper for auto service check/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+sed -i '/alias zypper=/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+sed -i '/# zypper-auto-helper command alias/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+sed -i '/alias zypper-auto-helper=/d' $HOME/.bashrc $HOME/.zshrc 2>/dev/null
+
+# 4. (Optional) Remove logs
+sudo rm -rf /var/log/zypper-auto
+rm -rf $HOME/.local/share/zypper-notify
+rm -rf $HOME/.cache/zypper-notify
+
+# 5. Reload the systemd daemons
+sudo systemctl daemon-reload
+systemctl --user daemon-reload
+```

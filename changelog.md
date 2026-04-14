@@ -1,0 +1,152 @@
+# Changelog
+
+## Unreleased
+- [2026-04-02 19:37 UTC] README now includes a dedicated “Rocket conflict quick flow” troubleshooting mini-guide (allow-vendor-change fallback, solver option `1/2/3/4` guidance, log check path, and dashboard refresh hint) plus TOC/quick-link entries.
+- [2026-04-02 19:35 UTC] Rocket conflict handling UX now adds pulsing red conflict emphasis plus explicit `--allow-vendor-change` guidance and solver-choice helper cues (`1/2/3/4`) in preview and result flows.
+- [2026-04-02 19:35 UTC] Rocket result conflict view now includes quick solver helper buttons (`1`,`2`,`3`,`4`) with copy/toast wiring to speed manual zypper prompt resolution.
+- [2026-04-02 19:35 UTC] Rocket system-update progress pipeline now emits explicit stage markers through zypper run, optional-update phase, restart check, dashboard refresh, and finalization to avoid stuck/jump progress behavior.
+- [2026-04-02 19:35 UTC] Verification now includes conditional Flatpak corruption repair (dry-run detection first, repair only on detected corruption), and the Dev Mode / Logs toggle now also gates Settings drawer visibility.
+- AI Smart Report (`/api/ai/smart-report`) now uses a unified normalized signal pipeline (deduped log/job signals), incident grouping with severity/confidence scoring, and recommendation-v2 ranking with local history learning weights.
+- AI Smart Report payload now includes structured explainability (`top_actions`, selected score breakdown, evidence/source refs), incident/signal/learning sections, and schema validation flags (`schema_valid`, `schema_errors`) to harden report quality controls.
+- WebUI unusual-activity crash watcher notifications now include normalized incident metadata (`inc-js-crash`, severity/confidence, analysis window, occurrence count) aligned with smart-report incident semantics.
+- Managers → Server → AI Smart Report now renders an incident summary card in-panel (top incidents with severity/confidence/occurrences and the currently suggested repair action) in addition to raw report text.
+- Added configurable unusual-activity suppression windows for repeated WebUI JavaScript alerts: `WEBUI_UNUSUAL_SUPPRESS_JS_CRASH_SECONDS` and `WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS` (schema/template/validation/UI apply wiring).
+- Added runtime regression `regressions/test_ai_smart_report_runtime_regression.py` to execute `/api/ai/smart-report` against a mocked runtime context and assert incident severity presence plus `top_actions` recommendation ordering.
+- `scripts/syntax-check.sh` now supports explicit `--no-auto-chmod` for one-off scan runs while preserving default auto-chmod behavior.
+- `scripts/syntax-check.sh` auto-chmod stage now emits explicit skip diagnostics when a target is not writable or chmod fails (`WARN: auto-chmod skipped ...`).
+- `scripts/syntax-check.sh` now auto-sets executable permission (`chmod u+x`) for discovered shell/python script targets during scan/check flow (configurable via `SYNTAX_AUTO_CHMOD`).
+- WebUI now includes a version-aware welcome screen: first-time dashboard opens show onboarding guidance, and helper version upgrades (for example `v70 -> v71`) show an upgrade thank-you flow with release notes content.
+- WebUI now defaults advanced panels to hidden (`🧰 Snapper Manager` + `Recent Activity Log`) and adds a master header toggle `Enable Dev Mode / Logs` to reveal/hide them without affecting `Service Health`.
+- Unusual behavior watcher now escalates repeated JavaScript crash bursts (multiple events in a short window) into higher-severity notification-center reports with direct jump actions.
+- Fixed Self-Update WebUI runtime wiring to declare `bgNotifyBtn` before guard/listener usage in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
+- WebUI status-only auto-fetch now also performs self-update status checks in the background so opening the dashboard automatically keeps Self-Update state fresh.
+- Added dedicated unified syntax checker `scripts/syntax-check.sh` as a reusable baseline workflow (`bash -n`, `shellcheck`, Python compile checks, optional Node.js syntax checks) with `--include-regressions` and optional dependency auto-install support via `--install-missing`.
+- `run_regression_suite.sh` preflight now uses `scripts/syntax-check.sh` as the shared bash/shellcheck baseline checker, keeping runtime-aware Python compile checks in the runner.
+- `run_regression_suite.sh` preflight now also routes selected default-runtime Python compile targets through `scripts/syntax-check.sh`, while runtime-tagged Python checks remain runner-side.
+- Added focused static regression `test_runner_python_target_preflight_regression.sh` to guard shared preflight `--python-target` wiring and runtime-tagged Python compile fallback behavior.
+- Fixed WebUI multi-tab hard-block blank-screen edge case by guarding `#main-content` hide behavior behind blocker-page visibility and adding a self-heal path when both blocker + main content are hidden.
+- Added focused static regression `test_webui_blank_guard_regression.sh` to guard WebUI blank-screen prevention wiring (`_znhMiHardBlockShow` gating + `_znhMiPreventBlankScreen` tick/init invocation).
+- Added focused static regression `test_self_update_bg_notify_wiring_regression.sh` to guard `_wireSelfUpdateUI` `bgNotifyBtn` declaration/ordering safety and prevent recurrence of `ReferenceError: bgNotifyBtn is not defined`.
+- Added focused static regression `test_self_update_channel_autodetect_hash_fallback_regression.sh` to guard `run_self_update_only` channel auto-detection and stable+rolling content-hash fallback wiring.
+- Added optional Playwright runtime regression `test_webui_blank_guard_playwright_regression.py` to exercise extracted WebUI multi-tab guard functions in-browser (both-hidden recovery, missing-blocker safety, and `_znhMiTick` guard invocation).
+- WebUI auto-fetch cadence remains settings-driven via `WEBUI_AUTO_FETCH_INTERVAL_MINUTES` (default 60 minutes), and now applies low-impact behavior while the tab is hidden (longer hidden-tab interval + jitter + lightweight fetch path).
+- Self-update status checks now emit deduplicated update-availability notifications for stable/rolling channels (`update`/`install`/`switch`) via the in-dashboard Notification Center and best-effort browser desktop notifications (when permission is granted).
+- Added setting `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED=true|false` to let users disable only background self-update availability notifications while keeping background status checks active.
+- Self-Update card now includes a quick button (`Notify updates: ON/OFF`) that toggles `WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED` without opening the full Settings drawer.
+- Fixed an embedded dashboard API heredoc parse regression: removed a duplicated `_recover_self_update_job` payload fragment that caused `IndentationError` in runtime API regression loading.
+- Fixed `/api/self-update/job` response payload wiring to use computed effective-full output fields (`output_text`, `output_truncated`) in both lock/no-lock paths, eliminating HTTP 500 failures from undefined `tail`.
+- Added explicit runtime regression guard `EmbeddedDashboardApiSyntaxRegressionTest` in `test_self_update_api_runtime_regression.py` to AST-parse the embedded `DASH_API_BIN` Python heredoc and fail fast on parse regressions.
+- Self-update recovery/status paths now return effective-full log output (bounded full view) instead of tail-only payloads, improving WebUI overlay context for long runs.
+- Self-update completion detection now falls back to systemd terminal state (`ActiveState`/`SubState` + `ExecMainStatus`) when status files lag, preventing long-lived 99% “finishing” stalls.
+- Self-update SSE stream reset now uses effective-full initial log text, while preserving incremental append streaming for new output.
+- Install flow now adds a compatibility PATH symlink `/usr/bin/zypper-auto-helper -> /usr/local/bin/zypper-auto-helper` (when safe) so helper command discovery works even when `/usr/local/bin` is absent from PATH.
+- Uninstall flow now removes that compatibility symlink only when it points to the helper target and leaves unrelated/package-managed `/usr/bin/zypper-auto-helper` files untouched.
+- Uninstall shell cleanup now removes full `zypper-auto-helper` wrapper function blocks from `.bashrc`/`.zshrc` in addition to alias lines.
+- Verification Safety Net policy changed: routine `--verify` runs (including `zypper-auto-verify.timer`) no longer create pre/post Snapper Safety Net snapshots on every cycle.
+- Install/update verification flow now also skips Safety Net pre/post snapshots (`run_smart_verification_with_safety_net ... never`), so helper auto-repair does not create extra Btrfs snapshots.
+- Self-update status API now computes layered SHA256 section fingerprints and returns `post_action_recommendation` (`none`/`verify`/`install`) with reason + changed layers + `confidence` + `risk_level`.
+- `zypper-auto-helper --self-update` (without explicit channel argument) now auto-detects installed channel (`rolling`/`stable`) from self-update state metadata before falling back to configured defaults.
+- Self-update CLI now applies content-hash truth fallback for both stable and rolling refs: when remote ref metadata changes but helper payload is byte-identical, it seeds state and reports up-to-date instead of repeatedly attempting no-op updates.
+- Self-update WebUI install overlay now preselects post-update mode from recommendation metadata, includes an expandable **Why recommended?** explanation, and warns when manual override deviates from recommendation.
+- Self-update recommendation logic now supports `switch_to_rolling` when install-origin metadata indicates a rolling-commit lineage but the configured channel remains stable.
+- Self-update status payloads now expose normalized install-origin metadata (`install_origin`) and channel advice (`channel_recommendation`), and the WebUI surfaces this in status/detail and overlay verification text.
+- Stable self-update now uses explicit policy semantics (`SELF_UPDATE_STABLE_POLICY=release|candidate|prerelease`) and surfaces provenance (`selection`, `fallback_reason`, source URL) across API/CLI/WebUI stable notes/changelog flows.
+- Snapper `/api/snapper/timers` now uses systemd-authoritative probing (`systemctl show` + `is-enabled` + `is-active`) and returns richer truth fields (`next_trigger_utc`, `last_trigger_utc`, `last_result`, `partial_reason`) in `snapper_*_timer_live` payloads alongside compatibility state fields.
+- Added focused regression smoke test `test_self_update_recommendation_regression.sh` and wired it into `run_regression_suite.sh`.
+- Added runtime API regression test `test_self_update_api_runtime_regression.py` and wired it into `run_regression_suite.sh` for mocked `/api/self-update/status` and `/api/snapper/timers` failure-path coverage.
+- `run_regression_suite.sh` optional Playwright browser regression now auto-detects and prefers local `./.venv-playwright-regression/bin/python` when available, with `PLAYWRIGHT_TEST_PYTHON` override support.
+- `run_regression_suite.sh` now supports unified runtime Python overrides: `RUNTIME_TEST_PYTHON` for required runtime API regressions and `PLAYWRIGHT_TEST_PYTHON` for optional browser runtime regression.
+- Added GitHub Actions workflow `.github/workflows/regression-runtime-matrix.yml` to run `run_regression_suite.sh` across multiple Python runtime targets.
+- Runtime matrix workflow now supports dynamic runtime selection in manual (`workflow_dispatch`) runs via `runtime_pythons` JSON-array input.
+- Grouped regression scripts under `regressions/` and updated runner/runtime/CI/docs paths accordingly to keep project root uncluttered.
+- Moved additional forgotten regressions (`test_snapper_start_contract.py`, `test_ai_smart_report_contract.py`, `test_snapper_disable_verify_guard.sh`) under `regressions/` and updated their repo-root path assumptions/documented invocation paths.
+- `run_regression_suite.sh` required runtime Python batch now also executes `test_snapper_start_contract.py` and `test_ai_smart_report_contract.py` so moved contract checks stay included in one central regression run.
+- `run_regression_suite.sh` now auto-discovers regressions from `regressions/test_*.sh` and `regressions/test_*.py`, removing the manual hardcoded test inventory.
+- Stateful regressions are now explicit opt-in in the central runner (`--include-stateful`) via per-test metadata tags (`# RUNNER_STATEFUL=1`), keeping default suite runs non-destructive.
+- Runner metadata support was added for optional/warn-only tests and runtime routing (`# RUNNER_OPTIONAL=1`, `# RUNNER_RUNTIME=playwright`), and current special tests were tagged accordingly.
+- `run_regression_suite.sh` now supports selection filters `--only PATTERN` and `--exclude PATTERN` (repeatable shell-glob matching on test basenames) so focused regression slices can run without editing the runner.
+- Auto-discovered regression files are now automatically repaired to executable mode when needed (`chmod +x`), while already executable files are skipped unchanged.
+- `run_regression_suite.sh` now runs integrated preflight checks before executing tests: `bash -n` syntax checks, `shellcheck` lint checks, and runtime-aware Python compile checks (`python -m py_compile`).
+- Shellcheck preflight is enabled by default and can be temporarily bypassed with `RUNNER_SKIP_SHELLCHECK=1` when needed.
+- Added helper `scripts/bootstrap_playwright_regression.sh` to create/update the local Playwright regression venv and install Chromium runtime in one command.
+- Updated `test_snapper_timer_controls_regression.sh` timer-endpoint expectations to validate probe-based live-state payloads.
+- Fixed stale downloader-status auto-repair command quoting so temporary file handling works correctly under `set -u` (prevents `tmp: unbound variable` failures).
+- Added regression smoke test `test_verify_snapshot_policy_regression.sh` and wired it into `run_regression_suite.sh` to guard verify-vs-install snapshot policy behavior.
+- Snapper WebUI/CLI status semantics updated: disabled Snapper timers are now shown as intentional warning/checkmark states (`✓ disabled`) instead of error-style states.
+- Dashboard status UI now performs one-shot `status-data.json` auto-sync on page load even with Live mode OFF, and refreshes again on tab focus/visibility resume to self-correct stale Snapper timer cards.
+- Snapper auto-disable now persists explicit user intent via `/var/lib/zypper-auto/snapper-auto-disabled.intent`.
+- Verify check 48 now honors the Snapper disable-intent marker and skips auto-enabling `snapper-cleanup.timer` when the timer is intentionally disabled.
+- Verify check 48 also removes stale disable-intent marker files when `snapper-cleanup.timer` is active again.
+- Uninstaller cleanup now removes the Snapper disable-intent marker file (`/var/lib/zypper-auto/snapper-auto-disabled.intent`).
+- Added root-only regression smoke test helper `test_snapper_disable_verify_guard.sh` to validate `snapper auto-off` marker persistence and verify guard behavior (with automatic timer/marker state restore by default).
+- Uninstall (`--uninstall-zypper`): now removes the Fish sudo wrapper file `~/.config/fish/conf.d/sudo-handler.fish` and includes it in dry-run output.
+- Verify service: added adaptive low-impact mode for repeated background verification failures (fail-streak tracking + heavy-check cooldown state persisted in `verify-smart-state.env`).
+- Verify service: expensive deep checks can now be deferred during cooldown windows to reduce CPU/IO pressure when failures repeat.
+- Config/WebUI/validation: added `VERIFY_LOW_IMPACT_ENABLED`, `VERIFY_LOW_IMPACT_FAIL_STREAK`, `VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES`, and `VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES`.
+- Default verification cadence tuned: `VERIFY_TIMER_INTERVAL_MINUTES` now defaults to `15` (from `5`) for lower background impact.
+- Default verification cadence retuned: `VERIFY_TIMER_INTERVAL_MINUTES` now defaults to `30` (from `15`) in the current config template/schema and validation fallback path.
+- Verify/self-check/install notifier syntax validation now uses a read-only-safe AST parser helper (`python_ast_syntax_check`) to avoid false failures caused by pycache writes under hardened mounts.
+- WebUI Managers (Server/SQLite): quick-action entries now show explicit AI launch markers (`[AI launched]`) with persisted source metadata (`ai_triggered`, `ai_source`).
+- Quick action API/recovery/history: AI launch metadata is now carried through quick start/status/history flows so reopen/resume paths keep the AI marker.
+- AI Smart Report (`/api/ai/smart-report`) now emits deterministic error→repair mapping data (`repair_plan`) with selected action, confidence, evidence, and confirmation requirements.
+- AI Smart Report now supports optional safe initiation (`initiate_repair=true`) for allowlisted no-confirm quick actions and reports blocked reasons when confirmation is required.
+- Quick action background spawning is now centralized in a shared WebUI API helper and reused by both `/api/quick/start` and AI smart-report initiation paths, reducing duplication and keeping status/log/history behavior aligned.
+- Contract tests were strengthened to assert shared-launcher routing for `/api/quick/start` and AI smart-report initiation, while preserving quick-action history payload constraints.
+- Background job start APIs now reuse a shared launcher helper (`_launch_background_systemd_job`) across `/api/self-update/start`, `/api/snapper/start`, and `/api/scrub/start`, reducing duplicated systemd transient-unit launch logic.
+- Contract tests now also assert shared-launcher routing for self-update/snapper/scrub start endpoints and validate quick-action history payload keys against the top-level shared quick launcher helper.
+- Snapper WebUI API hardening: background jobs now run with lower-priority scheduling (`Nice=19`, idle I/O class) plus low-impact command wrappers (`ionice -c3` / `nice -n 19` when available).
+- Snapper direct run API (`/api/snapper/run`) now also applies low-impact command wrappers to reduce foreground IO/CPU contention.
+- Snapper cleanup WebUI confirmation now includes an explicit force-low-space override toggle (`force_low_space`) that maps to helper env `ZNH_SNAP_CLEANUP_FORCE_LOW_SPACE=1`.
+- Snapper direct run API (`/api/snapper/run`) now propagates cleanup `force_low_space` into helper environment (in addition to non-interactive confirmation flow).
+- Snapper cleanup now supports configurable pacing between heavy phases and force-prune delete batches (`SNAP_CLEANUP_PHASE_PACING_SECONDS`) to reduce burst IO/CPU load.
+- Snapper start API coalescing improved: repeated same-action requests now reuse an existing running Snapper `job_id` instead of launching duplicate jobs.
+- Snapper start API now performs best-effort stale artifact garbage collection (old status/log/script files) and returns `artifact_gc` metadata to callers.
+- Snapper WebUI now uses `GET /api/snapper/preflight?action=cleanup` before cleanup runs to show free-space/hysteresis/busy risk hints and force-override context.
+- Snapper cleanup preflight can detect existing running jobs/zypp lock states, and the WebUI reopens the active Snapper overlay instead of launching duplicate cleanup attempts.
+- Snapper job history now persists cleanup low-space guard telemetry (`force_low_space`, guard reason/state, hysteresis flags, free/critical/high MB) and exposes it via history list/detail APIs.
+- History upsert runtime guard now enforces low-space telemetry as snapper-only metadata and strips those keys for non-snapper job types.
+- Added focused contract test `test_snapper_start_contract.py` to assert `/api/snapper/start` success responses include `job_id`, `coalesced`, `artifact_gc`, and `preflight`.
+- Managers → Server (SQLite) tab now uses visibility-aware polling/backoff: faster while visible, slower while hidden, and polling stops when overlay/tab is not active.
+- Snapper Full Cleanup: mode `force-prune` can implicitly run kernel package cleanup (`zypper purge-kernels`) even when `KERNEL_PURGE_ENABLED=false` (configurable via `KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE`, default true).
+- Snapper Full Cleanup: mode `force-prune` can also run a safe boot menu hygiene pass via `scrub-ghost` to quarantine duplicate/stale snapshot boot entries and optionally rebuild GRUB config (configurable via `SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED`, default true).
+- Snapper Full Cleanup (danger): optional kernel family purge can remove whole kernel package families listed in `KERNEL_FAMILY_PURGE_TARGETS` (force-prune only by default; protects running kernel; refuses if it could leave only one installed kernel).
+- WebUI: Snapper Option 4 panel includes cleanup customization controls for kernel purge / scrub-ghost hygiene / kernel family purge.
+- WebUI: Snapper Option 4 layout refactor keeps the card compact (mode selector + run button + status badges) and moves the full cleanup description/customization controls into the cleanup confirmation modal only.
+- Cleanup confirmation modal now hosts the Option 4 settings actions directly (`Apply settings` / `Refresh from config`) via the existing Settings API helpers.
+- Added regression smoke test `test_snapper_option4_modal_layout.sh` to assert Option 4 stays compact and `snopt-*` customization controls remain modal-only.
+- WebUI Settings drawer includes `KERNEL_FAMILY_PURGE_*` configuration fields (Advanced + Danger zone).
+- Snapper Manager Option 5/6 now includes per-timer controls for `snapper-timeline.timer`, `snapper-cleanup.timer`, and `snapper-boot.timer` (individual enable/disable buttons in addition to enable-all/disable-all).
+- Boot/EFI stats now include installed kernel inventory in Snapper Manager (kernel count plus per-kernel package/version labels).
+- Added regression smoke test `test_snapper_timer_controls_regression.sh` to assert per-timer Snapper controls are wired across WebUI buttons, API actions, and helper subcommands.
+- Snapper Manager timer badges now refresh immediately after successful timer enable/disable actions (all-timers and per-timer) via `GET /api/snapper/timers`, instead of waiting for stale dashboard polling state.
+- Snapper WebUI timer badges now keep a short-lived authoritative `/api/snapper/timers` override after toggle actions so stale `status-data.json` poll data does not revert freshly changed timer state before dashboard data catches up.
+- Snapper WebUI Option 5/6 timer controls now synchronize button enabled/disabled UI state from timer status (with state styling) so button behavior remains persistent and aligned with CLI/systemd timer state.
+- Snapper timer state normalization now accepts verbose/legacy timer strings (for example `enabled=enabled active=active ...`) and boolean aliases (`on/off`, `true/false`, `yes/no`) for consistent WebUI/CLI timer parsing across mixed payload formats.
+- Snapper timer actions now apply an immediate optimistic action override before authoritative timer refresh returns, reducing transient button/badge mismatch after enable/disable operations.
+- Snapper Manager WebUI now keeps a passive visibility-aware timer sync loop so long-lived tabs reconcile out-of-band timer changes without manual refresh.
+- Added browser-level regression `test_snapper_timer_playwright_regression.py` (Playwright/Chromium) to validate Snapper timer badge/button persistence through stale live polls and throttled authoritative timer API resync.
+- Extended static regression `test_snapper_timer_controls_regression.sh` to cover timer normalization aliases/verbose formats, optimistic action override helpers, passive timer-sync initialization wiring, and Snapper status service-state formatting (`enabled=... active=... preset=...`).
+- Added focused static regression `test_snapper_status_services_regression.sh` to guard Snapper menu status routing, timer service-state output guidance/formatting, and `/api/snapper/status` helper API contract.
+- Added regression smoke test `test_diag_follower_low_noise_regression.sh` to guard diagnostics follower multiplexer behavior and live-log/service-log source capping.
+- Added central non-destructive regression runner `run_regression_suite.sh` to execute shell regressions together (with optional Playwright browser regression run).
+- Diagnostics follower low-noise tuning: embedded `zypper-auto-diag-follow` now uses one multiplexed `tail -F` process for tracked sources instead of spawning one tail per file.
+- Diagnostics runner now follows only the most-recent service logs by default (`ZNH_DIAG_MAX_SERVICE_LOGS`, default `6`) to reduce long-lived background process churn.
+- Interactive debug-menu/CLI `--live-logs` fallback source fanout is now capped (`ZNH_LIVE_LOGS_MAX_SERVICE_LOGS`, default `8`) to reduce temporary tail-process spikes.
+- WebUI Settings/API/schema now expose `ZNH_DIAG_MAX_SERVICE_LOGS` and `ZNH_LIVE_LOGS_MAX_SERVICE_LOGS` so low-noise caps can be tuned without manual config edits.
+- Boot/EFI installed-kernel inventory now counts only bootable installed kernels (module trees with `modules.dep`) and reports extra raw module-directory count separately (`raw_dirs_count`) to avoid false high kernel totals from leftover/devel module dirs.
+- Added regression smoke test `test_boot_kernel_inventory_regression.sh` to guard bootable-kernel-only inventory counting and kernel purge safety counting filters.
+- Added helper command `--stale-module-dirs` (alias: `--stale-modules`) with safe default `audit` mode to detect stale non-bootable module directories.
+- Added optional `--stale-module-dirs quarantine` mode with explicit confirmation phrase (or `--yes` for non-interactive runs), root-path guardrails, and non-destructive timestamped move-to-quarantine behavior with restore hints.
+- Fixed early CLI option allowlist handling so `--stale-module-dirs` / `--stale-modules` are recognized before unknown-option fast-path rejection.
+- Added stale-module helper test overrides `ZNH_STALE_MODULE_LIB_ROOT` / `ZNH_STALE_MODULE_USR_LIB_ROOT` so runtime regressions can use isolated temporary module trees safely.
+- Added regression smoke test `test_stale_module_dirs_helper_regression.sh` to validate stale-module helper safety contract, parser/help/completion wiring, command exposure, and early option allowlist presence.
+- Added runtime regression `test_stale_module_dirs_runtime_regression.sh` to execute stale-module audit/quarantine behavior against temporary module roots (non-destructive sandboxed coverage).
+- Snapper Option 4 cleanup confirmation modal now includes a detected installed-kernel-family dropdown (populated from `/api/boot/stats`) to help set `KERNEL_FAMILY_PURGE_TARGETS` quickly while preserving manual input.
+- Snapper WebUI confirm modal now auto-refreshes expired confirmation tokens and retries once (both `/api/snapper/run` and `/api/snapper/start` paths), reducing `missing/expired confirm token` failures when users spend longer in the dialog.
+- Snapper kernel package cleanup (`zypper purge-kernels`) now handles zypp lock contention more gracefully: it waits with backoff, retries once on lock-race, and records a clear non-fatal skip/audit entry when the lock does not clear.
+- Default downloader/notifier cadence now uses hourly defaults (`DL_TIMER_INTERVAL_MINUTES=60`, `NT_TIMER_INTERVAL_MINUTES=60`) in config template/fallback paths.
+- `zypper-with-ps` lock handling for manual `dup`/`dist-upgrade`/`update` now includes lock-detail wait/retry before execution and one retry when lock contention appears during the actual `zypper` run (lock-race handling).
+- Added regression smoke test `test_wrapper_lock_race_regression.sh` to assert wrapper lock helper presence, pre-run wait behavior, lock-race retry-once logic, and final lock-detail messaging.
+
+## v70 (2026-02-18)
+- See `README.md` → Version History for full release notes.
