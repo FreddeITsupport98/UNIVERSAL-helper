@@ -2115,6 +2115,9 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - `UNI-auto.sh` now detects `apt` / `dnf` / `pacman` / `zypper` and uses distro-aware package install hints for dependency/tooling paths (ShellCheck, PyGObject, pipx, Flatpak, Snapd, etc.) instead of hardcoded `zypper install` messages; core update workflow remains zypper-focused.
+  - Update-engine phase 2 now wires downloader/notifier/install-helper/view-changes runtime paths through package-manager-aware command dispatchers (`apt` / `dnf` / `pacman` / `zypper`) instead of zypper-only preview/install command calls.
+  - Notification conflict/recovery guidance is now backend-aware (manager-specific preview/refresh/manual-update hints), while zypper-only solver option guidance (`1/2/3/4`) is shown only on zypper systems.
 
 - **v71** (2026-04-02): **Stability, Rocket UX, Snapper manager, and WebUI reliability release**
   - 🐛 **FIXED:** Self-Update WebUI wiring now defines `bgNotifyBtn` before guard/listener checks in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.

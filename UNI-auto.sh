@@ -23,7 +23,7 @@ set -euo pipefail
 # are not world-readable unless we explicitly relax permissions.
 umask 077
 
-# Distro guard: only allow running on openSUSE Tumbleweed or Slowroll
+# Distro / package-manager guard
 if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -32,15 +32,130 @@ else
     exit 1
 fi
 
-case "${NAME:-}" in
-    "openSUSE Tumbleweed"|"openSUSE Slowroll")
-        # Supported distributions; continue
-        ;;
-    *)
-        echo "This installer only supports openSUSE Tumbleweed or Slowroll (detected: ${NAME:-unknown}). Aborting." >&2
-        exit 1
-        ;;
-esac
+SYSTEM_PKG_MANAGER=""
+
+detect_system_package_manager() {
+    local id id_like
+    id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+    id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+
+    case "${id}" in
+        opensuse*|sles|sled)
+            SYSTEM_PKG_MANAGER="zypper"
+            ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian)
+            SYSTEM_PKG_MANAGER="apt"
+            ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara)
+            SYSTEM_PKG_MANAGER="dnf"
+            ;;
+        arch|manjaro|endeavouros|garuda)
+            SYSTEM_PKG_MANAGER="pacman"
+            ;;
+    esac
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        case "${id_like}" in
+            *suse*)
+                SYSTEM_PKG_MANAGER="zypper"
+                ;;
+            *debian*)
+                SYSTEM_PKG_MANAGER="apt"
+                ;;
+            *rhel*|*fedora*)
+                SYSTEM_PKG_MANAGER="dnf"
+                ;;
+            *arch*)
+                SYSTEM_PKG_MANAGER="pacman"
+                ;;
+        esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        if command -v zypper >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif command -v dnf >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif command -v apt-get >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="apt"
+        elif command -v pacman >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="pacman"
+        fi
+    fi
+
+    [ -n "${SYSTEM_PKG_MANAGER}" ]
+}
+
+if ! detect_system_package_manager; then
+    echo "Could not detect a supported package manager (apt, dnf, pacman, zypper). Aborting." >&2
+    exit 1
+fi
+
+if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
+    echo "Notice: detected package manager '${SYSTEM_PKG_MANAGER}'. This build now supports cross-distro dependency installs/hints, but the update engine remains zypper-focused." >&2
+fi
+
+znh_resolve_package_name() {
+    local logical="$1"
+    case "${SYSTEM_PKG_MANAGER}:${logical}" in
+        apt:NetworkManager) echo "network-manager" ;;
+        dnf:NetworkManager) echo "NetworkManager" ;;
+        pacman:NetworkManager) echo "networkmanager" ;;
+        apt:polkit) echo "policykit-1" ;;
+        pacman:python3) echo "python" ;;
+        apt:python3-gobject) echo "python3-gi" ;;
+        dnf:python3-gobject|zypper:python3-gobject) echo "python3-gobject" ;;
+        pacman:python3-gobject) echo "python-gobject" ;;
+        apt:ShellCheck|dnf:ShellCheck|pacman:ShellCheck) echo "shellcheck" ;;
+        zypper:ShellCheck) echo "ShellCheck" ;;
+        apt:python3-pipx) echo "pipx" ;;
+        dnf:python3-pipx|zypper:python3-pipx) echo "python3-pipx" ;;
+        pacman:python3-pipx) echo "python-pipx" ;;
+        *) echo "${logical}" ;;
+    esac
+}
+
+znh_install_hint_for_package() {
+    local package="$1"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) echo "sudo zypper --non-interactive install -y ${package}" ;;
+        dnf) echo "sudo dnf install -y ${package}" ;;
+        apt) echo "sudo apt-get install -y ${package}" ;;
+        pacman) echo "sudo pacman -S --noconfirm --needed ${package}" ;;
+        *) echo "Install package '${package}' using your system package manager." ;;
+    esac
+}
+
+znh_install_package_via_system_pm() {
+    local package="$1"
+    local -a as_root
+
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            return 1
+        fi
+        as_root=(sudo)
+    else
+        as_root=()
+    fi
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            execute_guarded "Install package '${package}' via zypper" "${as_root[@]}" zypper --non-interactive install -y "${package}"
+            ;;
+        dnf)
+            execute_guarded "Install package '${package}' via dnf" "${as_root[@]}" dnf install -y "${package}"
+            ;;
+        apt)
+            execute_guarded "Install package '${package}' via apt-get" "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${package}"
+            ;;
+        pacman)
+            execute_guarded "Install package '${package}' via pacman" "${as_root[@]}" pacman -S --noconfirm --needed "${package}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
 # Fast-path: if invoked as the installed helper (zypper-auto-helper) with an
 # unknown option-like first argument (starts with '-'), reject it immediately
@@ -1322,7 +1437,7 @@ PY
                 sleep 0.25
             else
                 echo "python3 not found; cannot start live dashboard server." >&2
-                echo "Install it with: sudo zypper install python3" >&2
+                echo "Install it with: $(znh_install_hint_for_package "$(znh_resolve_package_name "python3")")" >&2
             fi
         fi
 
@@ -36617,7 +36732,7 @@ run_snapper_menu_only() {
     if ! command -v snapper >/dev/null 2>&1; then
         log_error "Snapper is not installed (command 'snapper' not found)."
         echo "Snapper is not installed. Install it with:" 
-        echo "  sudo zypper install snapper"
+        echo "  $(znh_install_hint_for_package "$(znh_resolve_package_name "snapper")")"
         set -e
         return 1
     fi
@@ -42540,7 +42655,7 @@ run_soar_install_only() {
     SOAR_PRESENT=0
 
     # Detect Soar for the target user in common locations
-    if sudo -u "$SUDO_USER" command -v soar >/dev/null 2>&1; then
+    if sudo -u "$SUDO_USER" sh -lc 'command -v soar >/dev/null 2>&1'; then
         SOAR_PRESENT=1
     elif [ -x "$SUDO_USER_HOME/.local/bin/soar" ]; then
         SOAR_PRESENT=1
@@ -42558,7 +42673,7 @@ run_soar_install_only() {
 
     if ! command -v curl >/dev/null 2>&1; then
         log_error "curl is required to install Soar but is not installed."
-        echo "Install curl with: sudo zypper install curl" | tee -a "${LOG_FILE}"
+        echo "Install curl with: $(znh_install_hint_for_package "$(znh_resolve_package_name "curl")")" | tee -a "${LOG_FILE}"
         return 1
     fi
 
@@ -42936,10 +43051,15 @@ run_uninstall_helper_only() {
 # --- Helper function to check and install a dependency ---
 check_and_install() {
     local cmd=$1
-    local package=$2
+    local logical_package=$2
     local purpose=$3
+    local package
+    local install_hint
 
-    log_debug "Checking for command: $cmd (package: $package)"
+    package="$(znh_resolve_package_name "$logical_package")"
+    install_hint="$(znh_install_hint_for_package "$package")"
+
+    log_debug "Checking for command: $cmd (package: $package, manager: ${SYSTEM_PKG_MANAGER})"
 
     local interactive
     interactive=1
@@ -42970,14 +43090,16 @@ check_and_install() {
             log_info "Installing $package..."
             update_status "Installing dependency: $package"
 
-            if ! execute_guarded "Install dependency package '$package' (provides '$cmd')" sudo zypper install -y "$package"; then
+            if ! znh_install_package_via_system_pm "$package"; then
                 log_error "Failed to install $package. Please install it manually and re-run this script."
+                log_info "Manual install hint: ${install_hint}"
                 update_status "FAILED: Could not install $package"
                 exit 1
             fi
             log_success "Successfully installed $package"
         else
             log_error "Dependency '$package' is required. Please install it manually and re-run this script."
+            log_info "Manual install hint: ${install_hint}"
             update_status "FAILED: Required dependency $package not installed"
             exit 1
         fi
@@ -42997,7 +43119,7 @@ run_brew_install_only() {
     BREW_PATH=""
 
     # 1) In the user's PATH
-    if sudo -u "$SUDO_USER" command -v brew >/dev/null 2>&1; then
+    if sudo -u "$SUDO_USER" sh -lc 'command -v brew >/dev/null 2>&1'; then
         BREW_PATH="brew"
     # 2) In a per-user ~/.linuxbrew or ~/.homebrew prefix
     elif [ -x "$SUDO_USER_HOME/.linuxbrew/bin/brew" ]; then
@@ -43125,6 +43247,10 @@ run_brew_install_only() {
 run_pipx_helper_only() {
     log_info ">>> pipx (Python CLI tools) helper mode..."
     update_status "Running pipx helper..."
+    local pipx_package
+    local pipx_install_hint
+    pipx_package="$(znh_resolve_package_name "python3-pipx")"
+    pipx_install_hint="$(znh_install_hint_for_package "$pipx_package")"
 
     echo "" | tee -a "${LOG_FILE}"
     echo "==============================================" | tee -a "${LOG_FILE}"
@@ -43135,29 +43261,30 @@ run_pipx_helper_only() {
     echo "" | tee -a "${LOG_FILE}"
 
     # Check if pipx is already available for the target user
-    if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+    if sudo -u "$SUDO_USER" sh -lc 'command -v pipx >/dev/null 2>&1'; then
         log_success "pipx already appears to be installed for user $SUDO_USER"
         echo "pipx is already installed for user $SUDO_USER." | tee -a "${LOG_FILE}"
     else
         echo "pipx is not installed yet for user $SUDO_USER." | tee -a "${LOG_FILE}"
-        echo "The recommended way on openSUSE is:" | tee -a "${LOG_FILE}"
-        echo "  sudo zypper install python3-pipx" | tee -a "${LOG_FILE}"
+        echo "Install command for this system:" | tee -a "${LOG_FILE}"
+        echo "  ${pipx_install_hint}" | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
 
-        read -p "May I install python3-pipx for you now via zypper? [y/N]: " -r REPLY
+        read -p "May I install ${pipx_package} for you now via ${SYSTEM_PKG_MANAGER}? [y/N]: " -r REPLY
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Installing python3-pipx via zypper..."
-            update_status "Installing dependency: python3-pipx"
-            if ! execute_guarded "Install python3-pipx via zypper" zypper -n install python3-pipx; then
-                log_error "Failed to install python3-pipx. Please install it manually and re-run with --pip-package."
-                update_status "FAILED: Could not install python3-pipx"
+            log_info "Installing ${pipx_package} via ${SYSTEM_PKG_MANAGER}..."
+            update_status "Installing dependency: ${pipx_package}"
+            if ! znh_install_package_via_system_pm "${pipx_package}"; then
+                log_error "Failed to install ${pipx_package}. Please install it manually and re-run with --pip-package."
+                log_info "Manual install hint: ${pipx_install_hint}"
+                update_status "FAILED: Could not install ${pipx_package}"
                 return 1
             fi
-            log_success "Successfully installed python3-pipx"
+            log_success "Successfully installed ${pipx_package}"
 
             # Best-effort: ensure pipx adds its binaries to the user's PATH
-            if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+            if sudo -u "$SUDO_USER" sh -lc 'command -v pipx >/dev/null 2>&1'; then
                 execute_guarded "pipx ensurepath" sudo -u "$SUDO_USER" pipx ensurepath || true
             fi
         else
@@ -43176,7 +43303,7 @@ run_pipx_helper_only() {
     echo "" | tee -a "${LOG_FILE}"
 
     # Offer to run a safe upgrade-all for the user
-    if sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+    if sudo -u "$SUDO_USER" sh -lc 'command -v pipx >/dev/null 2>&1'; then
         read -p "Do you want me to run 'pipx upgrade-all' for user $SUDO_USER now? [y/N]: " -r UPGRADE
         echo
         if [[ $UPGRADE =~ ^[Yy]$ ]]; then
@@ -43221,19 +43348,23 @@ run_setup_sf_only() {
 
     local rc=0
     local snap_ok=0 flatpak_ok=0 flathub_ok=0 flathub_beta_ok=0 appcenter_ok=0
+    local snapd_pkg flatpak_pkg
+    snapd_pkg="$(znh_resolve_package_name "snapd")"
+    flatpak_pkg="$(znh_resolve_package_name "flatpak")"
 
     # 1) Ensure snapd (snap command) is installed
     if command -v snap >/dev/null 2>&1; then
         log_success "snap command already available (snapd installed)"
         snap_ok=1
     else
-        log_info "snap command not found; installing 'snapd' via zypper..."
+        log_info "snap command not found; installing '${snapd_pkg}' via ${SYSTEM_PKG_MANAGER}..."
         update_status "Installing snapd..."
-        if execute_guarded "Install snapd via zypper" zypper -n install snapd; then
+        if znh_install_package_via_system_pm "${snapd_pkg}"; then
             log_success "snapd successfully installed"
             snap_ok=1
         else
-            log_error "Failed to install snapd via zypper. Check your repositories or install manually."
+            log_error "Failed to install ${snapd_pkg} via ${SYSTEM_PKG_MANAGER}. Check your repositories or install manually."
+            log_info "Manual install hint: $(znh_install_hint_for_package "${snapd_pkg}")"
 
             # On openSUSE systems where 'snapd' is not provided by the
             # currently enabled zypper repositories, the recommended way
@@ -43308,13 +43439,14 @@ run_setup_sf_only() {
         log_success "Flatpak already installed"
         flatpak_ok=1
     else
-        log_info "Flatpak not found; installing 'flatpak' via zypper..."
+        log_info "Flatpak not found; installing '${flatpak_pkg}' via ${SYSTEM_PKG_MANAGER}..."
         update_status "Installing flatpak..."
-        if execute_guarded "Install flatpak via zypper" zypper -n install flatpak; then
+        if znh_install_package_via_system_pm "${flatpak_pkg}"; then
             log_success "Flatpak successfully installed"
             flatpak_ok=1
         else
-            log_error "Failed to install flatpak via zypper. Check your repositories or install manually."
+            log_error "Failed to install ${flatpak_pkg} via ${SYSTEM_PKG_MANAGER}. Check your repositories or install manually."
+            log_info "Manual install hint: $(znh_install_hint_for_package "${flatpak_pkg}")"
             rc=1
         fi
     fi
@@ -43775,6 +43907,7 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
         exit 0
     fi
 
+    # shellcheck disable=SC2329
     cleanup_live_logs() {
         # shellcheck disable=SC2317
         for pid in "${live_pids[@]}"; do
@@ -44066,23 +44199,24 @@ check_and_install "pkexec" "polkit" "graphical authentication"
 
 # ShellCheck is not strictly required at runtime, but is highly recommended
 # for safer maintenance of this bash-heavy project.
+SHELLCHECK_PACKAGE="$(znh_resolve_package_name "ShellCheck")"
 if ! command -v shellcheck >/dev/null 2>&1; then
     log_info "---"
     log_info "ℹ Recommended tool missing: 'shellcheck' (ShellCheck)"
     log_info "   Purpose: Bash static analysis (helps catch quoting/syntax bugs early)"
-    log_info "   Package: ShellCheck"
+    log_info "   Package: ${SHELLCHECK_PACKAGE}"
     read -p "   Install ShellCheck now? [Y/n]: " -r REPLY_SHELLCHECK || true
     REPLY_SHELLCHECK="${REPLY_SHELLCHECK:-Y}"
     log_debug "User response (ShellCheck): $REPLY_SHELLCHECK"
 
     if [[ $REPLY_SHELLCHECK =~ ^[Yy]$ ]]; then
         log_info "Installing ShellCheck..."
-        update_status "Installing recommended tool: ShellCheck"
-        if execute_guarded "Install ShellCheck (recommended)" sudo zypper install -y "ShellCheck"; then
+        update_status "Installing recommended tool: ${SHELLCHECK_PACKAGE}"
+        if znh_install_package_via_system_pm "${SHELLCHECK_PACKAGE}"; then
             log_success "ShellCheck installed"
         else
             # Non-fatal: leave install continuing.
-            log_warn "ShellCheck install failed (non-fatal). You can install it later with: sudo zypper install ShellCheck"
+            log_warn "ShellCheck install failed (non-fatal). You can install it later with: $(znh_install_hint_for_package "${SHELLCHECK_PACKAGE}")"
         fi
     else
         log_info "ShellCheck install skipped (continuing)."
@@ -44103,26 +44237,29 @@ log_success "Python version check passed: $PY_VERSION"
 
 # Check for PyGobject (the notification library)
 log_debug "Checking for PyGObject..."
+PYGOBJECT_PACKAGE="$(znh_resolve_package_name "python3-gobject")"
 if ! python3 -c "import gi" &> /dev/null; then
     log_info "---"
-    log_info "⚠️  Dependency missing: 'python3-gobject' (for notifications)."
-    read -p "   Install python3-gobject now? [Y/n]: " -r REPLY_GI || true
+    log_info "⚠️  Dependency missing: '${PYGOBJECT_PACKAGE}' (for notifications)."
+    read -p "   Install ${PYGOBJECT_PACKAGE} now? [Y/n]: " -r REPLY_GI || true
     REPLY_GI="${REPLY_GI:-Y}"
     log_debug "User response (PyGObject): $REPLY_GI"
 
     if [[ $REPLY_GI =~ ^[Yy]$ ]]; then
-        log_info "Installing python3-gobject..."
-        update_status "Installing python3-gobject..."
+        log_info "Installing ${PYGOBJECT_PACKAGE}..."
+        update_status "Installing ${PYGOBJECT_PACKAGE}..."
 
-        if ! execute_guarded "Install python3-gobject" sudo zypper install -y "python3-gobject"; then
-            log_error "Failed to install python3-gobject. Please install it manually and re-run this script."
-            update_status "FAILED: Could not install python3-gobject"
+        if ! znh_install_package_via_system_pm "${PYGOBJECT_PACKAGE}"; then
+            log_error "Failed to install ${PYGOBJECT_PACKAGE}. Please install it manually and re-run this script."
+            log_info "Manual install hint: $(znh_install_hint_for_package "${PYGOBJECT_PACKAGE}")"
+            update_status "FAILED: Could not install ${PYGOBJECT_PACKAGE}"
             exit 1
         fi
-        log_success "Successfully installed python3-gobject"
+        log_success "Successfully installed ${PYGOBJECT_PACKAGE}"
     else
-        log_error "Dependency 'python3-gobject' is required. Please install it manually and re-run this script."
-        update_status "FAILED: python3-gobject not installed"
+        log_error "Dependency '${PYGOBJECT_PACKAGE}' is required. Please install it manually and re-run this script."
+        log_info "Manual install hint: $(znh_install_hint_for_package "${PYGOBJECT_PACKAGE}")"
+        update_status "FAILED: ${PYGOBJECT_PACKAGE} not installed"
         exit 1
     fi
 else
@@ -44256,6 +44393,7 @@ LOG_DIR="/var/log/zypper-auto"
 STATUS_FILE="$LOG_DIR/download-status.txt"
 START_TIME_FILE="$LOG_DIR/download-start-time.txt"
 CACHE_DIR="/var/cache/zypp/packages"
+SYSTEM_PKG_MANAGER=""
 
 # Per-run correlation ID for the downloader (separate from the install helper
 # RUN_ID). This helps correlate downloader activity inside journalctl.
@@ -44294,6 +44432,51 @@ write_status() {
     printf '%s\n' "$value" >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS_FILE"
 }
 
+detect_system_package_manager() {
+    local id id_like
+    id=""
+    id_like=""
+
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+    fi
+
+    case "${id}" in
+        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+    esac
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        case "${id_like}" in
+            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
+            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
+            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
+            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
+        esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        if command -v zypper >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif command -v dnf >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif command -v apt-get >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="apt"
+        elif command -v pacman >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="pacman"
+        fi
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
 # Optional: read extra dup flags from /etc/zypper-auto.conf so users can
 # tweak solver behaviour (e.g. --allow-vendor-change) without editing
 # this script directly.
@@ -44305,6 +44488,173 @@ fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
 CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-60}"
 DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
+detect_system_package_manager
+
+pm_is_lock_error() {
+    local exit_code="$1"
+    local err_file="${2:-}"
+
+    if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${exit_code}" -eq 7 ] 2>/dev/null; then
+        return 0
+    fi
+
+    [ -n "${err_file}" ] || return 1
+    [ -f "${err_file}" ] || return 1
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        apt)
+            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${err_file}" 2>/dev/null
+            ;;
+        dnf)
+            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${err_file}" 2>/dev/null
+            ;;
+        pacman)
+            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${err_file}" 2>/dev/null
+            ;;
+        zypper)
+            grep -qiE 'system management is locked|locked by the application with pid' "${err_file}" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pm_is_network_error() {
+    local err_file="${1:-}"
+    [ -n "${err_file}" ] || return 1
+    [ -f "${err_file}" ] || return 1
+    grep -qiE 'could not resolve host|temporary failure resolving|failed to retrieve new repository metadata|curl error|connection timed out|failed to synchronize cache|could not connect|name or service not known|network is unreachable' "${err_file}" 2>/dev/null
+}
+
+pm_refresh_cmd() {
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get update
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y makecache --refresh
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Sy
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pm_preview_cmd() {
+    local out_file="$1"
+    local err_file="$2"
+    local rc
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "${out_file}" 2> "${err_file}"
+            return $?
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade > "${out_file}" 2> "${err_file}"
+            return $?
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -q check-update > "${out_file}" 2> "${err_file}"
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Qu > "${out_file}" 2> "${err_file}"
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pm_download_cmd() {
+    local err_file="$1"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only ${DUP_EXTRA_FLAGS} >/dev/null 2>"${err_file}"
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -y -d dist-upgrade >/dev/null 2>"${err_file}"
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y upgrade --downloadonly >/dev/null 2>"${err_file}"
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Syuw --noconfirm >/dev/null 2>"${err_file}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pm_extract_package_count() {
+    local preview_file="$1"
+    local count
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            count=$(grep -oP '\d+(?= packages to upgrade)' "${preview_file}" 2>/dev/null | head -1 || true)
+            ;;
+        apt)
+            count=$(grep -cE '^Inst[[:space:]]+' "${preview_file}" 2>/dev/null || true)
+            ;;
+        dnf)
+            count=$(grep -E '^[[:alnum:]_.+-]+[[:space:]]+[[:alnum:]_.:+~-]+' "${preview_file}" 2>/dev/null | grep -vE '^(Last metadata expiration check|Obsoleting Packages|Security:|Bugfix:|Enhancement:)' | wc -l || true)
+            ;;
+        pacman)
+            count=$(grep -cE '^[^[:space:]]+[[:space:]][^[:space:]]+[[:space:]]+->' "${preview_file}" 2>/dev/null || true)
+            ;;
+        *)
+            count=0
+            ;;
+    esac
+
+    if ! [[ "${count:-0}" =~ ^[0-9]+$ ]]; then
+        count=0
+    fi
+    echo "${count}"
+}
+
+pm_extract_download_size() {
+    local preview_file="$1"
+    local size
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            size=$(grep -oP 'Overall download size: ([\d.]+ [KMG]iB)' "${preview_file}" 2>/dev/null | grep -oP '[\d.]+ [KMG]iB' || true)
+            ;;
+        apt)
+            size=$(grep -oE '[0-9.]+ [kMG]B of archives' "${preview_file}" 2>/dev/null | head -1 | sed -E 's/ of archives$//' || true)
+            ;;
+        dnf|pacman)
+            size="unknown"
+            ;;
+        *)
+            size="unknown"
+            ;;
+    esac
+
+    if [ -z "${size:-}" ]; then
+        size="unknown"
+    fi
+    echo "${size}"
+}
 
 # Skip running any downloads on metered connections.
 # We cannot rely on systemd's ConditionNotOnMeteredConnection everywhere,
@@ -44421,9 +44771,9 @@ trigger_notifier() {
 # racy and fragile.
 handle_lock_or_fail() {
     local exit_code="$1" err_file="$2"
-    if [ "$exit_code" -eq 7 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Zypper is locked by another process; skipping this downloader run (will retry on next timer)" >&2
-        dlog "Zypper lock detected (exit 7); skipping this run"
+    if pm_is_lock_error "${exit_code}" "${err_file}"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Package manager '${SYSTEM_PKG_MANAGER}' is locked by another process; skipping this downloader run (will retry on next timer)" >&2
+        dlog "Package-manager lock detected (pm=${SYSTEM_PKG_MANAGER}, exit=${exit_code}); skipping this run"
         write_status "idle"
         if [ -n "$err_file" ] && [ -f "$err_file" ]; then
             rm -f "$err_file"
@@ -44431,6 +44781,118 @@ handle_lock_or_fail() {
         exit 0
     fi
 }
+# Cross-distro backend path (apt/dnf/pacman). Keep zypper flow below for
+# full progress-parity behaviour.
+if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
+    write_status "refreshing"
+    date +%s > "$START_TIME_FILE"
+
+    REFRESH_ERR=$(mktemp)
+    set +e
+    pm_refresh_cmd >/dev/null 2>"$REFRESH_ERR"
+    ZYP_EXIT=$?
+    set -e
+    if [ "$ZYP_EXIT" -ne 0 ]; then
+        handle_lock_or_fail "$ZYP_EXIT" "$REFRESH_ERR"
+        if pm_is_network_error "$REFRESH_ERR"; then
+            if is_metered_cached 1; then
+                write_status "idle"
+                dlog "Network error during refresh but connection is now metered; treating as idle"
+            else
+                write_status "error:network"
+            fi
+        else
+            write_status "error:repo"
+        fi
+        cat "$REFRESH_ERR" >&2 || true
+        STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
+        derr "Refresh failed (pm=${SYSTEM_PKG_MANAGER}, rc=${ZYP_EXIT}); status=${STATUS_NOW}"
+        rm -f "$REFRESH_ERR"
+        exit 0
+    fi
+    rm -f "$REFRESH_ERR"
+
+    DRY_OUTPUT=$(mktemp)
+    DRY_ERR=$(mktemp)
+    set +e
+    pm_preview_cmd "$DRY_OUTPUT" "$DRY_ERR"
+    ZYP_EXIT=$?
+    set -e
+    if [ "$ZYP_EXIT" -ne 0 ]; then
+        handle_lock_or_fail "$ZYP_EXIT" "$DRY_ERR"
+        if pm_is_network_error "$DRY_ERR"; then
+            if is_metered_cached 1; then
+                write_status "idle"
+                dlog "Network error during preview but connection is now metered; treating as idle"
+            else
+                write_status "error:network"
+            fi
+        else
+            write_status "error:repo"
+        fi
+        cat "$DRY_ERR" >&2 || true
+        STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
+        derr "Preview failed (pm=${SYSTEM_PKG_MANAGER}, rc=${ZYP_EXIT}); status=${STATUS_NOW}"
+        rm -f "$DRY_ERR" "$DRY_OUTPUT"
+        exit 0
+    fi
+    rm -f "$DRY_ERR"
+
+    PKG_COUNT="$(pm_extract_package_count "$DRY_OUTPUT")"
+    DOWNLOAD_SIZE="$(pm_extract_download_size "$DRY_OUTPUT")"
+
+    DRYRUN_OUTPUT_FILE="$LOG_DIR/dry-run-last.txt"
+    DRYRUN_TMP=$(mktemp)
+    {
+        printf '%s\n' "${PKG_COUNT} packages to upgrade"
+        printf '%s\n' "package-manager: ${SYSTEM_PKG_MANAGER}"
+        cat "$DRY_OUTPUT"
+    } > "$DRYRUN_TMP"
+    chmod 644 "$DRYRUN_TMP"
+    mv "$DRYRUN_TMP" "$DRYRUN_OUTPUT_FILE"
+
+    if [ "${PKG_COUNT}" -le 0 ] 2>/dev/null; then
+        write_status "idle"
+        dlog "No packages to upgrade (pm=${SYSTEM_PKG_MANAGER}, idle)"
+        rm -f "$DRY_OUTPUT"
+        exit 0
+    fi
+
+    write_status "downloading:${PKG_COUNT}:${DOWNLOAD_SIZE}:0:0"
+    if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
+        write_status "complete:0:0"
+        dlog "Detection-only mode; skipping download pass (pm=${SYSTEM_PKG_MANAGER})"
+        trigger_notifier
+        rm -f "$DRY_OUTPUT"
+        exit 0
+    fi
+
+    set +e
+    DL_ERR=$(mktemp)
+    pm_download_cmd "$DL_ERR"
+    ZYP_RET=$?
+    if [ "$ZYP_RET" -ne 0 ]; then
+        handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
+    fi
+    rm -f "$DL_ERR"
+    set -e
+
+    START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+
+    if [ "$ZYP_RET" -eq 0 ]; then
+        write_status "complete:${DURATION}:${PKG_COUNT}"
+        dlog "Download complete (pm=${SYSTEM_PKG_MANAGER}): queued=${PKG_COUNT} duration=${DURATION}s"
+        trigger_notifier
+    else
+        write_status "error:solver:$ZYP_RET"
+        derr "Download pass returned rc=${ZYP_RET} (pm=${SYSTEM_PKG_MANAGER})"
+    fi
+
+    rm -f "$DRY_OUTPUT"
+    exit 0
+fi
 
 # Write status: refreshing
 write_status "refreshing"
@@ -44727,7 +45189,7 @@ ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
-ReadWritePaths=/var/cache/zypp /var/log/zypper-auto
+ReadWritePaths=/var/cache/zypp /var/cache/dnf /var/cache/apt /var/cache/pacman/pkg /var/lib/dnf /var/lib/apt /var/lib/pacman /var/lib/dpkg /var/log/zypper-auto
 EOF
 log_success "Downloader service file created"
 chmod 644 "${DL_SERVICE_FILE}" 2>/dev/null || true
@@ -44936,6 +45398,123 @@ if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
 fi
+SYSTEM_PKG_MANAGER=""
+
+detect_system_package_manager() {
+    local id id_like
+    id=""
+    id_like=""
+
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+    fi
+
+    case "${id}" in
+        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+    esac
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        case "${id_like}" in
+            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
+            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
+            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
+            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
+        esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        if command -v zypper >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif command -v dnf >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif command -v apt-get >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="apt"
+        elif command -v pacman >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="pacman"
+        fi
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
+detect_system_package_manager
+log "Detected package manager: ${SYSTEM_PKG_MANAGER}"
+
+pm_is_lock_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            grep -qiE 'system management is locked|locked by the application with pid' "${out_file}" 2>/dev/null
+            ;;
+        apt)
+            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${out_file}" 2>/dev/null
+            ;;
+        dnf)
+            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${out_file}" 2>/dev/null
+            ;;
+        pacman)
+            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${out_file}" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pm_run_upgrade_streaming() {
+    local out_file="$1"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            pkexec zypper dup 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        apt)
+            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        dnf)
+            pkexec dnf -y upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        pacman)
+            pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        *)
+            echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return 1
+            ;;
+    esac
+}
+
+capture_package_snapshot() {
+    local out_file="$1"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper|dnf)
+            rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}"
+            ;;
+        apt)
+            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null | sort > "${out_file}"
+            ;;
+        pacman)
+            pacman -Q 2>/dev/null | sort > "${out_file}"
+            ;;
+        *)
+            : > "${out_file}"
+            ;;
+    esac
+}
 
 # Enterprise extensions (optional)
 HOOKS_ENABLED="${HOOKS_ENABLED:-true}"
@@ -45636,7 +46215,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
             fi
         else
             echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
-            echo "   To install: sudo zypper install flatpak"
+            echo "   To install: use your distro package manager (apt/dnf/pacman/zypper) to install flatpak"
         fi
     else
         echo "ℹ️  Flatpak updates are disabled in /etc/zypper-auto.conf (ENABLE_FLATPAK_UPDATES=false)."
@@ -45671,7 +46250,7 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
             fi
         else
             echo "⚠️  Snapd is not installed - skipping Snap updates."
-            echo "   Install (zypper): sudo zypper install snapd"
+            echo "   Install: use your distro package manager (apt/dnf/pacman/zypper) to install snapd"
             echo "   Install (opi)   : sudo opi snapd" 
             echo "   Then enable     : sudo systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket"
         fi
@@ -46620,6 +47199,54 @@ def update_status(status: str) -> None:
     except Exception as e:
         log_error(f"Failed to update status file: {e}")
 
+def detect_system_package_manager() -> str:
+    """Best-effort package manager detection for cross-distro notifier parsing."""
+    os_release: dict[str, str] = {}
+    try:
+        with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os_release[k.strip()] = v.strip().strip("\"'").lower()
+    except Exception:
+        os_release = {}
+
+    distro_id = os_release.get("ID", "")
+    distro_like = os_release.get("ID_LIKE", "")
+
+    if distro_id.startswith(("opensuse", "sles", "sled")):
+        return "zypper"
+    if distro_id in {"ubuntu", "debian", "linuxmint", "pop", "elementary", "neon", "kali", "raspbian"}:
+        return "apt"
+    if distro_id in {"fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"}:
+        return "dnf"
+    if distro_id in {"arch", "manjaro", "endeavouros", "garuda"}:
+        return "pacman"
+
+    if "suse" in distro_like:
+        return "zypper"
+    if "debian" in distro_like:
+        return "apt"
+    if "rhel" in distro_like or "fedora" in distro_like:
+        return "dnf"
+    if "arch" in distro_like:
+        return "pacman"
+
+    if shutil.which("zypper"):
+        return "zypper"
+    if shutil.which("dnf"):
+        return "dnf"
+    if shutil.which("apt-get"):
+        return "apt"
+    if shutil.which("pacman"):
+        return "pacman"
+
+    return "zypper"
+
+SYSTEM_PKG_MANAGER = detect_system_package_manager()
+
 # --- Helper: read extra dup flags from /etc/zypper-auto.conf ---
 
 def _read_dup_extra_flags() -> list[str]:
@@ -46740,6 +47367,65 @@ INSTALL_CLICK_SUPPRESS_MINUTES = _read_int_from_config(
     min_value=0,
     max_value=24 * 60,
 )
+
+def _preview_command() -> list[str]:
+    if SYSTEM_PKG_MANAGER == "zypper":
+        return ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run", *DUP_EXTRA_FLAGS]
+    if SYSTEM_PKG_MANAGER == "apt":
+        return ["pkexec", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-s", "dist-upgrade"]
+    if SYSTEM_PKG_MANAGER == "dnf":
+        return ["pkexec", "dnf", "-q", "check-update"]
+    if SYSTEM_PKG_MANAGER == "pacman":
+        return ["pkexec", "pacman", "-Qu"]
+    return ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run", *DUP_EXTRA_FLAGS]
+
+def _run_preview_command(timeout: int = 60) -> tuple[int, str]:
+    cmd = _preview_command()
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        output = stdout
+        if stderr:
+            output = (stdout + "\n" + stderr).strip()
+
+        rc = int(result.returncode)
+        if SYSTEM_PKG_MANAGER == "dnf" and rc == 100:
+            rc = 0
+        if SYSTEM_PKG_MANAGER == "pacman" and rc == 1:
+            # pacman -Qu commonly returns 1 when no upgrades are available.
+            rc = 0
+        return rc, output
+    except Exception as e:
+        log_debug(f"Preview command failed for pm={SYSTEM_PKG_MANAGER}: {e}")
+        return 1, ""
+
+def _recommended_manual_update_command() -> str:
+    if SYSTEM_PKG_MANAGER == "zypper":
+        return "sudo zypper dup --allow-vendor-change"
+    if SYSTEM_PKG_MANAGER == "apt":
+        return "sudo apt-get dist-upgrade"
+    if SYSTEM_PKG_MANAGER == "dnf":
+        return "sudo dnf upgrade"
+    if SYSTEM_PKG_MANAGER == "pacman":
+        return "sudo pacman -Syu"
+    return "sudo zypper dup --allow-vendor-change"
+
+def _recommended_manual_refresh_command() -> str:
+    if SYSTEM_PKG_MANAGER == "zypper":
+        return "sudo zypper refresh"
+    if SYSTEM_PKG_MANAGER == "apt":
+        return "sudo apt-get update"
+    if SYSTEM_PKG_MANAGER == "dnf":
+        return "sudo dnf makecache --refresh"
+    if SYSTEM_PKG_MANAGER == "pacman":
+        return "sudo pacman -Sy"
+    return "sudo zypper refresh"
 
 # --- Caching Functions ---
 def read_cache():
@@ -47592,98 +48278,122 @@ def get_updates():
         update_status("FAILED: Unexpected error while loading dry-run data")
         return ""
 
-def extract_package_preview(output: str, max_packages: int = 5) -> list:
-    """Extract a preview of packages being updated.
-    Returns list of package names.
-    """
-    packages = []
+def _count_updates_from_output(output: str) -> int:
+    text = output or ""
+    if not text.strip():
+        return 0
+
+    summary_match = re.search(r"(\d+)\s+packages?\s+to\s+upgrade", text, re.IGNORECASE)
+    if summary_match:
+        return int(summary_match.group(1))
+
+    if SYSTEM_PKG_MANAGER == "zypper":
+        if "Nothing to do." in text:
+            return 0
+        m = re.search(r"(\d+)\s+packages?\s+to\s+upgrade", text, re.IGNORECASE)
+        return int(m.group(1)) if m else 0
+
+    if SYSTEM_PKG_MANAGER == "apt":
+        return len(re.findall(r"^Inst\s+(\S+)", text, flags=re.MULTILINE))
+
+    if SYSTEM_PKG_MANAGER == "dnf":
+        count = 0
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(("Last metadata expiration check", "Obsoleting Packages", "Security:", "Bugfix:", "Enhancement:")):
+                continue
+            if re.match(r"^[A-Za-z0-9_.+-]+\.[A-Za-z0-9_+-]+\s+[0-9A-Za-z:._+~\-]+\s+\S+$", line):
+                count += 1
+        return count
+
+    if SYSTEM_PKG_MANAGER == "pacman":
+        return len(re.findall(r"^(\S+)\s+\S+\s+->\s+\S+", text, flags=re.MULTILINE))
+
+    return 0
+
+def extract_package_preview(output: str, max_packages: int = 5) -> list[str]:
+    """Extract a preview list of package names from manager-specific preview output."""
+    packages: list[str] = []
+    seen: set[str] = set()
     try:
-        # Look for lines that show package upgrades
-        # Format: package-name | version | arch | repository
-        in_upgrade_section = False
-        for line in output.splitlines():
-            line = line.strip()
-            
-            if "packages to upgrade" in line.lower():
-                in_upgrade_section = True
+        for raw in (output or "").splitlines():
+            line = raw.strip()
+            if not line:
                 continue
-            
-            # Skip non-package summary lines that can appear in the table,
-            # such as the "Package download size" section or "0 B | ... already in cache".
-            lower = line.lower()
-            if any(tok in lower for tok in ["package download size", "overall package size", "already in cache"]):
-                continue
-            
-            if in_upgrade_section and "|" in line:
-                # Parse package line
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= 1 and parts[0] and not parts[0].startswith("-"):
-                    pkg_name = parts[0]
-                    # Skip header lines and size-like pseudo "names" such as "0 B" or "12.3 MiB"
-                    if pkg_name not in ["Name", "Status", "#"] and not re.match(r"^[0-9].*", pkg_name):
-                        packages.append(pkg_name)
-                        if len(packages) >= max_packages:
-                            break
-            
-            # Stop if we hit another section
-            if in_upgrade_section and line and not line.startswith("|") and "|" not in line:
-                if packages:  # Only break if we found some packages
+
+            pkg_name = ""
+            if SYSTEM_PKG_MANAGER == "zypper":
+                if "|" in line:
+                    parts = [p.strip() for p in line.split("|")]
+                    if parts:
+                        candidate = parts[0]
+                        if candidate and candidate not in {"Name", "Status", "#"} and not re.match(r"^[0-9].*", candidate):
+                            pkg_name = candidate
+            elif SYSTEM_PKG_MANAGER == "apt":
+                m = re.match(r"^Inst\s+(\S+)", line)
+                if m:
+                    pkg_name = m.group(1)
+            elif SYSTEM_PKG_MANAGER == "dnf":
+                m = re.match(r"^([A-Za-z0-9_.+-]+)\.[A-Za-z0-9_+-]+\s+[0-9A-Za-z:._+~\-]+\s+\S+$", line)
+                if m:
+                    pkg_name = m.group(1)
+            elif SYSTEM_PKG_MANAGER == "pacman":
+                m = re.match(r"^(\S+)\s+\S+\s+->\s+\S+", line)
+                if m:
+                    pkg_name = m.group(1)
+
+            if pkg_name and pkg_name not in seen:
+                seen.add(pkg_name)
+                packages.append(pkg_name)
+                if len(packages) >= max_packages:
                     break
     except Exception as e:
         log_debug(f"Failed to extract package preview: {e}")
-    
+
     return packages
 
-
 def parse_output(output: str, include_preview: bool = True):
-    """Parse zypper's output for info.
+    """Parse package-manager preview output into notification title/message."""
+    log_debug(f"Parsing update preview output (pm={SYSTEM_PKG_MANAGER})")
+    text = output or ""
 
-    Returns: (title, message, snapshot, package_count)
-             or (None, None, None, 0).
-    """
-    log_debug("Parsing zypper output...")
-    
-    if "Nothing to do." in output:
-        log_info("No updates found in zypper output")
+    no_update_markers = (
+        "Nothing to do.",
+        "0 upgraded, 0 newly installed",
+        "All packages are up to date",
+    )
+    if any(marker in text for marker in no_update_markers):
+        log_info("No updates found in preview output")
         return None, None, None, 0
 
-    # Count Packages
-    count_match = re.search(r"(\d+) packages to upgrade", output)
-    package_count = int(count_match.group(1)) if count_match else 0
-    
-    # If no packages found or count is 0, return None
+    package_count = _count_updates_from_output(text)
     if package_count == 0:
         log_info("No packages to upgrade (count is 0)")
         return None, None, None, 0
 
-    # Find Snapshot
-    snapshot_match = None
-    # Preferred: product line such as
-    #   openSUSE Tumbleweed  20251227-0 -> 20251228-0
-    product_match = re.search(r"openSUSE Tumbleweed\s+\S+\s*->\s*([0-9T\-]+)", output)
-    if product_match:
-        snapshot_match = product_match
-    else:
-        # Fallback: older tumbleweed-release pattern
-        snapshot_match = re.search(r"tumbleweed-release.*->\s*([\dTb\-]+)", output)
-    snapshot = snapshot_match.group(1) if snapshot_match else ""
+    snapshot = ""
+    if SYSTEM_PKG_MANAGER == "zypper":
+        product_match = re.search(r"openSUSE Tumbleweed\s+\S+\s*->\s*([0-9T\-]+)", text)
+        if product_match:
+            snapshot = product_match.group(1)
+        else:
+            fallback = re.search(r"tumbleweed-release.*->\s*([\dTb\-]+)", text)
+            if fallback:
+                snapshot = fallback.group(1)
 
     log_info(
         f"Found {package_count} packages to upgrade"
         + (f" (snapshot: {snapshot})" if snapshot else "")
+        + f" [pm={SYSTEM_PKG_MANAGER}]"
     )
 
-    # Build strings
     title = f"Snapshot {snapshot} Ready" if snapshot else "Updates Ready to Install"
+    message = "1 update is pending." if package_count == 1 else f"{package_count} updates are pending."
 
-    if package_count == 1:
-        message = "1 update is pending."
-    else:
-        message = f"{package_count} updates are pending."
-    
-    # Add package preview if requested
     if include_preview and package_count > 0:
-        preview_packages = extract_package_preview(output, max_packages=3)
+        preview_packages = extract_package_preview(text, max_packages=3)
         if preview_packages:
             preview_str = ", ".join(preview_packages)
             if len(preview_packages) < package_count:
@@ -48060,8 +48770,8 @@ def main():
                         else:
                             time_str = f"{seconds}s"
                         
-                        # Before we show any "Downloads Complete" message, double‑check that
-                        # there are still updates pending. If zypper dup --dry-run reports
+                        # Before we show any "Downloads Complete" message, double-check that
+                        # there are still updates pending. If the preview command reports
                         # nothing to do, this completion status is stale (the user probably
                         # installed updates manually) and we should skip the download
                         # notification entirely so it doesn't appear after everything
@@ -48069,23 +48779,12 @@ def main():
                         dry_output = ""
                         pending_count = None
                         try:
-                            log_debug("Verifying pending updates for downloads-complete status...")
-                            preview_cmd = [
-                                "pkexec",
-                                "zypper",
-                                "--non-interactive",
-                                "dup",
-                                "--dry-run",
-                                *DUP_EXTRA_FLAGS,
-                            ]
-                            result = subprocess.run(
-                                preview_cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=30,
+                            log_debug(
+                                f"Verifying pending updates for downloads-complete status (pm={SYSTEM_PKG_MANAGER})..."
                             )
-                            if result.returncode == 0:
-                                dry_output = result.stdout or ""
+                            rc, preview_output = _run_preview_command(timeout=30)
+                            dry_output = preview_output or ""
+                            if rc == 0:
                                 _, _, _, pending_count = parse_output(dry_output, include_preview=False)
                                 pending_count = pending_count or 0
                         except Exception as e:
@@ -48094,7 +48793,9 @@ def main():
                             pending_count = None
                         
                         if pending_count == 0:
-                            log_info("Download status was 'complete' but zypper reports no pending updates; treating completion as stale and skipping 'Downloads Complete' notification.")
+                            log_info(
+                                f"Download status was 'complete' but preview for {SYSTEM_PKG_MANAGER} reports no pending updates; treating completion as stale and skipping 'Downloads Complete' notification."
+                            )
                             try:
                                 with open(download_status_file, "w") as f:
                                     f.write("idle")
@@ -48149,7 +48850,7 @@ def main():
                     # user instead of silently failing.
                     log_error("Background downloader reported a network error while checking for updates")
                     msg = (
-                        "The background updater could not reach the openSUSE repositories.\n\n"
+                        "The background updater could not reach configured package repositories.\n\n"
                         "This is usually a temporary network or DNS problem.\n\n"
                         "Check your connection and DNS settings, then try again."
                     )
@@ -48178,10 +48879,11 @@ def main():
                     # metadata). Treat similarly to network errors but use a
                     # slightly different message.
                     log_error("Background downloader reported a repository error while checking for updates")
+                    refresh_cmd = _recommended_manual_refresh_command()
                     msg = (
                         "The background updater hit an error while talking to configured repositories.\n\n"
-                        "Zypper reported repository failures or invalid metadata.\n\n"
-                        "Run 'sudo zypper refresh' in a terminal for full details."
+                        f"{SYSTEM_PKG_MANAGER} reported repository failures or invalid metadata.\n\n"
+                        f"Run '{refresh_cmd}' in a terminal for full details."
                     )
                     n = Notify.Notification.new(
                         "Update check failed (repositories)",
@@ -48214,32 +48916,25 @@ def main():
                         exit_code = None
 
                     if exit_code is not None:
-                        log_info(f"Background downloader encountered a zypper solver/error exit code {exit_code}")
+                        log_info(
+                            f"Background downloader encountered a solver/non-interactive error from {SYSTEM_PKG_MANAGER} (exit code {exit_code})"
+                        )
                     else:
-                        log_info("Background downloader reported a solver error (unknown exit code)")
+                        log_info(
+                            f"Background downloader reported a solver/non-interactive error for {SYSTEM_PKG_MANAGER} (unknown exit code)"
+                        )
 
-                    # Try to run a dry-run to get a summary of pending updates, even if
-                    # zypper still exits non-zero due to conflicts.
+                    # Try to run a preview to get a summary of pending updates, even if
+                    # the package manager exits non-zero due to conflicts.
                     dry_output = ""
                     try:
-                        log_debug("Running zypper dup --dry-run to summarise solver-conflict state...")
-                        conflict_cmd = [
-                            "pkexec",
-                            "zypper",
-                            "--non-interactive",
-                            "dup",
-                            "--dry-run",
-                            *DUP_EXTRA_FLAGS,
-                        ]
-                        result = subprocess.run(
-                            conflict_cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=60,
+                        log_debug(
+                            f"Running preview command to summarise solver-conflict state (pm={SYSTEM_PKG_MANAGER})..."
                         )
-                        dry_output = result.stdout or ""
+                        rc, dry_output = _run_preview_command(timeout=60)
+                        log_debug(f"Solver summary preview command finished with rc={rc}")
                     except Exception as e2:
-                        log_debug(f"Failed to run zypper dry-run for solver summary: {e2}")
+                        log_debug(f"Failed to run preview command for solver summary: {e2}")
                         dry_output = ""
 
                     title = "Updates require your decision"
@@ -48259,28 +48954,47 @@ def main():
 
                     if parsed_title:
                         title = f"{parsed_title} (manual decision needed)"
-                        message = parsed_message + "\\n\\nZypper needs your decision to resolve conflicts before these updates can be installed."
+                        message = (
+                            parsed_message
+                            + f"\\n\\n{SYSTEM_PKG_MANAGER} needs your decision to resolve conflicts before these updates can be installed."
+                        )
                     else:
                         # Fallback generic explanation
                         if exit_code is not None:
                             message = (
-                                f"Background download of updates hit a zypper solver error (exit code {exit_code}).\\n\\n"
-                                "Some packages may already be cached, but zypper needs your decision to continue."
+                                f"Background download of updates hit a {SYSTEM_PKG_MANAGER} solver/conflict error (exit code {exit_code}).\\n\\n"
+                                "Some packages may already be cached, but manual conflict resolution is required to continue."
                             )
                         else:
                             message = (
-                                "Background download of updates hit a zypper solver error.\\n\\n"
-                                "Some packages may already be cached, but zypper needs your decision to continue."
+                                f"Background download of updates hit a {SYSTEM_PKG_MANAGER} solver/conflict error.\\n\\n"
+                                "Some packages may already be cached, but manual conflict resolution is required to continue."
                             )
 
                     # Always give clear instructions on what to do next.
+                    recommended_cmd = _recommended_manual_update_command()
                     message += (
-                        "\\n\\nRecommended command for vendor/switch conflicts:\\n"
-                        "  sudo zypper dup --allow-vendor-change\\n"
-                        "or click 'Install Now' to open the helper, then follow zypper's prompts."
-                        "\\n\\nWhen zypper shows solution options, enter the option number and press Enter "
-                        "(for example: 1/2/3/4). Option 4 may remove/deinstall conflicting packages depending on the case."
+                        "\\n\\nRecommended command:\\n"
+                        f"  {recommended_cmd}\\n"
+                        "or click 'Install Now' to open the helper."
                     )
+                    if SYSTEM_PKG_MANAGER == "zypper":
+                        message += (
+                            "\\n\\nWhen zypper shows solution options, enter the option number and press Enter "
+                            "(for example: 1/2/3/4). Option 4 may remove/deinstall conflicting packages depending on the case."
+                        )
+                    elif SYSTEM_PKG_MANAGER == "apt":
+                        message += (
+                            "\\n\\nIf apt reports held or broken packages, resolve those first, then rerun the command."
+                        )
+                    elif SYSTEM_PKG_MANAGER == "dnf":
+                        message += (
+                            "\\n\\nIf dnf reports dependency conflicts, review the listed packages and retry after resolving them."
+                        )
+                    elif SYSTEM_PKG_MANAGER == "pacman":
+                        message += (
+                            "\\n\\nIf pacman reports dependency or file conflicts, resolve them and rerun the command."
+                        )
 
                     action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
@@ -48317,7 +49031,7 @@ def main():
                     except KeyboardInterrupt:
                         log_info("Solver-conflict notification main loop interrupted")
 
-                    # Do not run another zypper dry-run in this cycle; wait for user action.
+                    # Do not run another preview in this cycle; wait for user action.
                     return
                     
             except Exception as e:
@@ -48333,15 +49047,16 @@ def main():
         
         output = get_updates()
 
-        # If get_updates() failed with a real error (not just zypper lock), show error notification
+        # If get_updates() failed with a real error, show an authentication/config notification.
         if output is None:
             log_error("Update check failed due to PolicyKit/authentication error")
             update_status("FAILED: Update check failed")
             err_title = "Update check failed"
+            manual_preview_cmd = " ".join(shlex.quote(part) for part in _preview_command())
             err_message = (
                 "The updater could not authenticate with PolicyKit.\n"
                 "This may be a configuration issue.\n\n"
-                "Try running 'pkexec zypper dup --dry-run' manually to test."
+                f"Try running '{manual_preview_cmd}' manually to test."
             )
             n = Notify.Notification.new(err_title, err_message, "dialog-error")
             n.set_timeout(30000)  # 30 seconds
@@ -48349,10 +49064,9 @@ def main():
             n.show()
             log_info("Error notification displayed")
             return
-
-        # Empty string means environment was unsafe and zypper was skipped.
+        # Empty string means environment was unsafe or no downloader preview data is available.
         if not output or not output.strip():
-            log_info("No zypper run performed (environment not safe). Exiting.")
+            log_info("No preview output available from downloader (or environment not safe). Exiting.")
             return
 
         title, message, snapshot, package_count = parse_output(output)
@@ -48626,6 +49340,123 @@ if [ -r "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
 fi
+SYSTEM_PKG_MANAGER=""
+
+detect_system_package_manager() {
+    local id id_like
+    id=""
+    id_like=""
+
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+    fi
+
+    case "${id}" in
+        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+    esac
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        case "${id_like}" in
+            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
+            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
+            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
+            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
+        esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        if command -v zypper >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif command -v dnf >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif command -v apt-get >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="apt"
+        elif command -v pacman >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="pacman"
+        fi
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
+detect_system_package_manager
+log "Detected package manager: ${SYSTEM_PKG_MANAGER}"
+
+pm_is_lock_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            grep -qiE 'system management is locked|locked by the application with pid' "${out_file}" 2>/dev/null
+            ;;
+        apt)
+            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${out_file}" 2>/dev/null
+            ;;
+        dnf)
+            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${out_file}" 2>/dev/null
+            ;;
+        pacman)
+            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${out_file}" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+pm_run_upgrade_streaming() {
+    local out_file="$1"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            pkexec zypper dup 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        apt)
+            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        dnf)
+            pkexec dnf -y upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        pacman)
+            pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        *)
+            echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${LOG_FILE}" | tee "${out_file}"
+            return 1
+            ;;
+    esac
+}
+
+capture_package_snapshot() {
+    local out_file="$1"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper|dnf)
+            rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}"
+            ;;
+        apt)
+            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null | sort > "${out_file}"
+            ;;
+        pacman)
+            pacman -Q 2>/dev/null | sort > "${out_file}"
+            ;;
+        *)
+            : > "${out_file}"
+            ;;
+    esac
+}
 
 run_hooks() {
     local stage="$1"
@@ -48850,6 +49681,8 @@ __znh_wait_for_zypp_lock_smart() {
 
 __znh_run_zypper_dup_with_lock_retry() {
     local lock_wait_seconds="$1"
+    local cmd_label
+    cmd_label="${SYSTEM_PKG_MANAGER} system upgrade"
 
     # Safety: cap retries so we don't spam pkexec prompts forever.
     local dup_max_attempts=3
@@ -48859,24 +49692,26 @@ __znh_run_zypper_dup_with_lock_retry() {
     if [ "${dup_max_attempts}" -gt 5 ] 2>/dev/null; then
         dup_max_attempts=5
     fi
+    if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
+        dup_max_attempts=1
+    fi
 
     local dup_attempt rc tmp_out locked
     dup_attempt=1
     while [ "${dup_attempt}" -le "${dup_max_attempts}" ] 2>/dev/null; do
         tmp_out="$(mktemp /tmp/znh-run-install-dup.XXXXXX 2>/dev/null || mktemp)"
 
-        printf '\n===== zypper dup attempt %s/%s =====\n' "${dup_attempt}" "${dup_max_attempts}" | tee -a "${LOG_FILE}"
-        log "RUN_UPDATE: starting pkexec zypper dup (attempt ${dup_attempt}/${dup_max_attempts})"
+        printf '\n===== %s attempt %s/%s =====\n' "${cmd_label}" "${dup_attempt}" "${dup_max_attempts}" | tee -a "${LOG_FILE}"
+        log "RUN_UPDATE: starting ${cmd_label} (attempt ${dup_attempt}/${dup_max_attempts})"
 
-        # Stream full zypper output to BOTH the terminal and run-install.log.
-        pkexec zypper dup 2>&1 | tee -a "${LOG_FILE}" | tee "${tmp_out}"
-        rc=${PIPESTATUS[0]}
+        pm_run_upgrade_streaming "${tmp_out}"
+        rc=$?
         __znh_write_run_install_tail >/dev/null 2>&1 || true
 
-        log "RUN_UPDATE: pkexec zypper dup finished (attempt ${dup_attempt}/${dup_max_attempts}, rc=${rc})"
+        log "RUN_UPDATE: ${cmd_label} finished (attempt ${dup_attempt}/${dup_max_attempts}, rc=${rc})"
 
         locked=0
-        if [ "${rc}" -ne 0 ] 2>/dev/null && grep -qiE 'system management is locked' "${tmp_out}" 2>/dev/null; then
+        if [ "${rc}" -ne 0 ] 2>/dev/null && pm_is_lock_output_file "${tmp_out}"; then
             locked=1
         fi
         rm -f "${tmp_out}" 2>/dev/null || true
@@ -48884,11 +49719,13 @@ __znh_run_zypper_dup_with_lock_retry() {
         if [ "${locked}" -eq 1 ] 2>/dev/null; then
             LOCKED_DURING_UPDATE=1
             say ""
-            say "⚠️  Zypper reported a lock while starting (attempt ${dup_attempt}/${dup_max_attempts})."
-            __znh_log_zypp_lock_details
+            say "⚠️  ${SYSTEM_PKG_MANAGER} reported a package-manager lock while starting (attempt ${dup_attempt}/${dup_max_attempts})."
+            if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ]; then
+                __znh_log_zypp_lock_details
+            fi
 
-            if [ "${dup_attempt}" -lt "${dup_max_attempts}" ] 2>/dev/null; then
-                say "Waiting for the lock to clear, then retrying zypper dup..."
+            if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${dup_attempt}" -lt "${dup_max_attempts}" ] 2>/dev/null; then
+                say "Waiting for the lock to clear, then retrying the system upgrade..."
                 if ! __znh_wait_for_zypp_lock_smart "${lock_wait_seconds}"; then
                     log "RUN_UPDATE: still locked after waiting; not retrying further"
                     return "${rc}"
@@ -48947,23 +49784,25 @@ RUN_UPDATE() {
     fi
     log "RUN_UPDATE: lock wait timeout seconds = ${LOCK_WAIT_SECONDS}"
 
-    if ! __znh_wait_for_zypp_lock_smart "${LOCK_WAIT_SECONDS}"; then
-        say ""
-        say "System management is still locked by another update tool."
-        say "Close that other update tool (or wait for it to finish), then run"
-        say "this 'Ready to Install' action again."
-        say ""
-        log "RUN_UPDATE: aborting because another updater is still holding the lock"
-        __znh_log_zypp_lock_details
-        say "Press Enter to close this window..."
-        set +e
-        if ! read -r _ </dev/tty 2>/dev/null; then
-            # If /dev/tty is not available (or read fails instantly), pause briefly
-            # so the user still has a chance to see the message.
-            sleep 5
+    if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ]; then
+        if ! __znh_wait_for_zypp_lock_smart "${LOCK_WAIT_SECONDS}"; then
+            say ""
+            say "System management is still locked by another update tool."
+            say "Close that other update tool (or wait for it to finish), then run"
+            say "this 'Ready to Install' action again."
+            say ""
+            log "RUN_UPDATE: aborting because another updater is still holding the lock"
+            __znh_log_zypp_lock_details
+            say "Press Enter to close this window..."
+            set +e
+            if ! read -r _ </dev/tty 2>/dev/null; then
+                # If /dev/tty is not available (or read fails instantly), pause briefly
+                # so the user still has a chance to see the message.
+                sleep 5
+            fi
+            set -e
+            return 0
         fi
-        set -e
-        return 0
     fi
 
     # Pre-update hooks (best-effort)
@@ -48979,12 +49818,12 @@ RUN_UPDATE() {
     DELTA_FILE="${PKG_DELTA_DIR}/update-delta-$(date +%Y%m%d-%H%M%S).log"
 
     log "RUN_UPDATE: Capturing pre-update package state into ${PKG_PRE_FILE}..."
-    if ! execute_guarded "Capture pre-update package snapshot" bash -lc "rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\\n' | sort >\"${PKG_PRE_FILE}\""; then
+    if ! execute_guarded "Capture pre-update package snapshot (${SYSTEM_PKG_MANAGER})" capture_package_snapshot "${PKG_PRE_FILE}"; then
         log "RUN_UPDATE: WARNING: failed to capture pre-update package snapshot (see log)"
     fi
 
-    log "RUN_UPDATE: starting pkexec zypper dup..."
-    log "RUN_UPDATE: streaming zypper output into ${LOG_FILE} (so lock/root-cause is visible in logs)"
+    log "RUN_UPDATE: starting interactive system upgrade via ${SYSTEM_PKG_MANAGER}..."
+    log "RUN_UPDATE: streaming package-manager output into ${LOG_FILE} (so root cause is visible in logs)"
 
     set +e
     __znh_run_zypper_dup_with_lock_retry "${LOCK_WAIT_SECONDS}"
@@ -49030,7 +49869,7 @@ RUN_UPDATE() {
     # and compute a delta file describing exactly which packages changed.
     if [ "$rc" -eq 0 ]; then
         log "RUN_UPDATE: Capturing post-update package state into ${PKG_POST_FILE}..."
-        if execute_guarded "Capture post-update package snapshot" bash -lc "rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\\n' | sort >\"${PKG_POST_FILE}\""; then
+        if execute_guarded "Capture post-update package snapshot (${SYSTEM_PKG_MANAGER})" capture_package_snapshot "${PKG_POST_FILE}"; then
             log "RUN_UPDATE: Computing package delta into ${DELTA_FILE}..."
             execute_guarded "Write package delta file" bash -lc "{
                 echo '=== Package Changes (post - pre) ==='
@@ -49061,16 +49900,16 @@ RUN_UPDATE() {
 
     if [ "$rc" -eq 0 ]; then
         UPDATE_SUCCESS=true
-        log "RUN_UPDATE: pkexec zypper dup completed successfully (rc=$rc)"
-        helper_send_webhook "Zypper update successful" "Interactive update completed successfully." "65280"
+        log "RUN_UPDATE: ${SYSTEM_PKG_MANAGER} system upgrade completed successfully (rc=$rc)"
+        helper_send_webhook "System update successful (${SYSTEM_PKG_MANAGER})" "Interactive update completed successfully." "65280"
     else
         UPDATE_SUCCESS=false
         if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
-            log "RUN_UPDATE: pkexec zypper dup failed due to existing zypper lock (rc=$rc)"
-            helper_send_webhook "Zypper update blocked (lock)" "Interactive update could not run because system management was locked (rc=$rc)." "16760576"
+            log "RUN_UPDATE: ${SYSTEM_PKG_MANAGER} update blocked by package-manager lock (rc=$rc)"
+            helper_send_webhook "System update blocked (${SYSTEM_PKG_MANAGER} lock)" "Interactive update could not run because system management was locked (rc=$rc)." "16760576"
         else
-            log "RUN_UPDATE: pkexec zypper dup FAILED (rc=$rc)"
-            helper_send_webhook "Zypper update FAILED" "Interactive update failed (rc=$rc). See run-install.log for details." "16711680"
+            log "RUN_UPDATE: ${SYSTEM_PKG_MANAGER} system upgrade FAILED (rc=$rc)"
+            helper_send_webhook "System update FAILED (${SYSTEM_PKG_MANAGER})" "Interactive update failed (rc=$rc). See run-install.log for details." "16711680"
         fi
     fi
 
@@ -49111,7 +49950,7 @@ RUN_UPDATE() {
             fi
         else
             echo "⚠️  Flatpak is not installed - skipping Flatpak updates."
-            echo "   To install: sudo zypper install flatpak"
+            echo "   To install: use your distro package manager (apt/dnf/pacman/zypper) to install flatpak"
         fi
     else
         echo "ℹ️  Flatpak updates are disabled in /etc/zypper-auto.conf (ENABLE_FLATPAK_UPDATES=false)."
@@ -49132,7 +49971,7 @@ RUN_UPDATE() {
             fi
         else
             echo "⚠️  Snapd is not installed - skipping Snap updates."
-            echo "   To install: sudo zypper install snapd"
+            echo "   To install: use your distro package manager (apt/dnf/pacman/zypper) to install snapd"
             echo "   Then enable: sudo systemctl enable --now snapd"
         fi
     else
@@ -49332,7 +50171,7 @@ RUN_UPDATE() {
             if [ "${LOCKED_DURING_UPDATE:-0}" -eq 1 ]; then
                 say "ℹ️  Skipping optional updates because system management was locked; no system updates were applied."
             else
-                say "ℹ️  Skipping optional updates because zypper dup failed (rc=$rc)."
+                say "ℹ️  Skipping optional updates because ${SYSTEM_PKG_MANAGER} system upgrade failed (rc=$rc)."
             fi
         else
             say "ℹ️  No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU."
@@ -49342,34 +50181,54 @@ RUN_UPDATE() {
 
     echo "Checking which services need to be restarted..."
     echo ""
-    
-    # Run zypper ps -s and capture output (even if dup had errors)
-    ZYPPER_PS_OUTPUT=$(pkexec zypper ps -s 2>/dev/null || true)
-    echo "$ZYPPER_PS_OUTPUT"
-    
-    # Check if there are any running processes in the output
-    if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
-        echo ""
-        echo "ℹ️  Services listed above are using old library versions."
-        echo ""
-        echo "What this means:"
-        echo "  • These services/processes are still running old code in memory"
-        echo "  • They should be restarted to use the updated libraries"
-        echo ""
-        echo "Options:"
-        echo "  1. Restart individual services: systemctl restart <service>"
-        echo "  2. Reboot your system (recommended for kernel/system updates)"
-        echo ""
+
+    if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ]; then
+        # Run zypper ps -s and capture output (even if dup had errors)
+        ZYPPER_PS_OUTPUT=$(pkexec zypper ps -s 2>/dev/null || true)
+        echo "$ZYPPER_PS_OUTPUT"
+
+        # Check if there are any running processes in the output
+        if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
+            echo ""
+            echo "ℹ️  Services listed above are using old library versions."
+            echo ""
+            echo "What this means:"
+            echo "  • These services/processes are still running old code in memory"
+            echo "  • They should be restarted to use the updated libraries"
+            echo ""
+            echo "Options:"
+            echo "  1. Restart individual services: systemctl restart <service>"
+            echo "  2. Reboot your system (recommended for kernel/system updates)"
+            echo ""
+        else
+            echo "✅ No services require restart. You're all set!"
+            echo ""
+        fi
+    elif [ "${SYSTEM_PKG_MANAGER}" = "dnf" ] && command -v needs-restarting >/dev/null 2>&1; then
+        NEEDS_RESTART_OUTPUT=$(pkexec needs-restarting -s 2>/dev/null || true)
+        if [ -n "${NEEDS_RESTART_OUTPUT:-}" ]; then
+            echo "${NEEDS_RESTART_OUTPUT}"
+            echo ""
+            echo "ℹ️  Services listed above should be restarted."
+            echo "Options:"
+            echo "  1. Restart individual services: systemctl restart <service>"
+            echo "  2. Reboot your system (recommended for kernel/system updates)"
+            echo ""
+        else
+            echo "✅ No services require restart. You're all set!"
+            echo ""
+        fi
     else
-        echo "✅ No services require restart. You're all set!"
+        echo "ℹ️  Service restart inspection is limited for package manager '${SYSTEM_PKG_MANAGER}'."
+        echo "   Consider rebooting if core libraries or kernel packages were upgraded."
         echo ""
     fi
 
     if [ "$UPDATE_SUCCESS" = false ]; then
         if [ "$LOCKED_DURING_UPDATE" -eq 1 ]; then
-            say "⚠  Zypper could not run because system management is locked by another tool. No system packages were changed."
+            say "⚠  ${SYSTEM_PKG_MANAGER} could not run because the package manager is locked by another tool. No system packages were changed."
         else
-            say "⚠️  Zypper dup reported errors (see above). Optional app updates were skipped."
+            say "⚠️  ${SYSTEM_PKG_MANAGER} system upgrade reported errors (see above). Optional app updates were skipped."
         fi
         say ""
     fi
@@ -49519,8 +50378,61 @@ echo ""
 echo "Fetching update information..."
 echo ""
 
-# Run zypper with details
-if pkexec zypper --non-interactive dup --dry-run --details; then
+# Detect package manager for preview command
+SYSTEM_PKG_MANAGER=""
+if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${ID:-}" in
+        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+    esac
+fi
+if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+    if command -v zypper >/dev/null 2>&1; then
+        SYSTEM_PKG_MANAGER="zypper"
+    elif command -v dnf >/dev/null 2>&1; then
+        SYSTEM_PKG_MANAGER="dnf"
+    elif command -v apt-get >/dev/null 2>&1; then
+        SYSTEM_PKG_MANAGER="apt"
+    elif command -v pacman >/dev/null 2>&1; then
+        SYSTEM_PKG_MANAGER="pacman"
+    else
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+fi
+
+PREVIEW_OK=0
+case "${SYSTEM_PKG_MANAGER}" in
+    zypper)
+        if pkexec zypper --non-interactive dup --dry-run --details; then
+            PREVIEW_OK=1
+        fi
+        ;;
+    apt)
+        if pkexec env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade; then
+            PREVIEW_OK=1
+        fi
+        ;;
+    dnf)
+        pkexec dnf -q check-update
+        rc=$?
+        if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
+            PREVIEW_OK=1
+        fi
+        ;;
+    pacman)
+        pkexec pacman -Qu
+        rc=$?
+        if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
+            PREVIEW_OK=1
+        fi
+        ;;
+esac
+
+if [ "${PREVIEW_OK}" -eq 1 ]; then
     echo ""
     echo "=========================================="
     echo ""
@@ -59760,14 +60672,14 @@ SOAR_PRESENT=0
 # ENABLE_PIPX_UPDATES=true and pipx is missing for the target user.
 PIPX_MISSING_FOR_UPDATES=0
 if [[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]]; then
-    if ! sudo -u "$SUDO_USER" command -v pipx >/dev/null 2>&1; then
+    if ! sudo -u "$SUDO_USER" sh -lc 'command -v pipx >/dev/null 2>&1'; then
         PIPX_MISSING_FOR_UPDATES=1
         log_info "pipx is not installed for user $SUDO_USER but ENABLE_PIPX_UPDATES=true (optional)"
     fi
 fi
 
 # 1) Check via the user's PATH
-if sudo -u "$SUDO_USER" command -v soar >/dev/null 2>&1; then
+if sudo -u "$SUDO_USER" sh -lc 'command -v soar >/dev/null 2>&1'; then
     SOAR_PRESENT=1
 # 2) Check common per-user install locations
 elif [ -x "$SUDO_USER_HOME/.local/bin/soar" ]; then
@@ -59791,12 +60703,15 @@ if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
     log_info "Optional package managers missing: ${MISSING_PACKAGES[*]}"
     
     # Create notification for user
+    OPTIONAL_FLATPAK_HINT="$(znh_install_hint_for_package "$(znh_resolve_package_name "flatpak")")"
+    OPTIONAL_SNAPD_HINT="$(znh_install_hint_for_package "$(znh_resolve_package_name "snapd")")"
+    OPTIONAL_PIPX_HINT="$(znh_install_hint_for_package "$(znh_resolve_package_name "python3-pipx")")"
     MISSING_MSG="The following optional package managers are not installed:\n\n"
     for pkg in "${MISSING_PACKAGES[@]}"; do
         if [ "$pkg" = "flatpak" ]; then
-            MISSING_MSG+="• Flatpak - for Flatpak app updates\n  Install: sudo zypper install flatpak\n\n"
+            MISSING_MSG+="• Flatpak - for Flatpak app updates\n  Install: ${OPTIONAL_FLATPAK_HINT}\n\n"
         elif [ "$pkg" = "snapd" ]; then
-            MISSING_MSG+="• Snapd - for Snap package updates\n  Install: sudo zypper install snapd\n  Enable: sudo systemctl enable --now snapd\n\n"
+            MISSING_MSG+="• Snapd - for Snap package updates\n  Install: ${OPTIONAL_SNAPD_HINT}\n  Enable: sudo systemctl enable --now snapd\n\n"
         fi
     done
     MISSING_MSG+="These are optional. System updates will work without them."
@@ -59835,12 +60750,12 @@ if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
         if [ "$pkg" = "flatpak" ]; then
             echo "Flatpak:" | tee -a "${LOG_FILE}"
             echo "  Purpose: Update Flatpak applications" | tee -a "${LOG_FILE}"
-            echo "  Install: sudo zypper install flatpak" | tee -a "${LOG_FILE}"
+            echo "  Install: ${OPTIONAL_FLATPAK_HINT}" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
         elif [ "$pkg" = "snapd" ]; then
             echo "Snapd:" | tee -a "${LOG_FILE}"
             echo "  Purpose: Update Snap packages" | tee -a "${LOG_FILE}"
-            echo "  Install (zypper): sudo zypper install snapd" | tee -a "${LOG_FILE}"
+            echo "  Install: ${OPTIONAL_SNAPD_HINT}" | tee -a "${LOG_FILE}"
             echo "  Install (opi)   : sudo opi snapd" | tee -a "${LOG_FILE}"
             echo "  Enable services : sudo systemctl enable --now snapd.apparmor.service snapd.seeded.service snapd.service snapd.socket" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
@@ -59853,7 +60768,7 @@ if [ "${#MISSING_PACKAGES[@]}" -gt 0 ]; then
         elif [ "$pkg" = "pipx" ]; then
             echo "pipx:" | tee -a "${LOG_FILE}"
             echo "  Purpose: Manage standalone Python CLI tools (yt-dlp, black, ansible, httpie, etc.)" | tee -a "${LOG_FILE}"
-            echo "  Install: sudo zypper install python3-pipx" | tee -a "${LOG_FILE}"
+            echo "  Install: ${OPTIONAL_PIPX_HINT}" | tee -a "${LOG_FILE}"
             echo "  Helper:  zypper-auto-helper --pip-package  (run without sudo)" | tee -a "${LOG_FILE}"
             echo "" | tee -a "${LOG_FILE}"
         fi

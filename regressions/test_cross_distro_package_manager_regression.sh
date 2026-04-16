@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_TARGET_FILE="${REPO_ROOT}/UNI-auto.sh"
+if [ ! -f "${DEFAULT_TARGET_FILE}" ]; then
+    DEFAULT_TARGET_FILE="${REPO_ROOT}/zypper-auto.sh"
+fi
+TARGET_FILE="${1:-${DEFAULT_TARGET_FILE}}"
+
+usage() {
+    cat <<'EOF'
+Usage: ./test_cross_distro_package_manager_regression.sh [path/to/UNI-auto.sh]
+
+Static regression smoke test for cross-distro package-manager wiring:
+  - package manager detection supports apt/dnf/pacman/zypper
+  - package name resolution and install-hint helpers exist
+  - dependency installer path uses the package-manager abstraction
+  - phase-2 runtime helpers wire downloader/install/notifier/view paths
+  - hardcoded "sudo zypper install" guidance is no longer present
+EOF
+}
+
+FAILURES=()
+
+record_failure() {
+    local msg="$1"
+    FAILURES+=("${msg}")
+}
+
+require_contains() {
+    local haystack="$1"
+    local needle="$2"
+    local label="$3"
+    if ! grep -Fq -- "${needle}" <<< "${haystack}"; then
+        record_failure "${label} (missing: ${needle})"
+    fi
+}
+
+require_not_contains() {
+    local haystack="$1"
+    local needle="$2"
+    local label="$3"
+    if grep -Fq -- "${needle}" <<< "${haystack}"; then
+        record_failure "${label} (unexpected: ${needle})"
+    fi
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    usage
+    exit 0
+fi
+
+if [ ! -f "${TARGET_FILE}" ]; then
+    echo "FAIL SUMMARY (1)" >&2
+    echo " - Target file not found: ${TARGET_FILE}" >&2
+    exit 1
+fi
+
+source_text="$(cat -- "${TARGET_FILE}")"
+
+require_contains "${source_text}" "detect_system_package_manager() {" "Missing package-manager detection helper"
+require_contains "${source_text}" "SYSTEM_PKG_MANAGER=\"apt\"" "Missing apt detection path"
+require_contains "${source_text}" "SYSTEM_PKG_MANAGER=\"dnf\"" "Missing dnf detection path"
+require_contains "${source_text}" "SYSTEM_PKG_MANAGER=\"pacman\"" "Missing pacman detection path"
+require_contains "${source_text}" "SYSTEM_PKG_MANAGER=\"zypper\"" "Missing zypper detection path"
+
+require_contains "${source_text}" "znh_resolve_package_name() {" "Missing package-name resolver helper"
+require_contains "${source_text}" "znh_install_hint_for_package() {" "Missing install-hint helper"
+require_contains "${source_text}" "znh_install_package_via_system_pm() {" "Missing package install helper"
+
+require_contains "${source_text}" "package=\"\$(znh_resolve_package_name \"\$logical_package\")\"" "Dependency checker is not using package-name resolver"
+require_contains "${source_text}" "if ! znh_install_package_via_system_pm \"\$package\"; then" "Dependency checker is not using package-manager install helper"
+# Phase-2 runtime abstraction checks (downloader/install/notifier/view paths)
+require_contains "${source_text}" "pm_is_lock_error() {" "Missing downloader lock classifier helper"
+require_contains "${source_text}" "pm_is_network_error() {" "Missing downloader network classifier helper"
+require_contains "${source_text}" "pm_refresh_cmd() {" "Missing downloader refresh command helper"
+require_contains "${source_text}" "pm_preview_cmd() {" "Missing downloader preview command helper"
+require_contains "${source_text}" "pm_download_cmd() {" "Missing downloader download command helper"
+
+require_contains "${source_text}" "pm_run_upgrade_streaming() {" "Missing install helper runtime upgrade dispatcher"
+require_contains "${source_text}" "capture_package_snapshot() {" "Missing install helper package snapshot dispatcher"
+require_contains "${source_text}" "pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade" "Install helper missing apt upgrade command"
+require_contains "${source_text}" "pkexec dnf -y upgrade" "Install helper missing dnf upgrade command"
+require_contains "${source_text}" "pkexec pacman -Syu --noconfirm" "Install helper missing pacman upgrade command"
+
+require_contains "${source_text}" "_preview_command() -> list[str]:" "Notifier missing preview command builder helper"
+require_contains "${source_text}" "_run_preview_command(timeout: int = 60) -> tuple[int, str]:" "Notifier missing preview command runner helper"
+require_contains "${source_text}" "_recommended_manual_update_command() -> str:" "Notifier missing manual update command helper"
+require_contains "${source_text}" "_recommended_manual_refresh_command() -> str:" "Notifier missing manual refresh command helper"
+require_contains "${source_text}" "rc, preview_output = _run_preview_command(timeout=30)" "Notifier completion check is not using manager-aware preview runner"
+require_contains "${source_text}" "rc, dry_output = _run_preview_command(timeout=60)" "Notifier solver summary is not using manager-aware preview runner"
+require_contains "${source_text}" "refresh_cmd = _recommended_manual_refresh_command()" "Notifier repository-error path is not using manager-aware refresh guidance"
+
+require_contains "${source_text}" "pkexec env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade" "View-changes helper missing apt preview command"
+require_contains "${source_text}" "pkexec dnf -q check-update" "View-changes helper missing dnf preview command"
+require_contains "${source_text}" "pkexec pacman -Qu" "View-changes helper missing pacman preview command"
+
+require_not_contains "${source_text}" "sudo zypper install" "Hardcoded zypper install guidance still present"
+require_not_contains "${source_text}" "The background updater could not reach the openSUSE repositories." "Notifier network error message is still openSUSE-only"
+require_not_contains "${source_text}" "Run 'sudo zypper refresh' in a terminal for full details." "Notifier repository recovery hint is still hardcoded to zypper refresh"
+require_not_contains "${source_text}" "No zypper run performed (environment not safe). Exiting." "Notifier empty-preview log path is still zypper-only"
+
+if [ "${#FAILURES[@]}" -gt 0 ]; then
+    echo "FAIL SUMMARY (${#FAILURES[@]})" >&2
+    for f in "${FAILURES[@]}"; do
+        echo " - ${f}" >&2
+    done
+    exit 1
+fi
+
+echo "PASS: cross-distro package-manager regression checks passed"

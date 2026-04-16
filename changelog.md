@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- [2026-04-15 20:31 UTC] Phase-2 cross-distro runtime abstraction is now wired in `UNI-auto.sh`: downloader, notifier, interactive install helper, and view-changes flows route preview/refresh/install guidance through package-manager-aware dispatchers (`apt`/`dnf`/`pacman`/`zypper`) instead of hardcoded zypper-only runtime commands.
+- [2026-04-15 20:31 UTC] Notifier conflict/error handling now uses backend-aware preview/manual command hints (`_preview_command`, `_run_preview_command`, `_recommended_manual_update_command`, `_recommended_manual_refresh_command`) and keeps zypper solver-option prompts scoped to zypper only.
+- [2026-04-15 20:31 UTC] Extended `regressions/test_cross_distro_package_manager_regression.sh` to guard phase-2 runtime wiring (downloader/install/notifier/view-changes helpers and command paths) plus notifier message de-hardcoding assertions.
+- [2026-04-14 20:17 UTC] `UNI-auto.sh` now detects `apt`/`dnf`/`pacman`/`zypper`, resolves per-distro package names for key dependencies (NetworkManager, polkit, PyGObject, ShellCheck, pipx, Flatpak, Snapd), and uses package-manager-aware install/hint commands instead of hardcoded `zypper install` lines (with an explicit best-effort notice that the update engine remains zypper-focused).
 - [2026-04-02 19:37 UTC] README now includes a dedicated “Rocket conflict quick flow” troubleshooting mini-guide (allow-vendor-change fallback, solver option `1/2/3/4` guidance, log check path, and dashboard refresh hint) plus TOC/quick-link entries.
 - [2026-04-02 19:35 UTC] Rocket conflict handling UX now adds pulsing red conflict emphasis plus explicit `--allow-vendor-change` guidance and solver-choice helper cues (`1/2/3/4`) in preview and result flows.
 - [2026-04-02 19:35 UTC] Rocket result conflict view now includes quick solver helper buttons (`1`,`2`,`3`,`4`) with copy/toast wiring to speed manual zypper prompt resolution.
