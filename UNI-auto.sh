@@ -28,6 +28,7 @@ if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
     . /etc/os-release
 else
+    pm_deep_gpg_supported=1
     echo "Cannot detect Linux distribution (missing /etc/os-release). Aborting." >&2
     exit 1
 fi
@@ -32149,6 +32150,10 @@ NT_SCRIPT_NAME="zypper-notify-updater.py"
 INSTALL_SCRIPT_NAME="zypper-run-install"
 VIEW_CHANGES_SCRIPT_NAME="zypper-view-changes"
 
+# --- Shared package-manager runtime helper ---
+PM_RUNTIME_HELPER_DIR="/usr/local/lib/zypper-auto"
+PM_RUNTIME_HELPER_PATH="${PM_RUNTIME_HELPER_DIR}/package-manager-runtime.sh"
+
 # Helper: compute a DBus user bus address for a given user (defaults to
 # SUDO_USER). Prints the address to stdout.
 get_user_bus() {
@@ -32561,6 +32566,105 @@ run_self_check() {
     update_status "Syntax checks completed successfully"
 }
 
+znh_root_filesystem_type() {
+    local fs
+    fs=""
+    if command -v findmnt >/dev/null 2>&1; then
+        fs=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+    fi
+    if [ -z "${fs:-}" ] && [ -r /proc/mounts ]; then
+        fs=$(awk '$2=="/" {print $3; exit}' /proc/mounts 2>/dev/null || true)
+    fi
+    if [ -z "${fs:-}" ]; then
+        fs="unknown"
+    fi
+    printf '%s' "${fs}"
+}
+
+znh_is_btrfs_root_filesystem() {
+    [ "$(znh_root_filesystem_type)" = "btrfs" ]
+}
+
+znh_snapper_root_verification_supported() {
+    # Snapper auto-healing checks are meaningful only when:
+    # - root filesystem is btrfs
+    # - snapper is installed
+    # - root snapper config exists
+    if ! znh_is_btrfs_root_filesystem; then
+        return 1
+    fi
+    if ! command -v snapper >/dev/null 2>&1; then
+        return 1
+    fi
+    if [ ! -r /etc/snapper/configs/root ]; then
+        return 1
+    fi
+    return 0
+}
+
+znh_pm_is_rpm_based() {
+    local pm="${1:-${SYSTEM_PKG_MANAGER:-}}"
+    case "${pm}" in
+        zypper|dnf)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_verify_primary_repo_host() {
+    local pm uri host
+    local apt_sources_list_path apt_sources_list_dir
+    local dnf_repos_dir dnf_config_dir
+    local pacman_mirrorlist_path
+    pm="${1:-${SYSTEM_PKG_MANAGER:-}}"
+    uri=""
+    host=""
+    apt_sources_list_path="${VERIFY_APT_SOURCES_LIST_PATH:-/etc/apt/sources.list}"
+    apt_sources_list_dir="${VERIFY_APT_SOURCES_LIST_DIR:-/etc/apt/sources.list.d}"
+    dnf_repos_dir="${VERIFY_DNF_REPOS_DIR:-/etc/yum.repos.d}"
+    dnf_config_dir="${VERIFY_DNF_CONFIG_DIR:-/etc/dnf}"
+    pacman_mirrorlist_path="${VERIFY_PACMAN_MIRRORLIST_PATH:-/etc/pacman.d/mirrorlist}"
+
+    case "${pm}" in
+        zypper)
+            echo "download.opensuse.org"
+            return 0
+            ;;
+        apt)
+            uri=$(grep -R -h -E '^[[:space:]]*(deb|deb-src)[[:space:]]+https?://' "${apt_sources_list_path}" "${apt_sources_list_dir}" 2>/dev/null | awk '{print $2}' | head -n 1 || true)
+            if [ -z "${uri:-}" ]; then
+                uri=$(grep -R -h -E '^[[:space:]]*URIs:[[:space:]]+https?://' "${apt_sources_list_dir}" 2>/dev/null | sed -E 's/^[[:space:]]*URIs:[[:space:]]+//' | awk '{print $1}' | head -n 1 || true)
+            fi
+            ;;
+        dnf)
+            uri=$(grep -R -h -E '^[[:space:]]*(baseurl|metalink|mirrorlist)=[[:space:]]*https?://' "${dnf_repos_dir}" "${dnf_config_dir}" 2>/dev/null | sed -E 's/^[^=]+=[[:space:]]*//' | awk '{print $1}' | head -n 1 || true)
+            ;;
+        pacman)
+            uri=$(grep -E '^[[:space:]]*Server[[:space:]]*=[[:space:]]*https?://' "${pacman_mirrorlist_path}" 2>/dev/null | sed -E 's/^[[:space:]]*Server[[:space:]]*=[[:space:]]*//' | awk '{print $1}' | head -n 1 || true)
+            ;;
+    esac
+
+    if [ -n "${uri:-}" ]; then
+        host=$(printf '%s\n' "${uri}" | sed -E 's#^[a-zA-Z]+://([^/@]+@)?([^/:?#]+).*$#\2#' | head -n 1 || true)
+    fi
+
+    if [ -n "${host:-}" ]; then
+        echo "${host}"
+        return 0
+    fi
+
+    case "${pm}" in
+        apt) echo "deb.debian.org" ;;
+        dnf) echo "mirrors.fedoraproject.org" ;;
+        pacman) echo "archlinux.org" ;;
+        zypper) echo "download.opensuse.org" ;;
+        *) echo "" ;;
+    esac
+}
+
 # --- Function: Run Verification (used by both install and --verify modes) ---
 run_verification_only() {
     # This function contains all the verification logic
@@ -32601,6 +32705,8 @@ run_verification_only() {
     local VERIFY_STATE_FILE VERIFY_PREV_FAIL_STREAK VERIFY_LAST_HEAVY_EPOCH VERIFY_NOW_EPOCH
     local VERIFY_LOW_IMPACT_MODE VERIFY_RUN_HEAVY_CHECKS
     local verify_fail_streak_threshold verify_heavy_cooldown_minutes verify_bg_mode
+    local VERIFY_ROOT_FSTYPE VERIFY_BTRFS_ROOT VERIFY_SNAPPER_ROOT_SUPPORTED
+    local VERIFY_PM VERIFY_PM_IS_RPM_BASED VERIFY_REPO_DNS_TARGET
 
     VERIFY_STATE_FILE="${LOG_DIR}/verify-smart-state.env"
     VERIFY_PREV_FAIL_STREAK=0
@@ -32609,6 +32715,31 @@ run_verification_only() {
     VERIFY_LOW_IMPACT_MODE=0
     VERIFY_RUN_HEAVY_CHECKS=1
     verify_bg_mode=0
+    VERIFY_PM="${SYSTEM_PKG_MANAGER:-unknown}"
+    VERIFY_PM_IS_RPM_BASED=0
+    VERIFY_REPO_DNS_TARGET=""
+
+    if [ -z "${VERIFY_PM}" ] || [ "${VERIFY_PM}" = "unknown" ]; then
+        detect_system_package_manager >/dev/null 2>&1 || true
+        VERIFY_PM="${SYSTEM_PKG_MANAGER:-unknown}"
+    fi
+    if znh_pm_is_rpm_based "${VERIFY_PM}"; then
+        VERIFY_PM_IS_RPM_BASED=1
+    fi
+    VERIFY_REPO_DNS_TARGET="$(znh_verify_primary_repo_host "${VERIFY_PM}")"
+    VERIFY_ROOT_FSTYPE="$(znh_root_filesystem_type)"
+    VERIFY_BTRFS_ROOT=0
+    VERIFY_SNAPPER_ROOT_SUPPORTED=0
+
+    if [ "${VERIFY_ROOT_FSTYPE}" = "btrfs" ]; then
+        VERIFY_BTRFS_ROOT=1
+    fi
+    if znh_snapper_root_verification_supported; then
+        VERIFY_SNAPPER_ROOT_SUPPORTED=1
+    fi
+
+    log_debug "Verification filesystem profile: root_fstype=${VERIFY_ROOT_FSTYPE}, btrfs_root=${VERIFY_BTRFS_ROOT}, snapper_root_supported=${VERIFY_SNAPPER_ROOT_SUPPORTED}"
+    log_debug "Verification package-manager profile: manager=${VERIFY_PM}, rpm_based=${VERIFY_PM_IS_RPM_BASED}, repo_dns_target=${VERIFY_REPO_DNS_TARGET:-unknown}"
 
     if [ ! -t 1 ] 2>/dev/null; then
         verify_bg_mode=1
@@ -32664,6 +32795,178 @@ run_verification_only() {
         fi
         log_info "ℹ Low-impact mode: skipping ${label} this cycle"
         return 0
+    }
+
+    verify_pm_run_with_timeout() {
+        local timeout_seconds="$1"
+        shift
+        if command -v timeout >/dev/null 2>&1 && [[ "${timeout_seconds:-}" =~ ^[0-9]+$ ]] && [ "${timeout_seconds}" -gt 0 ] 2>/dev/null; then
+            timeout "${timeout_seconds}" "$@"
+        else
+            "$@"
+        fi
+    }
+
+    verify_pm_refresh() {
+        local mode="${1:-primary}"
+        case "${VERIFY_PM}" in
+            zypper)
+                case "${mode}" in
+                    force)
+                        verify_pm_run_with_timeout 90 zypper --non-interactive refresh --force
+                        ;;
+                    gpg-force)
+                        verify_pm_run_with_timeout 120 zypper --non-interactive --gpg-auto-import-keys refresh --force
+                        ;;
+                    *)
+                        verify_pm_run_with_timeout 45 zypper --non-interactive --quiet refresh
+                        ;;
+                esac
+                ;;
+            apt)
+                verify_pm_run_with_timeout 90 env DEBIAN_FRONTEND=noninteractive apt-get update
+                ;;
+            dnf)
+                verify_pm_run_with_timeout 90 dnf -q makecache --refresh
+                ;;
+            pacman)
+                if [ "${mode}" = "force" ]; then
+                    verify_pm_run_with_timeout 90 pacman -Syy --noconfirm
+                else
+                    verify_pm_run_with_timeout 90 pacman -Sy --noconfirm
+                fi
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+
+    verify_pm_cache_cleanup() {
+        case "${VERIFY_PM}" in
+            zypper)
+                zypper --non-interactive clean --all
+                ;;
+            apt)
+                rm -rf /var/lib/apt/lists/*
+                ;;
+            dnf)
+                dnf -y clean all
+                ;;
+            pacman)
+                pacman -Scc --noconfirm
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+
+    verify_pm_output_looks_signature_error() {
+        local text="$1"
+        case "${VERIFY_PM}" in
+            zypper)
+                printf '%s\n' "${text}" | grep -qiE 'gpg|signature|NOKEY|public key|keyring|repomd\.xml.*signature'
+                ;;
+            apt)
+                printf '%s\n' "${text}" | grep -qiE 'gpg|signature|NO_PUBKEY|EXPKEYSIG|BADSIG|public key|keyring|InRelease.*not signed|Release.*not signed'
+                ;;
+            dnf)
+                printf '%s\n' "${text}" | grep -qiE 'gpg|signature|NOKEY|public key|keyring|repomd\.xml.*signature|GPG check FAILED|cannot be verified'
+                ;;
+            pacman)
+                printf '%s\n' "${text}" | grep -qiE 'gpg|signature|keyring|invalid or corrupted package|unknown trust|PGP'
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+
+    verify_pm_attempt_keyring_repair() {
+        case "${VERIFY_PM}" in
+            zypper)
+                log_info "  → Step 1: zypper clean --all"
+                execute_optional "Clean zypper caches" verify_pm_cache_cleanup >/dev/null 2>&1 || true
+                log_info "  → Step 2: wipe raw metadata cache (/var/cache/zypp/raw)"
+                if [ -d /var/cache/zypp/raw ]; then
+                    execute_optional "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
+                fi
+                log_info "  → Step 3: force refresh with key auto-import"
+                if execute_guarded "Rebuild repo keys and refresh" verify_pm_refresh gpg-force; then
+                    REPO_REFRESH_FAILED=0
+                    return 0
+                fi
+                return 1
+                ;;
+            apt)
+                log_info "  → Step 1: clear apt metadata cache (/var/lib/apt/lists)"
+                execute_optional "Clear apt metadata cache" verify_pm_cache_cleanup >/dev/null 2>&1 || true
+                apt_keyring_pkgs=()
+                for apt_keyring_pkg in debian-archive-keyring ubuntu-keyring kali-archive-keyring; do
+                    if dpkg-query -W -f='${Status}' "${apt_keyring_pkg}" 2>/dev/null | grep -q '^install ok installed$'; then
+                        apt_keyring_pkgs+=("${apt_keyring_pkg}")
+                    fi
+                done
+                if [ "${#apt_keyring_pkgs[@]}" -gt 0 ] 2>/dev/null; then
+                    log_info "  → Step 2: reinstall detected apt keyring package(s): ${apt_keyring_pkgs[*]}"
+                    execute_optional "Reinstall apt keyring packages" env DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y "${apt_keyring_pkgs[@]}" >/dev/null 2>&1 || true
+                else
+                    log_info "  → Step 2: no common apt keyring package detected (debian/ubuntu/kali); skipping reinstall step"
+                fi
+                log_info "  → Step 3: force apt repository refresh after keyring remediation"
+                if execute_guarded "Refresh apt repositories (post-keyring repair)" verify_pm_refresh force; then
+                    REPO_REFRESH_FAILED=0
+                    return 0
+                fi
+                return 1
+                ;;
+            dnf)
+                log_info "  → Step 1: clean dnf metadata caches"
+                execute_optional "Clean dnf metadata cache" verify_pm_cache_cleanup >/dev/null 2>&1 || true
+                log_info "  → Step 2: import RPM GPG keys from /etc/pki/rpm-gpg (best-effort)"
+                if [ -d /etc/pki/rpm-gpg ]; then
+                    dnf_gpg_key_found=0
+                    for dnf_gpg_key in /etc/pki/rpm-gpg/*; do
+                        [ -f "${dnf_gpg_key}" ] || continue
+                        dnf_gpg_key_found=1
+                        execute_optional "Import RPM GPG key (${dnf_gpg_key##*/})" rpm --import "${dnf_gpg_key}" >/dev/null 2>&1 || true
+                    done
+                    if [ "${dnf_gpg_key_found}" -eq 0 ] 2>/dev/null; then
+                        log_info "  ℹ No RPM GPG key files found under /etc/pki/rpm-gpg"
+                    fi
+                else
+                    log_info "  ℹ /etc/pki/rpm-gpg not found; skipping RPM GPG import step"
+                fi
+                log_info "  → Step 3: force dnf metadata refresh after key remediation"
+                if execute_guarded "Refresh dnf repositories (post-keyring repair)" verify_pm_refresh force; then
+                    REPO_REFRESH_FAILED=0
+                    return 0
+                fi
+                return 1
+                ;;
+            pacman)
+                if command -v pacman-key >/dev/null 2>&1; then
+                    log_info "  → Step 1: repopulate pacman keyring"
+                    execute_optional "Populate pacman keyring" pacman-key --populate >/dev/null 2>&1 || true
+                    log_info "  → Step 2: refresh pacman keyring keys (best-effort)"
+                    execute_optional "Refresh pacman keys" verify_pm_run_with_timeout 120 pacman-key --refresh-keys >/dev/null 2>&1 || true
+                else
+                    log_info "  → pacman-key not available; skipping keyring repopulation step"
+                fi
+                log_info "  → Step 3: refresh archlinux-keyring package (best-effort)"
+                execute_optional "Refresh archlinux-keyring package" pacman -Sy --noconfirm archlinux-keyring >/dev/null 2>&1 || true
+                log_info "  → Step 4: force pacman sync database refresh after key remediation"
+                if execute_guarded "Refresh pacman repositories (post-keyring repair)" verify_pm_refresh force; then
+                    REPO_REFRESH_FAILED=0
+                    return 0
+                fi
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
     }
 
     log_info ">>> Running advanced installation verification and auto-repair..."
@@ -33181,37 +33484,41 @@ fi
 
 # Check 14: zypp lock state (stale vs active)
 log_debug "[14/${TOTAL_CHECKS}] Checking for zypp lock file (stale vs active)..."
-if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
-    ZYPP_LOCK_FILE="/run/zypp.pid"
-    [ -f "/var/run/zypp.pid" ] && ZYPP_LOCK_FILE="/var/run/zypp.pid"
-    ZYPP_LOCK_PID=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
+if [ "${VERIFY_PM}" = "zypper" ]; then
+    if [ -f "/run/zypp.pid" ] || [ -f "/var/run/zypp.pid" ]; then
+        ZYPP_LOCK_FILE="/run/zypp.pid"
+        [ -f "/var/run/zypp.pid" ] && ZYPP_LOCK_FILE="/var/run/zypp.pid"
+        ZYPP_LOCK_PID=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
 
-    # If PID is numeric and alive: treat as an active/legitimate lock.
-    if [[ "${ZYPP_LOCK_PID:-}" =~ ^[0-9]+$ ]] && kill -0 "$ZYPP_LOCK_PID" 2>/dev/null; then
-        ZYPPER_LOCK_ACTIVE=1
-        ZYPPER_LOCK_PID_ACTIVE="$ZYPP_LOCK_PID"
-        log_warn "⚠ zypper appears to be running (lock held by PID ${ZYPP_LOCK_PID}); skipping zypper-based repairs"
-    else
-        # PID is missing/non-numeric OR process is dead.
-        # Never remove the lock if any zypper process is currently running.
-        if pgrep -x zypper >/dev/null 2>&1; then
+        # If PID is numeric and alive: treat as an active/legitimate lock.
+        if [[ "${ZYPP_LOCK_PID:-}" =~ ^[0-9]+$ ]] && kill -0 "$ZYPP_LOCK_PID" 2>/dev/null; then
             ZYPPER_LOCK_ACTIVE=1
-            ZYPPER_LOCK_PID_ACTIVE="${ZYPP_LOCK_PID:-unknown}"
-            log_warn "⚠ zypp lock file looks stale but a zypper process is running; NOT removing lock (${ZYPP_LOCK_FILE})"
+            ZYPPER_LOCK_PID_ACTIVE="$ZYPP_LOCK_PID"
+            log_warn "⚠ zypper appears to be running (lock held by PID ${ZYPP_LOCK_PID}); skipping zypper-based repairs"
         else
-            log_warn "⚠ Found stale zypp lock at ${ZYPP_LOCK_FILE} (PID ${ZYPP_LOCK_PID:-unknown} not running)"
-            log_info "  → Attempting to remove stale lock file..."
-            if execute_guarded "Remove stale zypp lock file" rm -f "$ZYPP_LOCK_FILE"; then
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-                log_success "  ✓ Removed stale zypp lock file"
+            # PID is missing/non-numeric OR process is dead.
+            # Never remove the lock if any zypper process is currently running.
+            if pgrep -x zypper >/dev/null 2>&1; then
+                ZYPPER_LOCK_ACTIVE=1
+                ZYPPER_LOCK_PID_ACTIVE="${ZYPP_LOCK_PID:-unknown}"
+                log_warn "⚠ zypp lock file looks stale but a zypper process is running; NOT removing lock (${ZYPP_LOCK_FILE})"
             else
-                log_error "  ✗ Failed to remove stale zypp lock file"
-                VERIFICATION_FAILED=1
+                log_warn "⚠ Found stale zypp lock at ${ZYPP_LOCK_FILE} (PID ${ZYPP_LOCK_PID:-unknown} not running)"
+                log_info "  → Attempting to remove stale lock file..."
+                if execute_guarded "Remove stale zypp lock file" rm -f "$ZYPP_LOCK_FILE"; then
+                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                    log_success "  ✓ Removed stale zypp lock file"
+                else
+                    log_error "  ✗ Failed to remove stale zypp lock file"
+                    VERIFICATION_FAILED=1
+                fi
             fi
         fi
+    else
+        log_debug "No zypp lock file present"
     fi
 else
-    log_debug "No zypp lock file present"
+    log_info "ℹ zypp lock check skipped for package manager '${VERIFY_PM}'"
 fi
 
 # Check 15: Root filesystem free space and cleanup
@@ -33219,16 +33526,44 @@ log_debug "[15/${TOTAL_CHECKS}] Checking root filesystem free space..."
 ROOT_FREE_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
 if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
     log_warn "⚠ Low free space on / (only ${ROOT_FREE_MB}MB available; minimum 1024MB recommended)"
-    log_info "  → Attempting best-effort cleanup with 'zypper clean --all'..."
+    log_info "  → Attempting best-effort package-manager cache cleanup (${VERIFY_PM})..."
 
-    if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
-        log_warn "  ⚠ Skipping 'zypper clean --all' because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+    if [ "${VERIFY_PM}" = "zypper" ] && [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+        log_warn "  ⚠ Skipping zypper cache cleanup because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
         DISK_SPACE_CRITICAL=1
     else
         DISK_SPACE_CLEANED_ZYPPER=1
         REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        cleanup_ok=0
 
-        if execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
+        case "${VERIFY_PM}" in
+            zypper)
+                if execute_guarded "Run zypper clean --all" zypper --non-interactive clean --all; then
+                    cleanup_ok=1
+                fi
+                ;;
+            apt)
+                if execute_guarded "Run apt-get clean" env DEBIAN_FRONTEND=noninteractive apt-get clean; then
+                    cleanup_ok=1
+                fi
+                ;;
+            dnf)
+                if execute_guarded "Run dnf clean all" dnf -y clean all; then
+                    cleanup_ok=1
+                fi
+                ;;
+            pacman)
+                if execute_guarded "Run pacman cache clean" pacman -Scc --noconfirm; then
+                    cleanup_ok=1
+                fi
+                ;;
+            *)
+                log_info "  → No package-manager cache cleanup mapping for '${VERIFY_PM}'; skipping"
+                cleanup_ok=1
+                ;;
+        esac
+
+        if [ "${cleanup_ok}" -eq 1 ] 2>/dev/null; then
             sleep 1
             ROOT_FREE_MB_AFTER=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')
             if [ -n "$ROOT_FREE_MB_AFTER" ] && [ "$ROOT_FREE_MB_AFTER" -ge 1024 ]; then
@@ -33239,7 +33574,7 @@ if [ -n "$ROOT_FREE_MB" ] && [ "$ROOT_FREE_MB" -lt 1024 ]; then
                 DISK_SPACE_CRITICAL=1
             fi
         else
-            log_warn "  ⚠ 'zypper clean --all' failed; advanced reclamation will run later (see Check 36)"
+            log_warn "  ⚠ Package-manager cache cleanup failed; advanced reclamation will run later (see Check 36)"
             DISK_SPACE_CRITICAL=1
         fi
     fi
@@ -33249,69 +33584,83 @@ fi
 
 # Check 16: RPM database integrity (best-effort)
 log_debug "[16/${TOTAL_CHECKS}] Checking RPM database integrity..."
-RPM_DB_PATH=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
-if [ -z "${RPM_DB_PATH:-}" ]; then
-    RPM_DB_PATH="/usr/lib/sysimage/rpm"
-fi
+if [ "${VERIFY_PM_IS_RPM_BASED:-0}" -eq 1 ] 2>/dev/null && command -v rpm >/dev/null 2>&1; then
+    RPM_DB_PATH=$(rpm --eval '%{_dbpath}' 2>/dev/null || true)
+    if [ -z "${RPM_DB_PATH:-}" ]; then
+        RPM_DB_PATH="/usr/lib/sysimage/rpm"
+    fi
 
-RPM_DB_FILE=""
-if [ -f "${RPM_DB_PATH}/Packages" ]; then
-    RPM_DB_FILE="${RPM_DB_PATH}/Packages"
-elif [ -f "${RPM_DB_PATH}/rpmdb.sqlite" ]; then
-    RPM_DB_FILE="${RPM_DB_PATH}/rpmdb.sqlite"
-fi
+    RPM_DB_FILE=""
+    if [ -f "${RPM_DB_PATH}/Packages" ]; then
+        RPM_DB_FILE="${RPM_DB_PATH}/Packages"
+    elif [ -f "${RPM_DB_PATH}/rpmdb.sqlite" ]; then
+        RPM_DB_FILE="${RPM_DB_PATH}/rpmdb.sqlite"
+    fi
 
-RPMDB_VERIFY_BIN=""
-if command -v rpmdb_verify >/dev/null 2>&1; then
-    RPMDB_VERIFY_BIN="$(command -v rpmdb_verify)"
-elif [ -x /usr/lib/rpm/rpmdb_verify ]; then
-    RPMDB_VERIFY_BIN="/usr/lib/rpm/rpmdb_verify"
-fi
+    RPMDB_VERIFY_BIN=""
+    if command -v rpmdb_verify >/dev/null 2>&1; then
+        RPMDB_VERIFY_BIN="$(command -v rpmdb_verify)"
+    elif [ -x /usr/lib/rpm/rpmdb_verify ]; then
+        RPMDB_VERIFY_BIN="/usr/lib/rpm/rpmdb_verify"
+    fi
 
-if [ -n "${RPMDB_VERIFY_BIN}" ] && [ -n "${RPM_DB_FILE}" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-        if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" timeout 15 "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
-            log_success "✓ RPM database structural check passed"
+    if [ -n "${RPMDB_VERIFY_BIN}" ] && [ -n "${RPM_DB_FILE}" ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" timeout 15 "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
+                log_success "✓ RPM database structural check passed"
+            else
+                log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
+                log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 38)"
+                RPMDB_STRUCTURAL_FAILED=1
+            fi
         else
-            log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
-            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 38)"
-            RPMDB_STRUCTURAL_FAILED=1
+            if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
+                log_success "✓ RPM database structural check passed"
+            else
+                log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
+                log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 38)"
+                RPMDB_STRUCTURAL_FAILED=1
+            fi
         fi
     else
-        if execute_guarded "RPM DB structural verify (${RPM_DB_FILE})" "${RPMDB_VERIFY_BIN}" "${RPM_DB_FILE}"; then
-            log_success "✓ RPM database structural check passed"
-        else
-            log_error "✗ RPM database structural check FAILED (dbpath=${RPM_DB_PATH})"
-            log_error "  → Auto-repair will attempt an rpmdb rebuild later (see Check 38)"
-            RPMDB_STRUCTURAL_FAILED=1
-        fi
+        log_info "ℹ RPM DB structural check skipped (rpmdb_verify not found or db file not detected at ${RPM_DB_PATH})"
     fi
 else
-    log_info "ℹ RPM DB structural check skipped (rpmdb_verify not found or db file not detected at ${RPM_DB_PATH})"
+    log_info "ℹ RPM DB structural check skipped for non-RPM package manager (${VERIFY_PM})"
 fi
 
 # Check 17: Targeted RPM package verification (critical packages)
 log_debug "[17/${TOTAL_CHECKS}] Verifying critical system packages (rpm -V)..."
-(
-    set +e
-    critical_pkgs=(glibc systemd zypper libzypp rpm)
-    rpm_verify_out=$(rpm -V --nomtime --nosize "${critical_pkgs[@]}" 2>&1)
-    rpm_verify_rc=$?
-    set -e
+if [ "${VERIFY_PM_IS_RPM_BASED:-0}" -eq 1 ] 2>/dev/null && command -v rpm >/dev/null 2>&1; then
+    (
+        set +e
+        critical_pkgs=(glibc systemd rpm)
+        if [ "${VERIFY_PM}" = "zypper" ]; then
+            critical_pkgs+=(zypper libzypp)
+        elif [ "${VERIFY_PM}" = "dnf" ]; then
+            critical_pkgs+=(dnf)
+        fi
 
-    if [ "$rpm_verify_rc" -eq 0 ] && [ -z "${rpm_verify_out:-}" ]; then
-        log_success "✓ rpm -V reports no verification differences for critical packages"
-    elif [ "$rpm_verify_rc" -eq 1 ]; then
-        log_warn "⚠ rpm -V reported verification differences (this may be expected on some systems)"
-        echo "rpm -V output (first 50 lines):" | tee -a "${LOG_FILE}"
-        printf '%s\n' "${rpm_verify_out}" | head -n 50 | tee -a "${LOG_FILE}"
-    else
-        log_error "✗ rpm -V failed unexpectedly (rc=${rpm_verify_rc})"
-        echo "rpm -V output (first 50 lines):" | tee -a "${LOG_FILE}"
-        printf '%s\n' "${rpm_verify_out}" | head -n 50 | tee -a "${LOG_FILE}"
-        VERIFICATION_FAILED=1
-    fi
-)
+        rpm_verify_out=$(rpm -V --nomtime --nosize "${critical_pkgs[@]}" 2>&1)
+        rpm_verify_rc=$?
+        set -e
+
+        if [ "$rpm_verify_rc" -eq 0 ] && [ -z "${rpm_verify_out:-}" ]; then
+            log_success "✓ rpm -V reports no verification differences for critical packages"
+        elif [ "$rpm_verify_rc" -eq 1 ]; then
+            log_warn "⚠ rpm -V reported verification differences (this may be expected on some systems)"
+            echo "rpm -V output (first 50 lines):" | tee -a "${LOG_FILE}"
+            printf '%s\n' "${rpm_verify_out}" | head -n 50 | tee -a "${LOG_FILE}"
+        else
+            log_error "✗ rpm -V failed unexpectedly (rc=${rpm_verify_rc})"
+            echo "rpm -V output (first 50 lines):" | tee -a "${LOG_FILE}"
+            printf '%s\n' "${rpm_verify_out}" | head -n 50 | tee -a "${LOG_FILE}"
+            VERIFICATION_FAILED=1
+        fi
+    )
+else
+    log_info "ℹ Targeted RPM package verification skipped for non-RPM package manager (${VERIFY_PM})"
+fi
 
 # Check 18: Global systemd failed units (auto-fix enabled)
 log_debug "[18/${TOTAL_CHECKS}] Checking for failed systemd units (global)..."
@@ -33361,11 +33710,13 @@ if [ "${flap_warned}" -eq 0 ] 2>/dev/null; then
 fi
 
 # Check 20: DNS resolution for primary repo domain (auto-fix enabled)
-log_debug "[20/${TOTAL_CHECKS}] Checking DNS resolution for download.opensuse.org..."
-if getent hosts download.opensuse.org >/dev/null 2>&1; then
-    log_success "✓ DNS resolution OK for download.opensuse.org"
+log_debug "[20/${TOTAL_CHECKS}] Checking DNS resolution for repository host (${VERIFY_REPO_DNS_TARGET:-unknown})..."
+if [ -z "${VERIFY_REPO_DNS_TARGET:-}" ]; then
+    log_info "ℹ Repository DNS target could not be determined for package manager '${VERIFY_PM}'; skipping DNS host check"
+elif getent hosts "${VERIFY_REPO_DNS_TARGET}" >/dev/null 2>&1; then
+    log_success "✓ DNS resolution OK for ${VERIFY_REPO_DNS_TARGET}"
 else
-    log_warn "⚠ DNS resolution FAILED. Attempting auto-repair..."
+    log_warn "⚠ DNS resolution FAILED for ${VERIFY_REPO_DNS_TARGET}. Attempting auto-repair..."
 
     REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
 
@@ -33387,79 +33738,119 @@ else
         fi
     fi
 
-    if getent hosts download.opensuse.org >/dev/null 2>&1; then
-        log_success "  ✓ Auto-repair successful: DNS resolution restored"
+    if getent hosts "${VERIFY_REPO_DNS_TARGET}" >/dev/null 2>&1; then
+        log_success "  ✓ Auto-repair successful: DNS resolution restored for ${VERIFY_REPO_DNS_TARGET}"
     else
-        log_error "  ✗ DNS resolution still failing after repair attempts"
+        log_error "  ✗ DNS resolution still failing after repair attempts (${VERIFY_REPO_DNS_TARGET})"
         VERIFICATION_FAILED=1
     fi
 fi
 
 # Check 21: Repository accessibility (best-effort; network may be offline)
-log_debug "[21/${TOTAL_CHECKS}] Checking zypper repository configuration/readability..."
-if zypper --non-interactive --quiet lr >/dev/null 2>&1; then
-    log_success "✓ zypper repositories are readable (lr)"
-else
-    log_error "✗ Unable to list repositories (zypper lr failed)"
-    VERIFICATION_FAILED=1
-fi
+log_debug "[21/${TOTAL_CHECKS}] Checking repository configuration/readability for ${VERIFY_PM}..."
+case "${VERIFY_PM}" in
+    zypper)
+        if zypper --non-interactive --quiet lr >/dev/null 2>&1; then
+            log_success "✓ zypper repositories are readable (lr)"
+        else
+            log_error "✗ Unable to list repositories (zypper lr failed)"
+            VERIFICATION_FAILED=1
+        fi
+        ;;
+    apt)
+        if command -v apt-cache >/dev/null 2>&1 && apt-cache policy >/dev/null 2>&1; then
+            log_success "✓ apt repository configuration is readable (apt-cache policy)"
+        else
+            log_error "✗ Unable to read apt repository configuration (apt-cache policy failed)"
+            VERIFICATION_FAILED=1
+        fi
+        ;;
+    dnf)
+        if command -v dnf >/dev/null 2>&1 && dnf -q repolist enabled >/dev/null 2>&1; then
+            log_success "✓ dnf repositories are readable (repolist)"
+        else
+            log_error "✗ Unable to read dnf repositories (dnf repolist failed)"
+            VERIFICATION_FAILED=1
+        fi
+        ;;
+    pacman)
+        if [ -r /etc/pacman.conf ]; then
+            log_success "✓ pacman repository configuration is readable (/etc/pacman.conf)"
+        else
+            log_error "✗ Unable to read pacman repository configuration (/etc/pacman.conf)"
+            VERIFICATION_FAILED=1
+        fi
+        ;;
+    *)
+        log_info "ℹ Repository readability check skipped for unsupported package manager '${VERIFY_PM}'"
+        ;;
+esac
 
-log_debug "[21/${TOTAL_CHECKS}] Checking repository reachability (zypper refresh; auto-fix)..."
+log_debug "[21/${TOTAL_CHECKS}] Checking repository reachability (${VERIFY_PM} refresh; auto-fix)..."
 if verify_should_skip_heavy_check "repository reachability refresh/deep repair"; then
     log_info "  → Heavy repo refresh auto-repair deferred until cooldown expires"
-elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+elif [ "${VERIFY_PM}" = "zypper" ] && [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping repo refresh check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
 else
-    refresh_ok=0
-    if command -v timeout >/dev/null 2>&1; then
-        if timeout 25 zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
-            refresh_ok=1
-        fi
-    else
-        if zypper --non-interactive --quiet refresh >/dev/null 2>&1; then
-            refresh_ok=1
-        fi
-    fi
+    refresh_output=""
+    refresh_force_output=""
+    refresh_gpg_output=""
+    set +e
+    refresh_output=$(verify_pm_refresh primary 2>&1)
+    refresh_rc=$?
+    set -e
 
-    if [ "${refresh_ok}" -eq 1 ] 2>/dev/null; then
-        log_success "✓ zypper refresh succeeded (repos reachable)"
+    if [ "${refresh_rc}" -eq 0 ] 2>/dev/null; then
+        log_success "✓ Repository refresh succeeded for ${VERIFY_PM}"
     else
-        log_warn "⚠ zypper refresh failed. Attempting auto-repair (force refresh)..."
+        log_warn "⚠ Repository refresh failed for ${VERIFY_PM}. Attempting auto-repair..."
         REPO_REFRESH_FAILED=1
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        execute_optional "Clean package manager metadata cache (pre-force refresh)" verify_pm_cache_cleanup >/dev/null 2>&1 || true
 
-    # Attempt a force refresh first (no key auto-import).
-    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-    if command -v timeout >/dev/null 2>&1; then
-        if execute_guarded "Force zypper refresh" timeout 60 zypper --non-interactive refresh --force; then
+        set +e
+        refresh_force_output=$(verify_pm_refresh force 2>&1)
+        refresh_force_rc=$?
+        set -e
+
+        if [ "${refresh_force_rc}" -eq 0 ] 2>/dev/null; then
             log_success "  ✓ Auto-repair successful: Repository metadata refreshed"
             REPO_REFRESH_FAILED=0
         else
-            log_warn "  ⚠ Force refresh failed; attempting with --gpg-auto-import-keys as a last resort..."
-            if execute_guarded "Force zypper refresh (auto-import keys)" timeout 60 zypper --non-interactive --gpg-auto-import-keys refresh --force; then
-                log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
-                REPO_REFRESH_FAILED=0
-                REPO_REFRESH_USED_GPG_IMPORT=1
-            else
-                log_error "  ✗ Repository refresh failed even after force attempts"
-                VERIFICATION_FAILED=1
+            if [ "${VERIFY_PM}" = "zypper" ]; then
+                log_warn "  ⚠ Force refresh failed; attempting zypper key auto-import refresh..."
+                set +e
+                refresh_gpg_output=$(verify_pm_refresh gpg-force 2>&1)
+                refresh_gpg_rc=$?
+                set -e
+                if [ "${refresh_gpg_rc}" -eq 0 ] 2>/dev/null; then
+                    log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
+                    REPO_REFRESH_FAILED=0
+                    REPO_REFRESH_USED_GPG_IMPORT=1
+                fi
+            fi
+
+            if [ "${REPO_REFRESH_FAILED}" -eq 1 ] 2>/dev/null; then
+                refresh_combined_output="$(printf '%s\n%s\n%s\n' "${refresh_output}" "${refresh_force_output}" "${refresh_gpg_output}")"
+                if verify_pm_output_looks_signature_error "${refresh_combined_output}"; then
+                    log_warn "  ⚠ Refresh output indicates signature/keyring issues; attempting package-manager keyring repair..."
+                    if verify_pm_attempt_keyring_repair; then
+                        log_success "  ✓ Auto-repair successful: Repository refresh recovered after keyring remediation"
+                        REPO_REFRESH_FAILED=0
+                    else
+                        log_error "  ✗ Repository refresh still failing after keyring remediation"
+                        VERIFICATION_FAILED=1
+                    fi
+                else
+                    log_error "  ✗ Repository refresh failed even after force repair attempts"
+                    if [ -n "${refresh_combined_output:-}" ]; then
+                        log_info "  → Refresh failure output (first 20 lines):"
+                        printf '%s\n' "${refresh_combined_output}" | head -n 20 | sed 's/^/    /' | tee -a "${LOG_FILE}"
+                    fi
+                    VERIFICATION_FAILED=1
+                fi
             fi
         fi
-    else
-        if execute_guarded "Force zypper refresh" zypper --non-interactive refresh --force; then
-            log_success "  ✓ Auto-repair successful: Repository metadata refreshed"
-            REPO_REFRESH_FAILED=0
-        else
-            log_warn "  ⚠ Force refresh failed; attempting with --gpg-auto-import-keys as a last resort..."
-            if execute_guarded "Force zypper refresh (auto-import keys)" zypper --non-interactive --gpg-auto-import-keys refresh --force; then
-                log_success "  ✓ Auto-repair successful: Repository metadata refreshed (keys auto-imported)"
-                REPO_REFRESH_FAILED=0
-                REPO_REFRESH_USED_GPG_IMPORT=1
-            else
-                log_error "  ✗ Repository refresh failed even after force attempts"
-                VERIFICATION_FAILED=1
-            fi
-        fi
-    fi
     fi
 fi
 
@@ -33513,11 +33904,7 @@ fi
 
 # Check 23: Btrfs filesystem health (device error stats)
 log_debug "[23/${TOTAL_CHECKS}] Checking Btrfs device stats for / (if applicable)..."
-root_fstype=""
-if command -v findmnt >/dev/null 2>&1; then
-    root_fstype=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
-fi
-if [ "${root_fstype:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
+if [ "${VERIFY_BTRFS_ROOT:-0}" -eq 1 ] 2>/dev/null && command -v btrfs >/dev/null 2>&1; then
     btrfs_out=$(btrfs device stats / 2>/dev/null || true)
     btrfs_bad=$(printf '%s\n' "$btrfs_out" | awk '$NF != 0 {print}' | sed '/^$/d' || true)
     if [ -z "${btrfs_bad:-}" ]; then
@@ -33528,12 +33915,18 @@ if [ "${root_fstype:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
         VERIFICATION_FAILED=1
     fi
 else
-    log_info "ℹ Btrfs device stats check skipped (fstype=${root_fstype:-unknown})"
+    log_info "ℹ Btrfs device stats check skipped (root fstype=${VERIFY_ROOT_FSTYPE:-unknown})"
 fi
 
 # Check 24: Snapper root config validation (best-effort)
 log_debug "[24/${TOTAL_CHECKS}] Checking Snapper root config (if available)..."
-if command -v snapper >/dev/null 2>&1; then
+if [ "${VERIFY_BTRFS_ROOT:-0}" -ne 1 ] 2>/dev/null; then
+    log_info "ℹ Snapper root config check skipped (root fstype=${VERIFY_ROOT_FSTYPE:-unknown}, non-btrfs system)"
+elif ! command -v snapper >/dev/null 2>&1; then
+    log_info "ℹ Snapper not installed on btrfs root; skipping root snapshot validation"
+elif [ ! -r /etc/snapper/configs/root ]; then
+    log_warn "⚠ Snapper root config file is missing on btrfs root (/etc/snapper/configs/root)"
+else
     set +e
     # Newer snapper versions support '--last N'. Some older versions do not.
     snapper_out=$(snapper -c root list --last 1 2>&1)
@@ -33558,19 +33951,24 @@ if command -v snapper >/dev/null 2>&1; then
         log_warn "⚠ Snapper root config check failed (rc=${snapper_rc}); Snapper may be missing/unconfigured"
         printf '%s\n' "$snapper_out" | head -n 30 | tee -a "${LOG_FILE}"
     fi
-else
-    log_info "ℹ Snapper not installed; skipping root snapshot validation"
 fi
 
 # Check 25: Cron conflicts (best-effort)
-log_debug "[25/${TOTAL_CHECKS}] Checking for cron jobs that run zypper (conflicts)..."
+log_debug "[25/${TOTAL_CHECKS}] Checking for cron jobs that run package-manager updates (${VERIFY_PM})..."
 # Ignore comment-only mentions to avoid false positives from documentation lines.
 # (With -n, grep prefixes results with 'file:line:', so the comment check must happen after that prefix.)
-cron_hits=$(grep -R -n -E ':[0-9]+:[[:space:]]*[^#].*\<zypper\>' /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null | head -n 20 || true)
+cron_pm_expr="zypper"
+case "${VERIFY_PM}" in
+    apt) cron_pm_expr="apt-get|aptitude|apt" ;;
+    dnf) cron_pm_expr="dnf|yum" ;;
+    pacman) cron_pm_expr="pacman" ;;
+    zypper) cron_pm_expr="zypper" ;;
+esac
+cron_hits=$(grep -R -n -E ":[0-9]+:[[:space:]]*[^#].*\\<(${cron_pm_expr})\\>" /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null | head -n 20 || true)
 if [ -z "${cron_hits:-}" ]; then
-    log_success "✓ No zypper cron jobs detected"
+    log_success "✓ No ${VERIFY_PM} cron jobs detected"
 else
-    log_warn "⚠ Found cron entries that appear to run zypper (may conflict with systemd timers):"
+    log_warn "⚠ Found cron entries that appear to run ${VERIFY_PM} package updates (may conflict with systemd timers):"
     printf '%s\n' "$cron_hits" | tee -a "${LOG_FILE}"
 fi
 
@@ -33648,33 +34046,123 @@ fi
 log_debug "[29/${TOTAL_CHECKS}] Checking for orphaned packages (no repository)..."
 if verify_should_skip_heavy_check "orphaned package scan"; then
     log_info "  → Orphaned package scan deferred until cooldown expires"
-elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
-    log_warn "⚠ Skipping orphaned package check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
-elif command -v zypper >/dev/null 2>&1; then
-    set +e
-    if command -v timeout >/dev/null 2>&1; then
-        orphans_out=$(timeout 20 zypper --no-refresh --non-interactive packages --orphaned 2>&1)
-        orphans_rc=$?
-    else
-        orphans_out=$(zypper --no-refresh --non-interactive packages --orphaned 2>&1)
-        orphans_rc=$?
-    fi
-    set -e
-
-    if [ "$orphans_rc" -eq 0 ]; then
-        orphans_count=$(printf '%s\n' "$orphans_out" | awk -F'|' '$1 ~ /i/ {c++} END {print c+0}')
-        if [ "${orphans_count:-0}" -gt 0 ] 2>/dev/null; then
-            log_info "ℹ Found ${orphans_count} orphaned package(s) (installed but not provided by any configured repo)"
-            log_info "  → Review with: sudo zypper packages --orphaned"
-        else
-            log_success "✓ No orphaned packages detected"
-        fi
-    else
-        log_warn "⚠ Orphaned package check failed (rc=${orphans_rc}); skipping"
-        printf '%s\n' "$orphans_out" | head -n 20 | tee -a "${LOG_FILE}"
-    fi
 else
-    log_info "ℹ zypper not available; skipping orphaned package check"
+    case "${VERIFY_PM}" in
+        zypper)
+            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+                log_warn "⚠ Skipping orphaned package check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            elif command -v zypper >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    orphans_out=$(timeout 20 zypper --no-refresh --non-interactive packages --orphaned 2>&1)
+                    orphans_rc=$?
+                else
+                    orphans_out=$(zypper --no-refresh --non-interactive packages --orphaned 2>&1)
+                    orphans_rc=$?
+                fi
+                set -e
+
+                if [ "$orphans_rc" -eq 0 ]; then
+                    orphans_count=$(printf '%s\n' "$orphans_out" | awk -F'|' '$1 ~ /i/ {c++} END {print c+0}')
+                    if [ "${orphans_count:-0}" -gt 0 ] 2>/dev/null; then
+                        log_info "ℹ Found ${orphans_count} orphaned package(s) (installed but not provided by any configured repo)"
+                        log_info "  → Review with: sudo zypper packages --orphaned"
+                    else
+                        log_success "✓ No orphaned packages detected"
+                    fi
+                else
+                    log_warn "⚠ Orphaned package check failed (rc=${orphans_rc}); skipping"
+                    printf '%s\n' "$orphans_out" | head -n 20 | tee -a "${LOG_FILE}"
+                fi
+            else
+                log_info "ℹ zypper not available; skipping orphaned package check"
+            fi
+            ;;
+        apt)
+            if command -v apt-get >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    orphans_out=$(timeout 30 env DEBIAN_FRONTEND=noninteractive apt-get -s autoremove 2>&1)
+                    orphans_rc=$?
+                else
+                    orphans_out=$(env DEBIAN_FRONTEND=noninteractive apt-get -s autoremove 2>&1)
+                    orphans_rc=$?
+                fi
+                set -e
+
+                if [ "$orphans_rc" -eq 0 ] 2>/dev/null; then
+                    orphans_count=$(printf '%s\n' "$orphans_out" | grep -cE '^Remv[[:space:]]+' || true)
+                    if [ "${orphans_count:-0}" -gt 0 ] 2>/dev/null; then
+                        log_info "ℹ Found ${orphans_count} autoremove candidate package(s)"
+                        log_info "  → Review with: sudo apt-get autoremove --dry-run"
+                    else
+                        log_success "✓ No autoremove orphan candidates detected"
+                    fi
+                else
+                    log_warn "⚠ apt orphaned-package scan failed (rc=${orphans_rc}); skipping"
+                    printf '%s\n' "$orphans_out" | head -n 20 | tee -a "${LOG_FILE}"
+                fi
+            else
+                log_info "ℹ apt-get not available; skipping orphaned package check"
+            fi
+            ;;
+        dnf)
+            if command -v dnf >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    orphans_out=$(timeout 30 dnf -q repoquery --extras 2>&1)
+                    orphans_rc=$?
+                else
+                    orphans_out=$(dnf -q repoquery --extras 2>&1)
+                    orphans_rc=$?
+                fi
+                set -e
+
+                if [ "$orphans_rc" -eq 0 ] 2>/dev/null; then
+                    orphans_count=$(printf '%s\n' "$orphans_out" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+                    if [ "${orphans_count:-0}" -gt 0 ] 2>/dev/null; then
+                        log_info "ℹ Found ${orphans_count} package(s) not present in enabled repos"
+                        log_info "  → Review with: sudo dnf repoquery --extras"
+                    else
+                        log_success "✓ No dnf extras/orphaned packages detected"
+                    fi
+                else
+                    if printf '%s\n' "$orphans_out" | grep -qi 'No such command: repoquery'; then
+                        log_info "ℹ dnf repoquery plugin unavailable; skipping extras/orphaned package scan"
+                    else
+                        log_warn "⚠ dnf orphaned-package scan failed (rc=${orphans_rc}); skipping"
+                        printf '%s\n' "$orphans_out" | head -n 20 | tee -a "${LOG_FILE}"
+                    fi
+                fi
+            else
+                log_info "ℹ dnf not available; skipping orphaned package check"
+            fi
+            ;;
+        pacman)
+            if command -v pacman >/dev/null 2>&1; then
+                set +e
+                orphans_out=$(pacman -Qdtq 2>&1)
+                orphans_rc=$?
+                set -e
+
+                if [ "$orphans_rc" -eq 0 ] 2>/dev/null && [ -n "${orphans_out:-}" ]; then
+                    orphans_count=$(printf '%s\n' "$orphans_out" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+                    log_info "ℹ Found ${orphans_count} orphaned dependency package(s)"
+                    log_info "  → Review with: sudo pacman -Qdtq"
+                elif [ "$orphans_rc" -eq 1 ] 2>/dev/null || [ -z "${orphans_out:-}" ]; then
+                    log_success "✓ No orphaned pacman dependency packages detected"
+                else
+                    log_warn "⚠ pacman orphaned-package scan failed (rc=${orphans_rc}); skipping"
+                    printf '%s\n' "$orphans_out" | head -n 20 | tee -a "${LOG_FILE}"
+                fi
+            else
+                log_info "ℹ pacman not available; skipping orphaned package check"
+            fi
+            ;;
+        *)
+            log_info "ℹ Orphaned package check skipped for unsupported package manager '${VERIFY_PM}'"
+            ;;
+    esac
 fi
 
 # Check 30: Physical disk health (SMART) (best-effort)
@@ -33734,36 +34222,12 @@ else
 fi
 
 # Check 32: Pending system reboot (runtime consistency)
-log_debug "[32/${TOTAL_CHECKS}] Checking if system reboot is required (zypper needs-reboot)..."
-if command -v zypper >/dev/null 2>&1; then
-    set +e
-    zypper needs-reboot >/dev/null 2>&1
-    needs_reboot_rc=$?
-    set -e
-
-    # On openSUSE, zypper returns 1 when a reboot is needed.
-    if [ "$needs_reboot_rc" -eq 1 ]; then
-        log_warn "⚠ System reboot is pending (core libraries/kernel updated)"
-        log_info "  → Recommended: reboot before applying further updates"
-    elif [ "$needs_reboot_rc" -eq 0 ]; then
-        log_success "✓ No pending reboot detected"
-    else
-        # Some zypper versions may not support needs-reboot.
-        set +e
-        zypper needs-rebooting >/dev/null 2>&1
-        needs_rebooting_rc=$?
-        set -e
-        if [ "$needs_rebooting_rc" -eq 1 ]; then
-            log_warn "⚠ System reboot is pending (core libraries/kernel updated)"
-            log_info "  → Recommended: reboot before applying further updates"
-        elif [ "$needs_rebooting_rc" -eq 0 ]; then
-            log_success "✓ No pending reboot detected"
-        else
-            log_info "ℹ Reboot check not available (zypper needs-reboot returned rc=${needs_reboot_rc})"
-        fi
-    fi
+log_debug "[32/${TOTAL_CHECKS}] Checking if system reboot is required..."
+if check_reboot_required; then
+    log_warn "⚠ System reboot is pending (core libraries/kernel updated)"
+    log_info "  → Recommended: reboot before applying further updates"
 else
-    log_info "ℹ zypper not available; skipping reboot requirement check"
+    log_success "✓ No pending reboot detected"
 fi
 
 # Check 33: Dashboard Shortcut Health (Start Menu & Desktop)
@@ -33951,10 +34415,25 @@ else
                 fi
             fi
 
-            # Skip repeating zypper clean if we already did it in Check 15, or if
-            # zypper appears to be running (lock held by a live process).
-            if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null && [ "${ZYPPER_LOCK_ACTIVE:-0}" -ne 1 ] 2>/dev/null; then
-                execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
+            # Skip repeating package-manager cache cleanup if we already did it in
+            # Check 15. Keep lock-aware skip behavior for zypper.
+            if [ "${DISK_SPACE_CLEANED_ZYPPER:-0}" -ne 1 ] 2>/dev/null; then
+                case "${VERIFY_PM}" in
+                    zypper)
+                        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+                            execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
+                        fi
+                        ;;
+                    apt)
+                        execute_guarded "Clean apt caches" env DEBIAN_FRONTEND=noninteractive apt-get clean >/dev/null 2>&1 || true
+                        ;;
+                    dnf)
+                        execute_guarded "Clean dnf caches" dnf -y clean all >/dev/null 2>&1 || true
+                        ;;
+                    pacman)
+                        execute_guarded "Clean pacman caches" pacman -Scc --noconfirm >/dev/null 2>&1 || true
+                        ;;
+                esac
             fi
 
             if command -v snapper >/dev/null 2>&1; then
@@ -33979,41 +34458,46 @@ fi
 
 # Check 37: Zypper lock state (deadlock killer)
 log_debug "[37/${TOTAL_CHECKS}] Checking for zypper locks (stale vs active)..."
-lock_found=0
-for zlock in /run/zypp.pid /var/run/zypp.pid; do
-    if [ -f "$zlock" ]; then
-        lock_found=1
-        lock_pid=$(cat "$zlock" 2>/dev/null || echo "")
-        if [[ "${lock_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
-            ZYPPER_LOCK_ACTIVE=1
-            ZYPPER_LOCK_PID_ACTIVE="$lock_pid"
-            log_warn "⚠ Zypper lock held by running PID ${lock_pid} (${zlock}). Skipping auto-fix (may be legitimate update)."
-        else
-            # Never remove a lock file if any zypper process is currently running.
-            if pgrep -x zypper >/dev/null 2>&1; then
+if [ "${VERIFY_PM}" = "zypper" ]; then
+    lock_found=0
+    for zlock in /run/zypp.pid /var/run/zypp.pid; do
+        if [ -f "$zlock" ]; then
+            lock_found=1
+            lock_pid=$(cat "$zlock" 2>/dev/null || echo "")
+            if [[ "${lock_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "$lock_pid" 2>/dev/null; then
                 ZYPPER_LOCK_ACTIVE=1
-                ZYPPER_LOCK_PID_ACTIVE="${lock_pid:-unknown}"
-                log_warn "⚠ zypper is running but lock PID is invalid/unknown; NOT removing lock file (${zlock})"
+                ZYPPER_LOCK_PID_ACTIVE="$lock_pid"
+                log_warn "⚠ Zypper lock held by running PID ${lock_pid} (${zlock}). Skipping auto-fix (may be legitimate update)."
             else
-                log_warn "⚠ Found stale zypper lock file (${zlock}) (PID ${lock_pid:-unknown} not running)."
-                log_info "  → Attempting auto-repair: removing stale lock file..."
-                if execute_guarded "Remove stale zypper lock" rm -f "$zlock"; then
-                    REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-                    log_success "  ✓ Stale lock removed"
+                # Never remove a lock file if any zypper process is currently running.
+                if pgrep -x zypper >/dev/null 2>&1; then
+                    ZYPPER_LOCK_ACTIVE=1
+                    ZYPPER_LOCK_PID_ACTIVE="${lock_pid:-unknown}"
+                    log_warn "⚠ zypper is running but lock PID is invalid/unknown; NOT removing lock file (${zlock})"
                 else
-                    log_error "  ✗ Failed to remove stale lock file"
-                    VERIFICATION_FAILED=1
+                    log_warn "⚠ Found stale zypper lock file (${zlock}) (PID ${lock_pid:-unknown} not running)."
+                    log_info "  → Attempting auto-repair: removing stale lock file..."
+                    if execute_guarded "Remove stale zypper lock" rm -f "$zlock"; then
+                        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+                        log_success "  ✓ Stale lock removed"
+                    else
+                        log_error "  ✗ Failed to remove stale lock file"
+                        VERIFICATION_FAILED=1
+                    fi
                 fi
             fi
         fi
+    done
+    if [ "${lock_found}" -eq 0 ] 2>/dev/null; then
+        log_success "✓ No zypper lock files detected"
     fi
-done
-if [ "$lock_found" -eq 0 ] 2>/dev/null; then
-    log_success "✓ No zypper lock files detected"
+else
+    log_info "ℹ zypper lock cleanup check skipped for package manager '${VERIFY_PM}'"
 fi
 
 # Check 38: RPM database repair (nuclear option; best-effort)
 log_debug "[38/${TOTAL_CHECKS}] Verifying RPM database integrity and attempting repair if needed..."
+if [ "${VERIFY_PM_IS_RPM_BASED:-0}" -eq 1 ] 2>/dev/null && command -v rpm >/dev/null 2>&1; then
 rpmdb_needs_repair=0
 
 # If earlier structural check failed, we already know we should repair.
@@ -34143,60 +34627,142 @@ if [ "$rpmdb_needs_repair" -eq 1 ] 2>/dev/null; then
         VERIFICATION_FAILED=1
     fi
 fi
+else
+    log_info "ℹ RPM database repair check skipped for non-RPM package manager (${VERIFY_PM})"
+fi
 
 # Check 39: Dependency & package consistency (deep repair)
-log_debug "[39/${TOTAL_CHECKS}] Verifying package dependencies (zypper verify)..."
-if verify_should_skip_heavy_check "zypper verify dependency consistency"; then
+log_debug "[39/${TOTAL_CHECKS}] Verifying package dependencies (${VERIFY_PM})..."
+if verify_should_skip_heavy_check "package dependency consistency deep-check"; then
     log_info "  → Dependency consistency deep-check deferred until cooldown expires"
-elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
-    log_warn "⚠ Skipping dependency consistency check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
-elif command -v zypper >/dev/null 2>&1; then
-    set +e
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
-        zypper_verify_rc=$?
-    else
-        zypper --non-interactive --quiet verify >/dev/null 2>&1
-        zypper_verify_rc=$?
-    fi
-    set -e
-
-    if [ "$zypper_verify_rc" -eq 0 ] 2>/dev/null; then
-        log_success "✓ Package dependencies are consistent"
-    else
-        log_warn "⚠ Broken package dependencies detected (interrupted update?)"
-        log_info "  → Capturing details: zypper verify --details"
-
-        # NOTE: Older builds attempted 'zypper install --fix-broken' (APT-style).
-        # openSUSE zypper does NOT support that flag. Instead, capture the
-        # detailed verify output so the user can resolve it (usually via an
-        # interactive 'zypper dup' that chooses a solver solution).
-        if command -v timeout >/dev/null 2>&1; then
-            execute_optional "Dependency verify details" timeout 120 zypper --non-interactive verify --details
-        else
-            execute_optional "Dependency verify details" zypper --non-interactive verify --details
-        fi
-
-        # Double-check
-        set +e
-        if command -v timeout >/dev/null 2>&1; then
-            timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
-            zypper_verify_rc2=$?
-        else
-            zypper --non-interactive --quiet verify >/dev/null 2>&1
-            zypper_verify_rc2=$?
-        fi
-        set -e
-
-        if [ "$zypper_verify_rc2" -eq 0 ] 2>/dev/null; then
-            log_success "  ✓ Dependencies successfully repaired"
-        else
-            log_error "  ✗ Dependencies still broken after repair attempt"
-            VERIFICATION_FAILED=1
-        fi
-    fi
 else
-    log_info "ℹ zypper not available; skipping dependency consistency check"
+    case "${VERIFY_PM}" in
+        zypper)
+            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+                log_warn "⚠ Skipping dependency consistency check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            elif command -v zypper >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
+                    zypper_verify_rc=$?
+                else
+                    zypper --non-interactive --quiet verify >/dev/null 2>&1
+                    zypper_verify_rc=$?
+                fi
+                set -e
+
+                if [ "$zypper_verify_rc" -eq 0 ] 2>/dev/null; then
+                    log_success "✓ Package dependencies are consistent"
+                else
+                    log_warn "⚠ Broken package dependencies detected (interrupted update?)"
+                    log_info "  → Capturing details: zypper verify --details"
+
+                    if command -v timeout >/dev/null 2>&1; then
+                        execute_optional "Dependency verify details" timeout 120 zypper --non-interactive verify --details
+                    else
+                        execute_optional "Dependency verify details" zypper --non-interactive verify --details
+                    fi
+
+                    # Double-check
+                    set +e
+                    if command -v timeout >/dev/null 2>&1; then
+                        timeout 120 zypper --non-interactive --quiet verify >/dev/null 2>&1
+                        zypper_verify_rc2=$?
+                    else
+                        zypper --non-interactive --quiet verify >/dev/null 2>&1
+                        zypper_verify_rc2=$?
+                    fi
+                    set -e
+
+                    if [ "$zypper_verify_rc2" -eq 0 ] 2>/dev/null; then
+                        log_success "  ✓ Dependencies successfully repaired"
+                    else
+                        log_error "  ✗ Dependencies still broken after repair attempt"
+                        VERIFICATION_FAILED=1
+                    fi
+                fi
+            else
+                log_info "ℹ zypper not available; skipping dependency consistency check"
+            fi
+            ;;
+        apt)
+            if command -v apt-get >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get -o Debug::NoLocking=1 -qq check >/dev/null 2>&1
+                    apt_dep_rc=$?
+                else
+                    env DEBIAN_FRONTEND=noninteractive apt-get -o Debug::NoLocking=1 -qq check >/dev/null 2>&1
+                    apt_dep_rc=$?
+                fi
+                set -e
+
+                if [ "${apt_dep_rc}" -eq 0 ] 2>/dev/null; then
+                    log_success "✓ APT package dependencies are consistent"
+                else
+                    log_warn "⚠ APT dependency issues detected"
+                    log_info "  → Capturing details: apt-get -s -f install"
+                    if command -v timeout >/dev/null 2>&1; then
+                        execute_optional "APT dependency detail scan" timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get -s -f install
+                    else
+                        execute_optional "APT dependency detail scan" env DEBIAN_FRONTEND=noninteractive apt-get -s -f install
+                    fi
+                    VERIFICATION_FAILED=1
+                fi
+            else
+                log_info "ℹ apt-get not available; skipping dependency consistency check"
+            fi
+            ;;
+        dnf)
+            if command -v dnf >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 120 dnf -q check >/dev/null 2>&1
+                    dnf_dep_rc=$?
+                else
+                    dnf -q check >/dev/null 2>&1
+                    dnf_dep_rc=$?
+                fi
+                set -e
+
+                if [ "${dnf_dep_rc}" -eq 0 ] 2>/dev/null; then
+                    log_success "✓ DNF package dependencies are consistent"
+                else
+                    log_warn "⚠ DNF dependency issues detected"
+                    execute_optional "DNF dependency detail scan" dnf check
+                    VERIFICATION_FAILED=1
+                fi
+            else
+                log_info "ℹ dnf not available; skipping dependency consistency check"
+            fi
+            ;;
+        pacman)
+            if command -v pacman >/dev/null 2>&1; then
+                set +e
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 120 pacman -Dk >/dev/null 2>&1
+                    pacman_dep_rc=$?
+                else
+                    pacman -Dk >/dev/null 2>&1
+                    pacman_dep_rc=$?
+                fi
+                set -e
+
+                if [ "${pacman_dep_rc}" -eq 0 ] 2>/dev/null; then
+                    log_success "✓ Pacman package dependency database is consistent"
+                else
+                    log_warn "⚠ Pacman dependency issues detected"
+                    execute_optional "Pacman dependency detail scan" pacman -Dk
+                    VERIFICATION_FAILED=1
+                fi
+            else
+                log_info "ℹ pacman not available; skipping dependency consistency check"
+            fi
+            ;;
+        *)
+            log_info "ℹ Dependency consistency check skipped for unsupported package manager '${VERIFY_PM}'"
+            ;;
+    esac
 fi
 
 # Check 40: Dashboard Settings API Health (deep verify)
@@ -34413,11 +34979,7 @@ log_debug "[41/${TOTAL_CHECKS}] Checking Btrfs metadata headroom (and balancing 
 if verify_should_skip_heavy_check "btrfs metadata balance"; then
     log_info "  → Btrfs metadata deep-check deferred until cooldown expires"
 else
-    root_fstype2=""
-    if command -v findmnt >/dev/null 2>&1; then
-        root_fstype2=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
-    fi
-    if [ "${root_fstype2:-}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
+    if [ "${VERIFY_BTRFS_ROOT:-0}" -eq 1 ] 2>/dev/null && command -v btrfs >/dev/null 2>&1; then
         meta_total=""
         meta_used=""
         meta_line=$(btrfs filesystem df / 2>/dev/null | grep -E '^Metadata' | head -n 1 || true)
@@ -34483,7 +35045,7 @@ else
             fi
         fi
     else
-        log_info "ℹ Root filesystem is not btrfs (or btrfs tools missing); skipping metadata balance"
+        log_info "ℹ Root filesystem is ${VERIFY_ROOT_FSTYPE:-unknown} (or btrfs tools missing); skipping metadata balance"
     fi
 fi
 
@@ -34493,67 +35055,72 @@ if verify_should_skip_heavy_check "deep GPG repository repair"; then
     log_info "  → Deep GPG/signature repair deferred until cooldown expires"
 elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null; then
     log_warn "⚠ Skipping deep GPG check because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
-elif command -v zypper >/dev/null 2>&1; then
-    # Only do deeper GPG repair when repo refresh is failing or required key auto-import.
-    if [ "${REPO_REFRESH_FAILED:-0}" -eq 1 ] 2>/dev/null || [ "${REPO_REFRESH_USED_GPG_IMPORT:-0}" -eq 1 ] 2>/dev/null; then
+else
+    pm_deep_gpg_supported=1
+    case "${VERIFY_PM}" in
+        zypper)
+            if ! command -v zypper >/dev/null 2>&1; then
+                log_info "ℹ zypper backend selected but zypper is unavailable; skipping deep GPG repair"
+                pm_deep_gpg_supported=0
+            fi
+            ;;
+        apt)
+            if ! command -v apt-get >/dev/null 2>&1; then
+                log_info "ℹ apt backend selected but apt-get is unavailable; skipping deep GPG repair"
+                pm_deep_gpg_supported=0
+            fi
+            ;;
+        dnf)
+            if ! command -v dnf >/dev/null 2>&1; then
+                log_info "ℹ dnf backend selected but dnf is unavailable; skipping deep GPG repair"
+                pm_deep_gpg_supported=0
+            fi
+            ;;
+        pacman)
+            if ! command -v pacman >/dev/null 2>&1; then
+                log_info "ℹ pacman backend selected but pacman is unavailable; skipping deep GPG repair"
+                pm_deep_gpg_supported=0
+            fi
+            ;;
+        *)
+            log_info "ℹ Deep GPG repair skipped for unsupported package manager '${VERIFY_PM}'"
+            pm_deep_gpg_supported=0
+            ;;
+    esac
+
+    if [ "${pm_deep_gpg_supported}" -eq 1 ] 2>/dev/null && [ "${REPO_REFRESH_FAILED:-0}" -ne 1 ] 2>/dev/null && [ "${REPO_REFRESH_USED_GPG_IMPORT:-0}" -ne 1 ] 2>/dev/null; then
+        log_success "✓ No repository refresh failures/signature-import signals detected; skipping deep GPG repair"
+    elif [ "${pm_deep_gpg_supported}" -eq 1 ] 2>/dev/null; then
         set +e
-        if command -v timeout >/dev/null 2>&1; then
-            gpg_test_out=$(timeout 60 zypper --non-interactive refresh --force 2>&1)
-            gpg_test_rc=$?
-        else
-            gpg_test_out=$(zypper --non-interactive refresh --force 2>&1)
-            gpg_test_rc=$?
-        fi
+        gpg_test_out=$(verify_pm_refresh force 2>&1)
+        gpg_test_rc=$?
         set -e
 
-        if [ "$gpg_test_rc" -eq 0 ] 2>/dev/null; then
-            log_success "✓ Repository refresh OK (GPG handling looks consistent)"
-        else
-            if printf '%s\n' "$gpg_test_out" | grep -qiE 'gpg|signature|NOKEY|public key|keyring|repomd\.xml.*signature'; then
-                log_warn "⚠ Refresh failures look GPG/signature-related. Initiating deep GPG repair..."
-                log_info "  → Step 1: zypper clean --all"
-                execute_guarded "Clean zypper caches" zypper --non-interactive clean --all >/dev/null 2>&1 || true
-
-                log_info "  → Step 2: wipe raw metadata cache (/var/cache/zypp/raw)"
-                if [ -d /var/cache/zypp/raw ]; then
-                    execute_guarded "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
-                fi
-
-                log_info "  → Step 3: force refresh with key auto-import"
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-                if command -v timeout >/dev/null 2>&1; then
-                    if execute_guarded "Rebuild repo keys and refresh" timeout 120 zypper --non-interactive --gpg-auto-import-keys refresh --force; then
-                        log_success "  ✓ Deep GPG repair succeeded"
-                        REPO_REFRESH_FAILED=0
-                    else
-                        log_error "  ✗ Deep GPG repair failed"
-                        VERIFICATION_FAILED=1
-                    fi
-                else
-                    if execute_guarded "Rebuild repo keys and refresh" zypper --non-interactive --gpg-auto-import-keys refresh --force; then
-                        log_success "  ✓ Deep GPG repair succeeded"
-                        REPO_REFRESH_FAILED=0
-                    else
-                        log_error "  ✗ Deep GPG repair failed"
-                        VERIFICATION_FAILED=1
-                    fi
-                fi
+        if [ "${gpg_test_rc}" -eq 0 ] 2>/dev/null; then
+            log_success "✓ Repository refresh recovered (signature handling looks consistent)"
+            REPO_REFRESH_FAILED=0
+        elif verify_pm_output_looks_signature_error "${gpg_test_out}"; then
+            log_warn "⚠ Refresh failure looks GPG/signature-related. Attempting backend-native keyring remediation..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+            if verify_pm_attempt_keyring_repair; then
+                log_success "  ✓ Deep GPG repair succeeded"
+                REPO_REFRESH_FAILED=0
             else
-                log_info "ℹ Refresh failed, but error does not look GPG-related; skipping deep GPG repair"
-                printf '%s\n' "$gpg_test_out" | head -n 20 | tee -a "${LOG_FILE}"
+                log_error "  ✗ Deep GPG repair failed"
+                VERIFICATION_FAILED=1
             fi
+        else
+            log_info "ℹ Refresh failed, but output does not look GPG/signature-related; skipping deep keyring repair"
+            printf '%s\n' "${gpg_test_out}" | head -n 20 | tee -a "${LOG_FILE}"
         fi
-    else
-        log_success "✓ No repo refresh failures detected earlier; skipping deep GPG repair"
     fi
-else
-    log_info "ℹ zypper not available; skipping deep GPG check"
 fi
 
 # Check 43: Stale zypper lock file detection (edge-case)
 # NOTE: Other checks already manage locks, but this final pass catches
 # lingering legacy /var/run/zypp.pid issues.
 log_debug "[43/${TOTAL_CHECKS}] Checking for stale zypper locks (final pass)..."
+if [ "${VERIFY_PM}" = "zypper" ]; then
 local had_errexit stale_removed active_seen
 had_errexit=0
 [[ "$-" == *e* ]] && had_errexit=1
@@ -34615,6 +35182,9 @@ elif [ "${active_seen}" -eq 1 ] 2>/dev/null; then
 else
     log_success "✓ No zypper lock files detected"
 fi
+else
+    log_info "ℹ Final stale-zypper-lock pass skipped for package manager '${VERIFY_PM}'"
+fi
 
 # Check 44: Boot partition capacity
 # Kernel/initrd updates can fail when /boot is nearly full.
@@ -34628,7 +35198,9 @@ if [[ "${boot_usage:-}" =~ ^[0-9]+$ ]]; then
         # Auto-repair: attempt kernel purge ONLY when explicitly enabled.
         # Guard: never run zypper-based cleanup when a lock is active.
         if [[ "${KERNEL_PURGE_ENABLED,,}" == "true" ]]; then
-            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+            if [ "${VERIFY_PM}" != "zypper" ]; then
+                log_info "  → Kernel purge auto-repair is currently zypper-only; skipping on package manager '${VERIFY_PM}'"
+            elif [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
                 log_warn "  ⚠ Skipping kernel purge because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
             else
                 # Respect the interactive confirmation guard if present.
@@ -34732,7 +35304,7 @@ fi
 # check catches "rpm hangs" edge cases before we print the summary.
 log_debug "[47/${TOTAL_CHECKS}] Verifying RPM database consistency (final sanity)..."
 rpmqa_ok=0
-if command -v rpm >/dev/null 2>&1; then
+if [ "${VERIFY_PM_IS_RPM_BASED:-0}" -eq 1 ] 2>/dev/null && command -v rpm >/dev/null 2>&1; then
     if command -v timeout >/dev/null 2>&1; then
         if timeout 10 rpm -qa --qf '' >/dev/null 2>&1; then
             rpmqa_ok=1
@@ -34747,8 +35319,7 @@ if command -v rpm >/dev/null 2>&1; then
         log_success "✓ RPM database is readable (rpm -qa)"
     else
         log_warn "⚠ RPM database appears unresponsive (rpm -qa timed out/failed)"
-
-        if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
+        if [ "${VERIFY_PM}" = "zypper" ] && { [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; }; then
             log_warn "  ⚠ Skipping rpmdb rebuild because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
             VERIFICATION_FAILED=1
         else
@@ -34785,12 +35356,16 @@ if command -v rpm >/dev/null 2>&1; then
         fi
     fi
 else
-    log_info "ℹ rpm not available; skipping rpmdb final sanity check"
+    log_info "ℹ RPM final sanity check skipped for non-RPM package manager (${VERIFY_PM})"
 fi
 
 # Check 48: Snapper cleanup timers
 log_debug "[48/${TOTAL_CHECKS}] Verifying Snapper cleanup timers..."
-if __znh_unit_file_exists_system snapper-cleanup.timer; then
+if [ "${VERIFY_BTRFS_ROOT:-0}" -ne 1 ] 2>/dev/null; then
+    log_info "ℹ Snapper timer checks skipped on non-btrfs root filesystem (${VERIFY_ROOT_FSTYPE:-unknown})"
+elif [ "${VERIFY_SNAPPER_ROOT_SUPPORTED:-0}" -ne 1 ] 2>/dev/null; then
+    log_info "ℹ Snapper timer checks skipped (snapper root config unavailable at /etc/snapper/configs/root)"
+elif __znh_unit_file_exists_system snapper-cleanup.timer; then
     local _snap_disable_marker
     _snap_disable_marker="${SNAPPER_AUTO_DISABLE_MARKER:-/var/lib/zypper-auto/snapper-auto-disabled.intent}"
     if systemctl is-active --quiet snapper-cleanup.timer 2>/dev/null; then
@@ -34822,79 +35397,96 @@ log_debug "[49/${TOTAL_CHECKS}] Checking repository metadata health (raw cache a
 if verify_should_skip_heavy_check "repository metadata stale-cache repair"; then
     log_info "  → Repository metadata deep refresh deferred until cooldown expires"
 else
-    if [ -d /var/cache/zypp/raw ]; then
+    metadata_stale=0
+    metadata_stale_reason=""
+
+    if [ "${VERIFY_PM}" = "zypper" ] && [ -d /var/cache/zypp/raw ]; then
         cache_hit=$(find /var/cache/zypp/raw -maxdepth 1 -mindepth 1 -type d -mtime +14 -print -quit 2>/dev/null || true)
+        if [ -n "${cache_hit:-}" ]; then
+            metadata_stale=1
+            metadata_stale_reason="stale zypper raw cache detected"
+        fi
+    fi
+    if [ "${REPO_REFRESH_FAILED:-0}" -eq 1 ] 2>/dev/null; then
+        metadata_stale=1
+        if [ -z "${metadata_stale_reason:-}" ]; then
+            metadata_stale_reason="earlier repository refresh failure"
+        fi
+    fi
 
-        if [ -z "${cache_hit:-}" ] 2>/dev/null && [ "${REPO_REFRESH_FAILED:-0}" -ne 1 ] 2>/dev/null; then
-            log_success "✓ Repository metadata seems fresh"
+    if [ "${metadata_stale}" -eq 0 ] 2>/dev/null; then
+        log_success "✓ Repository metadata seems fresh"
+    else
+        log_warn "⚠ Repository metadata appears unhealthy (${metadata_stale_reason:-unknown reason})"
+
+        if [ "${VERIFY_PM}" = "zypper" ] && { [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; }; then
+            log_warn "  ⚠ Skipping metadata cleanup/refresh because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
+            VERIFICATION_FAILED=1
         else
-            log_warn "⚠ Repository metadata cache looks stale (or refresh failed earlier)"
+            log_info "  → Auto-repair: cleaning package-manager metadata cache and forcing refresh..."
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
 
-            if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
-                log_warn "  ⚠ Skipping metadata cleanup/refresh because zypper appears to be running (lock PID: ${ZYPPER_LOCK_PID_ACTIVE:-unknown})"
-                VERIFICATION_FAILED=1
-            else
-                log_info "  → Auto-repair: forcing metadata cleanup and refresh..."
-                REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-
-                # Prefer targeted cache cleanup (raw metadata + solv) without wiping downloaded RPMs.
+            if [ "${VERIFY_PM}" = "zypper" ]; then
                 execute_optional "Clear zypp raw metadata cache" rm -rf /var/cache/zypp/raw/* >/dev/null 2>&1 || true
                 execute_optional "Clear zypp solv cache" rm -rf /var/cache/zypp/solv/* >/dev/null 2>&1 || true
+            fi
 
-                if command -v timeout >/dev/null 2>&1; then
-                    if execute_guarded "Refresh repos (forced)" timeout 90 zypper --non-interactive refresh --force; then
-                        log_success "  ✓ Repositories refreshed successfully"
-                        REPO_REFRESH_FAILED=0
-                    else
-                        log_error "  ✗ Failed to refresh repositories"
-                        VERIFICATION_FAILED=1
-                    fi
-                else
-                    if execute_guarded "Refresh repos (forced)" zypper --non-interactive refresh --force; then
-                        log_success "  ✓ Repositories refreshed successfully"
-                        REPO_REFRESH_FAILED=0
-                    else
-                        log_error "  ✗ Failed to refresh repositories"
-                        VERIFICATION_FAILED=1
-                    fi
-                fi
+            execute_optional "Clean package-manager metadata cache" verify_pm_cache_cleanup >/dev/null 2>&1 || true
+            if execute_guarded "Refresh repositories (forced metadata rebuild)" verify_pm_refresh force; then
+                log_success "  ✓ Repository metadata refresh succeeded"
+                REPO_REFRESH_FAILED=0
+            else
+                log_error "  ✗ Repository metadata refresh failed after cleanup"
+                VERIFICATION_FAILED=1
             fi
         fi
     fi
 fi
 
 # Check 50: Orphaned temporary files & cache garbage
-log_debug "[50/${TOTAL_CHECKS}] Checking for orphaned zypp cache garbage..."
-if verify_should_skip_heavy_check "zypp cache garbage sweep"; then
+log_debug "[50/${TOTAL_CHECKS}] Checking for orphaned cache garbage..."
+if verify_should_skip_heavy_check "cache garbage sweep"; then
     log_info "  → Cache garbage deep sweep deferred until cooldown expires"
 else
-    if [ -d /var/cache/zypp ]; then
+    if [ "${VERIFY_PM}" = "zypper" ] && [ -d /var/cache/zypp ]; then
         garbage_count=$(find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) 2>/dev/null | wc -l | tr -d ' ')
         if ! [[ "${garbage_count:-}" =~ ^[0-9]+$ ]]; then
             garbage_count=0
         fi
 
-        if [ "${garbage_count}" -lt 50 ] 2>/dev/null; then
+        if [ "${garbage_count}" -lt 50 ] 2>/dev/null && [ "${REPO_REFRESH_FAILED:-0}" -ne 1 ] 2>/dev/null; then
             log_success "✓ Cache hygiene is good (${garbage_count} stale file(s))"
         else
-            log_warn "⚠ Found ${garbage_count} stale cache file(s); cleaning best-effort..."
+            log_warn "⚠ Found stale zypper cache metadata (${garbage_count} stale file(s)); cleaning best-effort..."
 
             if [ "${ZYPPER_LOCK_ACTIVE:-0}" -eq 1 ] 2>/dev/null || pgrep -x zypper >/dev/null 2>&1; then
                 log_warn "  ⚠ Skipping cache garbage cleanup because zypper appears to be running"
             else
                 REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
                 execute_optional "Remove stale .solv/cookies" find /var/cache/zypp -xdev -type f \( -name '*.solv' -o -name 'cookies' \) -delete 2>/dev/null || true
-                # Keep this narrow: only repodata metadata, not downloaded packages.
                 execute_optional "Prune repodata temp files" find /var/cache/zypp/raw -type f -path '*/repodata/*' -delete 2>/dev/null || true
+                execute_optional "Clean package-manager cache" verify_pm_cache_cleanup >/dev/null 2>&1 || true
                 log_success "  ✓ Cache garbage cleanup completed"
             fi
         fi
+    elif [ "${REPO_REFRESH_FAILED:-0}" -eq 1 ] 2>/dev/null; then
+        log_warn "⚠ Earlier repository refresh failed; running generic package-manager cache cleanup..."
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        if execute_guarded "Clean package-manager caches" verify_pm_cache_cleanup; then
+            log_success "  ✓ Package-manager cache cleanup completed"
+        else
+            log_warn "  ⚠ Package-manager cache cleanup failed or is unsupported on '${VERIFY_PM}'"
+        fi
+    else
+        log_success "✓ No cache-garbage indicators detected for package manager '${VERIFY_PM}'"
     fi
 fi
 
 # Check 51: Zypper Turbo tuner (optional)
 log_debug "[51/${TOTAL_CHECKS}] Checking Zypper Turbo tuning (/etc/zypp/zypp.conf)..."
-if [ -f /etc/zypp/zypp.conf ]; then
+if [ "${VERIFY_PM}" != "zypper" ]; then
+    log_info "ℹ Zypper Turbo tuning is zypper-specific; skipping for '${VERIFY_PM}'"
+elif [ -f /etc/zypp/zypp.conf ]; then
     local cur_conns cur_mode turbo_ok
 
     # Determine current effective values (best-effort).
@@ -35329,7 +35921,17 @@ __znh_start_repair_safety_snapshot() {
     if [ "${EUID:-1}" -ne 0 ] 2>/dev/null; then
         return 0
     fi
+    local root_fstype
+    root_fstype="$(znh_root_filesystem_type)"
+    if [ "${root_fstype}" != "btrfs" ]; then
+        log_info "📸 Safety snapshot skipped: root filesystem is ${root_fstype} (snapper safety snapshots are btrfs-specific)"
+        return 0
+    fi
     if ! command -v snapper >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ ! -r /etc/snapper/configs/root ]; then
+        log_info "📸 Safety snapshot skipped: snapper root config is not available at /etc/snapper/configs/root"
         return 0
     fi
 
@@ -42741,6 +43343,7 @@ run_uninstall_helper_only() {
             echo "    (OS unit files are never deleted by this uninstaller)" | tee -a "${LOG_FILE}"
         fi
         echo "  - Root binaries: /usr/local/bin/zypper-download-with-progress, /usr/local/bin/zypper-auto-helper" | tee -a "${LOG_FILE}"
+        echo "    ${PM_RUNTIME_HELPER_PATH} (shared package-manager runtime helper)" | tee -a "${LOG_FILE}"
         echo "    /usr/bin/zypper-auto-helper (compatibility symlink when pointing to /usr/local/bin/zypper-auto-helper)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-diag-follow (diagnostics follower helper)" | tee -a "${LOG_FILE}"
         echo "    /usr/local/bin/zypper-auto-dashboard-perf-worker (dashboard perf worker)" | tee -a "${LOG_FILE}"
@@ -42848,7 +43451,11 @@ run_uninstall_helper_only() {
         /usr/local/bin/zypper-auto-dashboard-api \
         /usr/local/bin/zypper-auto-dashboard-perf-worker \
         /usr/local/bin/zypper-scrub-ghost \
-        /usr/local/bin/scrub-ghost || true
+        /usr/local/bin/scrub-ghost \
+        "${PM_RUNTIME_HELPER_PATH}" || true
+
+    # Remove helper directory only when it is empty.
+    execute_guarded "Remove shared PM helper directory if empty (${PM_RUNTIME_HELPER_DIR})" rmdir "${PM_RUNTIME_HELPER_DIR}" || true
 
     # Remove the compatibility symlink only when it points to the helper we installed.
     if [ -L /usr/bin/zypper-auto-helper ]; then
@@ -44360,6 +44967,637 @@ execute_guarded "Remove legacy user scripts and units" rm -f \
     "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" \
     "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user."* || true
 log_success "Old user services disabled and files removed"
+# --- 4b. Create shared package-manager runtime helper ---
+log_info ">>> Creating shared package-manager runtime helper: ${PM_RUNTIME_HELPER_PATH}"
+update_status "Creating shared package-manager helper..."
+execute_guarded "Ensure shared PM helper directory exists" mkdir -p "${PM_RUNTIME_HELPER_DIR}"
+write_atomic "${PM_RUNTIME_HELPER_PATH}" << 'EOF'
+#!/usr/bin/env bash
+# Shared package-manager runtime helper.
+# - Sourced by generated shell helpers (downloader/install/view)
+# - Executed in query mode by the notifier (Python)
+
+SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-}"
+
+znh_pm_detect_system_package_manager() {
+    local id id_like
+    id=""
+    id_like=""
+
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+    fi
+
+    case "${id}" in
+        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+    esac
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        case "${id_like}" in
+            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
+            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
+            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
+            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
+        esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        if command -v zypper >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif command -v dnf >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif command -v apt-get >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="apt"
+        elif command -v pacman >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="pacman"
+        fi
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
+znh_pm_ensure_detected() {
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        znh_pm_detect_system_package_manager
+    fi
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
+znh_pm_is_lock_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            grep -qiE 'system management is locked|locked by the application with pid' "${out_file}" 2>/dev/null
+            ;;
+        apt)
+            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${out_file}" 2>/dev/null
+            ;;
+        dnf)
+            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${out_file}" 2>/dev/null
+            ;;
+        pacman)
+            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${out_file}" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_is_lock_failure() {
+    local exit_code="${1:-0}"
+    local out_file="${2:-}"
+
+    znh_pm_ensure_detected
+    if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${exit_code}" -eq 7 ] 2>/dev/null; then
+        return 0
+    fi
+    znh_pm_is_lock_output_file "${out_file}"
+}
+
+znh_pm_lock_active_pid() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            local lf pid
+            for lf in /run/zypp.pid /var/run/zypp.pid; do
+                [ -f "${lf}" ] || continue
+                pid=$(cat "${lf}" 2>/dev/null || echo "")
+                if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                    printf '%s\n' "${pid}"
+                    return 0
+                fi
+            done
+            if pgrep -x zypper >/dev/null 2>&1; then
+                pgrep -x zypper | head -n 1
+                return 0
+            fi
+            ;;
+        apt)
+            local apt_pid
+            for apt_pid in $(pgrep -f -x 'apt-get|apt|dpkg' 2>/dev/null || true); do
+                if [[ "${apt_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${apt_pid}" 2>/dev/null; then
+                    printf '%s\n' "${apt_pid}"
+                    return 0
+                fi
+            done
+            ;;
+        dnf)
+            local dnf_pid
+            for dnf_pid in $(pgrep -f -x 'dnf|yum|rpm' 2>/dev/null || true); do
+                if [[ "${dnf_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${dnf_pid}" 2>/dev/null; then
+                    printf '%s\n' "${dnf_pid}"
+                    return 0
+                fi
+            done
+            ;;
+        pacman)
+            local pac_pid
+            if [ -f /var/lib/pacman/db.lck ] && pgrep -x pacman >/dev/null 2>&1; then
+                pac_pid=$(pgrep -x pacman | head -n 1 || true)
+                if [[ "${pac_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pac_pid}" 2>/dev/null; then
+                    printf '%s\n' "${pac_pid}"
+                    return 0
+                fi
+            fi
+            ;;
+    esac
+    return 1
+}
+
+znh_pm_lock_is_active() {
+    local pid
+    pid="$(znh_pm_lock_active_pid 2>/dev/null || true)"
+    [ -n "${pid:-}" ]
+}
+
+znh_pm_wait_for_lock_clear() {
+    local timeout_seconds="${1:-0}"
+    local poll_seconds="${2:-2}"
+    local start now elapsed
+
+    [[ "${timeout_seconds:-}" =~ ^[0-9]+$ ]] || timeout_seconds=0
+    [[ "${poll_seconds:-}" =~ ^[0-9]+$ ]] || poll_seconds=2
+    if [ "${poll_seconds}" -lt 1 ] 2>/dev/null; then
+        poll_seconds=1
+    fi
+
+    if [ "${timeout_seconds}" -le 0 ] 2>/dev/null; then
+        if znh_pm_lock_is_active; then
+            return 1
+        fi
+        return 0
+    fi
+
+    start="$(date +%s 2>/dev/null || echo 0)"
+    while znh_pm_lock_is_active; do
+        now="$(date +%s 2>/dev/null || echo 0)"
+        elapsed=0
+        if [[ "${start:-}" =~ ^[0-9]+$ ]] && [[ "${now:-}" =~ ^[0-9]+$ ]]; then
+            elapsed=$((now - start))
+        fi
+        if [ "${elapsed}" -ge "${timeout_seconds}" ] 2>/dev/null; then
+            return 1
+        fi
+        sleep "${poll_seconds}"
+    done
+    return 0
+}
+
+znh_pm_cleanup_stale_locks() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            local lf pid removed
+            removed=0
+            for lf in /run/zypp.pid /var/run/zypp.pid; do
+                [ -f "${lf}" ] || continue
+                pid=$(cat "${lf}" 2>/dev/null || echo "")
+                if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                    continue
+                fi
+                if pgrep -x zypper >/dev/null 2>&1; then
+                    continue
+                fi
+                if rm -f "${lf}" 2>/dev/null; then
+                    removed=$((removed + 1))
+                fi
+            done
+            printf '%s\n' "${removed}"
+            return 0
+            ;;
+        *)
+            printf '%s\n' "0"
+            return 0
+            ;;
+    esac
+}
+
+znh_pm_is_network_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    grep -qiE 'could not resolve host|temporary failure resolving|failed to retrieve new repository metadata|curl error|connection timed out|failed to synchronize cache|could not connect|name or service not known|network is unreachable' "${out_file}" 2>/dev/null
+}
+
+znh_pm_downloader_refresh_run() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get update
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y makecache --refresh
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Sy
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_downloader_preview_run() {
+    local out_file="$1"
+    local err_file="$2"
+    local rc
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "${out_file}" 2> "${err_file}"
+            return $?
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade > "${out_file}" 2> "${err_file}"
+            return $?
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -q check-update > "${out_file}" 2> "${err_file}"
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Qu > "${out_file}" 2> "${err_file}"
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_downloader_download_run() {
+    local err_file="$1"
+    local dup_extra_flags_raw="${2:-}"
+    local -a dup_extra_flags_arr=()
+
+    znh_pm_ensure_detected
+    if [ -n "${dup_extra_flags_raw}" ]; then
+        # shellcheck disable=SC2206
+        dup_extra_flags_arr=( ${dup_extra_flags_raw} )
+    fi
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only "${dup_extra_flags_arr[@]}" >/dev/null 2>"${err_file}"
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -y -d dist-upgrade >/dev/null 2>"${err_file}"
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y upgrade --downloadonly >/dev/null 2>"${err_file}"
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Syuw --noconfirm >/dev/null 2>"${err_file}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_extract_package_count_from_preview() {
+    local preview_file="$1"
+    local count
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            count=$(grep -oP '\d+(?= packages to upgrade)' "${preview_file}" 2>/dev/null | head -1 || true)
+            ;;
+        apt)
+            count=$(grep -cE '^Inst[[:space:]]+' "${preview_file}" 2>/dev/null || true)
+            ;;
+        dnf)
+            count=$(grep -E '^[[:alnum:]_.+-]+[[:space:]]+[[:alnum:]_.:+~-]+' "${preview_file}" 2>/dev/null | grep -vE '^(Last metadata expiration check|Obsoleting Packages|Security:|Bugfix:|Enhancement:)' | wc -l || true)
+            ;;
+        pacman)
+            count=$(grep -cE '^[^[:space:]]+[[:space:]][^[:space:]]+[[:space:]]+->' "${preview_file}" 2>/dev/null || true)
+            ;;
+        *)
+            count=0
+            ;;
+    esac
+
+    if ! [[ "${count:-0}" =~ ^[0-9]+$ ]]; then
+        count=0
+    fi
+    echo "${count}"
+}
+
+znh_pm_extract_download_size_from_preview() {
+    local preview_file="$1"
+    local size
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            size=$(grep -oP 'Overall download size: ([\d.]+ [KMG]iB)' "${preview_file}" 2>/dev/null | grep -oP '[\d.]+ [KMG]iB' || true)
+            ;;
+        apt)
+            size=$(grep -oE '[0-9.]+ [kMG]B of archives' "${preview_file}" 2>/dev/null | head -1 | sed -E 's/ of archives$//' || true)
+            ;;
+        dnf|pacman)
+            size="unknown"
+            ;;
+        *)
+            size="unknown"
+            ;;
+    esac
+
+    if [ -z "${size:-}" ]; then
+        size="unknown"
+    fi
+    echo "${size}"
+}
+
+znh_pm_extract_snapshot_from_preview() {
+    local preview_file="$1"
+    local snapshot
+    snapshot=""
+    znh_pm_ensure_detected
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            snapshot=$(grep -oP 'openSUSE Tumbleweed\s+\S+\s*->\s*\K[0-9T-]+' "${preview_file}" 2>/dev/null | head -1 || true)
+            if [ -z "${snapshot:-}" ]; then
+                snapshot=$(grep -oP 'tumbleweed-release.*->\s*\K[\dTb-]+' "${preview_file}" 2>/dev/null | head -1 || true)
+            fi
+            ;;
+    esac
+
+    printf '%s\n' "${snapshot:-}"
+}
+
+znh_pm_extract_preview_packages_from_preview() {
+    local preview_file="$1"
+    local max_packages="${2:-3}"
+    local line pkg
+    local -a packages=()
+    local seen joined
+    seen=""
+    joined=""
+
+    znh_pm_ensure_detected
+    [[ "${max_packages:-}" =~ ^[0-9]+$ ]] || max_packages=3
+    if [ "${max_packages}" -lt 1 ] 2>/dev/null; then
+        max_packages=1
+    fi
+
+    while IFS= read -r line; do
+        [ -n "${line:-}" ] || continue
+        pkg=""
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)
+                if printf '%s\n' "${line}" | grep -q '|'; then
+                    pkg=$(printf '%s\n' "${line}" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1}' || true)
+                    if [[ "${pkg:-}" =~ ^[0-9] ]] || [ "${pkg}" = "Name" ] || [ "${pkg}" = "Status" ] || [ "${pkg}" = "#" ]; then
+                        pkg=""
+                    fi
+                fi
+                ;;
+            apt)
+                pkg=$(printf '%s\n' "${line}" | sed -nE 's/^Inst[[:space:]]+([^[:space:]]+).*/\1/p' || true)
+                ;;
+            dnf)
+                pkg=$(printf '%s\n' "${line}" | sed -nE 's/^([A-Za-z0-9_.+-]+)\.[A-Za-z0-9_+-]+[[:space:]]+[0-9A-Za-z:._+~ -]+[[:space:]]+\S+$/\1/p' || true)
+                ;;
+            pacman)
+                pkg=$(printf '%s\n' "${line}" | sed -nE 's/^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+->[[:space:]]+[^[:space:]]+$/\1/p' || true)
+                ;;
+        esac
+
+        [ -n "${pkg:-}" ] || continue
+        if printf '%s\n' "${seen}" | grep -Fxq "${pkg}"; then
+            continue
+        fi
+        seen="$(printf '%s\n%s\n' "${seen}" "${pkg}")"
+        packages+=("${pkg}")
+        if [ "${#packages[@]}" -ge "${max_packages}" ] 2>/dev/null; then
+            break
+        fi
+    done < "${preview_file}"
+
+    for pkg in "${packages[@]}"; do
+        if [ -n "${joined}" ]; then
+            joined="${joined},${pkg}"
+        else
+            joined="${pkg}"
+        fi
+    done
+    printf '%s\n' "${joined}"
+}
+
+znh_pm_summarize_preview() {
+    local preview_file="$1"
+    local max_packages="${2:-3}"
+    local count snapshot preview
+
+    if [ -z "${preview_file:-}" ] || [ ! -f "${preview_file}" ]; then
+        return 1
+    fi
+
+    count="$(znh_pm_extract_package_count_from_preview "${preview_file}")"
+    snapshot="$(znh_pm_extract_snapshot_from_preview "${preview_file}")"
+    preview="$(znh_pm_extract_preview_packages_from_preview "${preview_file}" "${max_packages}")"
+
+    printf 'PACKAGE_COUNT=%s\n' "${count:-0}"
+    printf 'SNAPSHOT=%s\n' "${snapshot:-}"
+    printf 'PREVIEW=%s\n' "${preview:-}"
+    return 0
+}
+
+znh_pm_install_upgrade_streaming() {
+    local log_file="$1"
+    local out_file="$2"
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            pkexec zypper dup 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        apt)
+            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        dnf)
+            pkexec dnf -y upgrade 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        pacman)
+            pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        *)
+            echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${log_file}" | tee "${out_file}"
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_capture_package_snapshot() {
+    local out_file="$1"
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper|dnf)
+            rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}"
+            ;;
+        apt)
+            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null | sort > "${out_file}"
+            ;;
+        pacman)
+            pacman -Q 2>/dev/null | sort > "${out_file}"
+            ;;
+        *)
+            : > "${out_file}"
+            ;;
+    esac
+}
+
+znh_pm_view_changes_preview_run() {
+    local rc
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            pkexec zypper --non-interactive dup --dry-run --details
+            return $?
+            ;;
+        apt)
+            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade
+            return $?
+            ;;
+        dnf)
+            pkexec dnf -q check-update
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        pacman)
+            pkexec pacman -Qu
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_manual_update_command() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) echo "sudo zypper dup --allow-vendor-change" ;;
+        apt) echo "sudo apt-get dist-upgrade" ;;
+        dnf) echo "sudo dnf upgrade" ;;
+        pacman) echo "sudo pacman -Syu" ;;
+        *) echo "sudo zypper dup --allow-vendor-change" ;;
+    esac
+}
+
+znh_pm_manual_refresh_command() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) echo "sudo zypper refresh" ;;
+        apt) echo "sudo apt-get update" ;;
+        dnf) echo "sudo dnf makecache --refresh" ;;
+        pacman) echo "sudo pacman -Sy" ;;
+        *) echo "sudo zypper refresh" ;;
+    esac
+}
+
+znh_pm_query_notifier_preview_command_argv() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) printf '%s\0' "pkexec" "zypper" "--non-interactive" "dup" "--dry-run" ;;
+        apt) printf '%s\0' "pkexec" "env" "DEBIAN_FRONTEND=noninteractive" "apt-get" "-s" "dist-upgrade" ;;
+        dnf) printf '%s\0' "pkexec" "dnf" "-q" "check-update" ;;
+        pacman) printf '%s\0' "pkexec" "pacman" "-Qu" ;;
+        *) printf '%s\0' "pkexec" "zypper" "--non-interactive" "dup" "--dry-run" ;;
+    esac
+}
+
+znh_pm_query() {
+    local key="${1:-}"
+    local arg1="${2:-}"
+    local arg2="${3:-}"
+    znh_pm_ensure_detected
+    case "${key}" in
+        package-manager)
+            printf '%s\n' "${SYSTEM_PKG_MANAGER}"
+            ;;
+        manual-update-command)
+            znh_pm_manual_update_command
+            ;;
+        manual-refresh-command)
+            znh_pm_manual_refresh_command
+            ;;
+        notifier-preview-command-argv)
+            znh_pm_query_notifier_preview_command_argv
+            ;;
+        preview-summary)
+            znh_pm_summarize_preview "${arg1}" "${arg2:-3}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [ "${1:-}" = "--query" ]; then
+        shift || true
+        znh_pm_query "${1:-}" "${2:-}" "${3:-}"
+        exit $?
+    fi
+    if [ "${1:-}" = "--summarize-preview" ]; then
+        shift || true
+        znh_pm_summarize_preview "${1:-}" "${2:-3}"
+        exit $?
+    fi
+    if [ "${1:-}" = "--detect" ]; then
+        znh_pm_ensure_detected
+        printf '%s\n' "${SYSTEM_PKG_MANAGER}"
+        exit 0
+    fi
+fi
+EOF
+execute_guarded "Set shared PM helper permissions" chmod 755 "${PM_RUNTIME_HELPER_PATH}"
+log_success "Shared package-manager runtime helper created"
 
 # --- 5. Create/Update DOWNLOADER (Root Service) ---
 log_info ">>> Creating (root) downloader service: ${DL_SERVICE_FILE}"
@@ -44432,50 +45670,6 @@ write_status() {
     printf '%s\n' "$value" >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS_FILE"
 }
 
-detect_system_package_manager() {
-    local id id_like
-    id=""
-    id_like=""
-
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
-        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
-    fi
-
-    case "${id}" in
-        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
-        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
-        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
-        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
-    esac
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        case "${id_like}" in
-            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
-            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
-            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
-            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
-        esac
-    fi
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        if command -v zypper >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="zypper"
-        elif command -v dnf >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="dnf"
-        elif command -v apt-get >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="apt"
-        elif command -v pacman >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="pacman"
-        fi
-    fi
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        SYSTEM_PKG_MANAGER="zypper"
-    fi
-}
 
 # Optional: read extra dup flags from /etc/zypper-auto.conf so users can
 # tweak solver behaviour (e.g. --allow-vendor-change) without editing
@@ -44488,173 +45682,16 @@ fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
 CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-60}"
 DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
-detect_system_package_manager
-
-pm_is_lock_error() {
-    local exit_code="$1"
-    local err_file="${2:-}"
-
-    if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${exit_code}" -eq 7 ] 2>/dev/null; then
-        return 0
-    fi
-
-    [ -n "${err_file}" ] || return 1
-    [ -f "${err_file}" ] || return 1
-
-    case "${SYSTEM_PKG_MANAGER}" in
-        apt)
-            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${err_file}" 2>/dev/null
-            ;;
-        dnf)
-            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${err_file}" 2>/dev/null
-            ;;
-        pacman)
-            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${err_file}" 2>/dev/null
-            ;;
-        zypper)
-            grep -qiE 'system management is locked|locked by the application with pid' "${err_file}" 2>/dev/null
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-pm_is_network_error() {
-    local err_file="${1:-}"
-    [ -n "${err_file}" ] || return 1
-    [ -f "${err_file}" ] || return 1
-    grep -qiE 'could not resolve host|temporary failure resolving|failed to retrieve new repository metadata|curl error|connection timed out|failed to synchronize cache|could not connect|name or service not known|network is unreachable' "${err_file}" 2>/dev/null
-}
-
-pm_refresh_cmd() {
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh
-            ;;
-        apt)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get update
-            ;;
-        dnf)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y makecache --refresh
-            ;;
-        pacman)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Sy
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-pm_preview_cmd() {
-    local out_file="$1"
-    local err_file="$2"
-    local rc
-
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "${out_file}" 2> "${err_file}"
-            return $?
-            ;;
-        apt)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade > "${out_file}" 2> "${err_file}"
-            return $?
-            ;;
-        dnf)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -q check-update > "${out_file}" 2> "${err_file}"
-            rc=$?
-            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
-                return 0
-            fi
-            return "${rc}"
-            ;;
-        pacman)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Qu > "${out_file}" 2> "${err_file}"
-            rc=$?
-            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
-                return 0
-            fi
-            return "${rc}"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-pm_download_cmd() {
-    local err_file="$1"
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only ${DUP_EXTRA_FLAGS} >/dev/null 2>"${err_file}"
-            ;;
-        apt)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -y -d dist-upgrade >/dev/null 2>"${err_file}"
-            ;;
-        dnf)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y upgrade --downloadonly >/dev/null 2>"${err_file}"
-            ;;
-        pacman)
-            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Syuw --noconfirm >/dev/null 2>"${err_file}"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-pm_extract_package_count() {
-    local preview_file="$1"
-    local count
-
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            count=$(grep -oP '\d+(?= packages to upgrade)' "${preview_file}" 2>/dev/null | head -1 || true)
-            ;;
-        apt)
-            count=$(grep -cE '^Inst[[:space:]]+' "${preview_file}" 2>/dev/null || true)
-            ;;
-        dnf)
-            count=$(grep -E '^[[:alnum:]_.+-]+[[:space:]]+[[:alnum:]_.:+~-]+' "${preview_file}" 2>/dev/null | grep -vE '^(Last metadata expiration check|Obsoleting Packages|Security:|Bugfix:|Enhancement:)' | wc -l || true)
-            ;;
-        pacman)
-            count=$(grep -cE '^[^[:space:]]+[[:space:]][^[:space:]]+[[:space:]]+->' "${preview_file}" 2>/dev/null || true)
-            ;;
-        *)
-            count=0
-            ;;
-    esac
-
-    if ! [[ "${count:-0}" =~ ^[0-9]+$ ]]; then
-        count=0
-    fi
-    echo "${count}"
-}
-
-pm_extract_download_size() {
-    local preview_file="$1"
-    local size
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            size=$(grep -oP 'Overall download size: ([\d.]+ [KMG]iB)' "${preview_file}" 2>/dev/null | grep -oP '[\d.]+ [KMG]iB' || true)
-            ;;
-        apt)
-            size=$(grep -oE '[0-9.]+ [kMG]B of archives' "${preview_file}" 2>/dev/null | head -1 | sed -E 's/ of archives$//' || true)
-            ;;
-        dnf|pacman)
-            size="unknown"
-            ;;
-        *)
-            size="unknown"
-            ;;
-    esac
-
-    if [ -z "${size:-}" ]; then
-        size="unknown"
-    fi
-    echo "${size}"
-}
+PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
+if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
+    derr "Shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}"
+    write_status "error:repo"
+    exit 0
+fi
+# shellcheck disable=SC1091
+. "${PM_RUNTIME_HELPER}"
+znh_pm_ensure_detected
+SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
 
 # Skip running any downloads on metered connections.
 # We cannot rely on systemd's ConditionNotOnMeteredConnection everywhere,
@@ -44771,7 +45808,7 @@ trigger_notifier() {
 # racy and fragile.
 handle_lock_or_fail() {
     local exit_code="$1" err_file="$2"
-    if pm_is_lock_error "${exit_code}" "${err_file}"; then
+    if znh_pm_is_lock_failure "${exit_code}" "${err_file}"; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Package manager '${SYSTEM_PKG_MANAGER}' is locked by another process; skipping this downloader run (will retry on next timer)" >&2
         dlog "Package-manager lock detected (pm=${SYSTEM_PKG_MANAGER}, exit=${exit_code}); skipping this run"
         write_status "idle"
@@ -44789,12 +45826,12 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
 
     REFRESH_ERR=$(mktemp)
     set +e
-    pm_refresh_cmd >/dev/null 2>"$REFRESH_ERR"
+    znh_pm_downloader_refresh_run >/dev/null 2>"$REFRESH_ERR"
     ZYP_EXIT=$?
     set -e
     if [ "$ZYP_EXIT" -ne 0 ]; then
         handle_lock_or_fail "$ZYP_EXIT" "$REFRESH_ERR"
-        if pm_is_network_error "$REFRESH_ERR"; then
+        if znh_pm_is_network_output_file "$REFRESH_ERR"; then
             if is_metered_cached 1; then
                 write_status "idle"
                 dlog "Network error during refresh but connection is now metered; treating as idle"
@@ -44815,12 +45852,12 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
     DRY_OUTPUT=$(mktemp)
     DRY_ERR=$(mktemp)
     set +e
-    pm_preview_cmd "$DRY_OUTPUT" "$DRY_ERR"
+    znh_pm_downloader_preview_run "$DRY_OUTPUT" "$DRY_ERR"
     ZYP_EXIT=$?
     set -e
     if [ "$ZYP_EXIT" -ne 0 ]; then
         handle_lock_or_fail "$ZYP_EXIT" "$DRY_ERR"
-        if pm_is_network_error "$DRY_ERR"; then
+        if znh_pm_is_network_output_file "$DRY_ERR"; then
             if is_metered_cached 1; then
                 write_status "idle"
                 dlog "Network error during preview but connection is now metered; treating as idle"
@@ -44838,8 +45875,8 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
     fi
     rm -f "$DRY_ERR"
 
-    PKG_COUNT="$(pm_extract_package_count "$DRY_OUTPUT")"
-    DOWNLOAD_SIZE="$(pm_extract_download_size "$DRY_OUTPUT")"
+    PKG_COUNT="$(znh_pm_extract_package_count_from_preview "$DRY_OUTPUT")"
+    DOWNLOAD_SIZE="$(znh_pm_extract_download_size_from_preview "$DRY_OUTPUT")"
 
     DRYRUN_OUTPUT_FILE="$LOG_DIR/dry-run-last.txt"
     DRYRUN_TMP=$(mktemp)
@@ -44869,7 +45906,7 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
 
     set +e
     DL_ERR=$(mktemp)
-    pm_download_cmd "$DL_ERR"
+    znh_pm_downloader_download_run "$DL_ERR" "${DUP_EXTRA_FLAGS:-}"
     ZYP_RET=$?
     if [ "$ZYP_RET" -ne 0 ]; then
         handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
@@ -44900,9 +45937,11 @@ date +%s > "$START_TIME_FILE"
 
 # Refresh repos
 REFRESH_ERR=$(mktemp)
-# Run with *low* CPU/IO priority so background checks don't cause interactive lag.
-/usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh >/dev/null 2>"$REFRESH_ERR"
+set +e
+znh_pm_downloader_refresh_run >/dev/null 2>"$REFRESH_ERR"
 ZYP_EXIT=$?
+set -e
+set -e
 if [ "$ZYP_EXIT" -ne 0 ]; then
     # If another zypper instance holds the lock, handle_lock_or_fail will
     # mark the status as idle and exit 0 so we do not treat it as an
@@ -44912,8 +45951,7 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
     # At this point we know the error was not a simple lock. Classify it
     # as a network/repository problem so the notifier can surface a clear
     # error message instead of silently doing nothing.
-    if grep -qi "could not resolve host" "$REFRESH_ERR" || \
-       grep -qi "Failed to retrieve new repository metadata" "$REFRESH_ERR"; then
+    if znh_pm_is_network_output_file "$REFRESH_ERR"; then
         # If network state changed mid-run and is now metered, treat this as a
         # skip instead of an error to avoid noisy notifications.
         if is_metered_cached 1; then
@@ -44939,7 +45977,8 @@ rm -f "$REFRESH_ERR"
 # Get update info
 DRY_OUTPUT=$(mktemp)
 DRY_ERR=$(mktemp)
-/usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "$DRY_OUTPUT" 2>"$DRY_ERR"
+set +e
+znh_pm_downloader_preview_run "$DRY_OUTPUT" "$DRY_ERR"
 ZYP_EXIT=$?
 if [ "$ZYP_EXIT" -ne 0 ]; then
     # Handle lock first; if it is just a lock, this will mark status idle
@@ -44948,8 +45987,7 @@ if [ "$ZYP_EXIT" -ne 0 ]; then
 
     # Non-lock failure at the dry-run stage – mirror the refresh handling
     # so the notifier can display a meaningful error notification.
-    if grep -qi "could not resolve host" "$DRY_ERR" || \
-       grep -qi "Failed to retrieve new repository metadata" "$DRY_ERR"; then
+    if znh_pm_is_network_output_file "$DRY_ERR"; then
         if is_metered_cached 1; then
             write_status "idle"
             dlog "Network error during dry-run but connection is now metered; treating as idle"
@@ -44987,9 +46025,9 @@ if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
     exit 0
 fi
 
-# Extract package count and size
-PKG_COUNT=$(grep -oP "\d+(?= packages to upgrade)" "$DRY_OUTPUT" | head -1)
-DOWNLOAD_SIZE=$(grep -oP "Overall download size: ([\d.]+ [KMG]iB)" "$DRY_OUTPUT" | grep -oP "[\d.]+ [KMG]iB" || echo "unknown")
+# Extract package count and size via shared PM helper.
+PKG_COUNT="$(znh_pm_extract_package_count_from_preview "$DRY_OUTPUT")"
+DOWNLOAD_SIZE="$(znh_pm_extract_download_size_from_preview "$DRY_OUTPUT")"
 
 # Detect case where everything is already cached so we don't show a fake
 # download progress bar. In that situation zypper's summary contains a
@@ -45107,7 +46145,7 @@ fi
 # lock error to avoid noisy logs when another zypper instance is running.
 set +e
 DL_ERR=$(mktemp)
-/usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only $DUP_EXTRA_FLAGS >/dev/null 2>"$DL_ERR"
+znh_pm_downloader_download_run "$DL_ERR" "${DUP_EXTRA_FLAGS:-}"
 ZYP_RET=$?
 if [ "$ZYP_RET" -ne 0 ]; then
     handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
@@ -45399,122 +46437,16 @@ if [ -r "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 SYSTEM_PKG_MANAGER=""
-
-detect_system_package_manager() {
-    local id id_like
-    id=""
-    id_like=""
-
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
-        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
-    fi
-
-    case "${id}" in
-        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
-        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
-        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
-        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
-    esac
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        case "${id_like}" in
-            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
-            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
-            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
-            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
-        esac
-    fi
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        if command -v zypper >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="zypper"
-        elif command -v dnf >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="dnf"
-        elif command -v apt-get >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="apt"
-        elif command -v pacman >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="pacman"
-        fi
-    fi
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        SYSTEM_PKG_MANAGER="zypper"
-    fi
-}
-
-detect_system_package_manager
-log "Detected package manager: ${SYSTEM_PKG_MANAGER}"
-
-pm_is_lock_output_file() {
-    local out_file="${1:-}"
-    [ -n "${out_file}" ] || return 1
-    [ -f "${out_file}" ] || return 1
-
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            grep -qiE 'system management is locked|locked by the application with pid' "${out_file}" 2>/dev/null
-            ;;
-        apt)
-            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${out_file}" 2>/dev/null
-            ;;
-        dnf)
-            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${out_file}" 2>/dev/null
-            ;;
-        pacman)
-            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${out_file}" 2>/dev/null
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-pm_run_upgrade_streaming() {
-    local out_file="$1"
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            pkexec zypper dup 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        apt)
-            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        dnf)
-            pkexec dnf -y upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        pacman)
-            pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        *)
-            echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return 1
-            ;;
-    esac
-}
-
-capture_package_snapshot() {
-    local out_file="$1"
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper|dnf)
-            rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}"
-            ;;
-        apt)
-            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null | sort > "${out_file}"
-            ;;
-        pacman)
-            pacman -Q 2>/dev/null | sort > "${out_file}"
-            ;;
-        *)
-            : > "${out_file}"
-            ;;
-    esac
-}
+PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
+if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
+    echo "ERROR: shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}" >&2
+    echo "Please re-run the installer: sudo zypper-auto-helper install" >&2
+    exit 1
+fi
+# shellcheck disable=SC1091
+. "${PM_RUNTIME_HELPER}"
+znh_pm_ensure_detected
+SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
 
 # Enterprise extensions (optional)
 HOOKS_ENABLED="${HOOKS_ENABLED:-true}"
@@ -47094,6 +48026,7 @@ CACHE_EXPIRY_MINUTES = 60
 
 # Global config path for zypper-auto-helper
 CONFIG_FILE = "/etc/zypper-auto.conf"
+PM_RUNTIME_HELPER = "/usr/local/lib/zypper-auto/package-manager-runtime.sh"
 # Cache and snooze configuration (overridable via environment, see systemd unit)
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -47199,8 +48132,53 @@ def update_status(status: str) -> None:
     except Exception as e:
         log_error(f"Failed to update status file: {e}")
 
+def _query_pm_helper_text(key: str, timeout: int = 8) -> str | None:
+    """Query shared PM helper for text values."""
+    try:
+        helper = Path(PM_RUNTIME_HELPER)
+        if not helper.is_file():
+            return None
+        result = subprocess.run(
+            [str(helper), "--query", key],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return None
+        value = (result.stdout or "").strip()
+        return value or None
+    except Exception as e:
+        log_debug(f"PM helper text query failed (key={key}): {e}")
+        return None
+
+def _query_pm_helper_argv(key: str, timeout: int = 8) -> list[str] | None:
+    """Query shared PM helper for NUL-delimited argv payloads."""
+    try:
+        helper = Path(PM_RUNTIME_HELPER)
+        if not helper.is_file():
+            return None
+        result = subprocess.run(
+            [str(helper), "--query", key],
+            capture_output=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout or b""
+        if not raw:
+            return None
+        argv = [chunk.decode("utf-8", errors="replace") for chunk in raw.split(b"\0") if chunk]
+        return argv or None
+    except Exception as e:
+        log_debug(f"PM helper argv query failed (key={key}): {e}")
+        return None
+
 def detect_system_package_manager() -> str:
     """Best-effort package manager detection for cross-distro notifier parsing."""
+    helper_pm = _query_pm_helper_text("package-manager")
+    if helper_pm in {"zypper", "apt", "dnf", "pacman"}:
+        return helper_pm
     os_release: dict[str, str] = {}
     try:
         with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as f:
@@ -47369,6 +48347,11 @@ INSTALL_CLICK_SUPPRESS_MINUTES = _read_int_from_config(
 )
 
 def _preview_command() -> list[str]:
+    helper_argv = _query_pm_helper_argv("notifier-preview-command-argv")
+    if helper_argv:
+        if SYSTEM_PKG_MANAGER == "zypper" and DUP_EXTRA_FLAGS:
+            return [*helper_argv, *DUP_EXTRA_FLAGS]
+        return helper_argv
     if SYSTEM_PKG_MANAGER == "zypper":
         return ["pkexec", "zypper", "--non-interactive", "dup", "--dry-run", *DUP_EXTRA_FLAGS]
     if SYSTEM_PKG_MANAGER == "apt":
@@ -47406,6 +48389,9 @@ def _run_preview_command(timeout: int = 60) -> tuple[int, str]:
         return 1, ""
 
 def _recommended_manual_update_command() -> str:
+    helper_cmd = _query_pm_helper_text("manual-update-command")
+    if helper_cmd:
+        return helper_cmd
     if SYSTEM_PKG_MANAGER == "zypper":
         return "sudo zypper dup --allow-vendor-change"
     if SYSTEM_PKG_MANAGER == "apt":
@@ -47417,6 +48403,9 @@ def _recommended_manual_update_command() -> str:
     return "sudo zypper dup --allow-vendor-change"
 
 def _recommended_manual_refresh_command() -> str:
+    helper_cmd = _query_pm_helper_text("manual-refresh-command")
+    if helper_cmd:
+        return helper_cmd
     if SYSTEM_PKG_MANAGER == "zypper":
         return "sudo zypper refresh"
     if SYSTEM_PKG_MANAGER == "apt":
@@ -48278,6 +49267,51 @@ def get_updates():
         update_status("FAILED: Unexpected error while loading dry-run data")
         return ""
 
+def _query_pm_preview_summary_from_output(output: str, max_packages: int = 3) -> dict[str, str] | None:
+    """Ask the shared PM runtime helper to summarize preview output."""
+    text = output or ""
+    if not text.strip():
+        return None
+    try:
+        helper = Path(PM_RUNTIME_HELPER)
+        if not helper.is_file():
+            return None
+
+        if max_packages < 1:
+            max_packages = 1
+
+        tmp_preview = CACHE_DIR / f"pm-preview-summary-{os.getpid()}-{int(time.time() * 1000)}.txt"
+        try:
+            tmp_preview.write_text(text, encoding="utf-8")
+            result = subprocess.run(
+                [str(helper), "--query", "preview-summary", str(tmp_preview), str(max_packages)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return None
+
+            summary: dict[str, str] = {}
+            for raw in (result.stdout or "").splitlines():
+                line = raw.strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                summary[k.strip().upper()] = v.strip()
+
+            if "PACKAGE_COUNT" not in summary:
+                return None
+            return summary
+        finally:
+            try:
+                tmp_preview.unlink()
+            except Exception:
+                pass
+    except Exception as e:
+        log_debug(f"PM helper preview-summary query failed: {e}")
+        return None
+
 def _count_updates_from_output(output: str) -> int:
     text = output or ""
     if not text.strip():
@@ -48368,13 +49402,34 @@ def parse_output(output: str, include_preview: bool = True):
         log_info("No updates found in preview output")
         return None, None, None, 0
 
-    package_count = _count_updates_from_output(text)
+    helper_summary = _query_pm_preview_summary_from_output(text, max_packages=3 if include_preview else 1)
+    package_count = 0
+    snapshot = ""
+    helper_preview_packages: list[str] = []
+
+    if helper_summary:
+        try:
+            package_count = int((helper_summary.get("PACKAGE_COUNT", "0") or "0").strip())
+        except Exception:
+            package_count = 0
+        snapshot = (helper_summary.get("SNAPSHOT") or "").strip()
+        helper_preview_raw = (helper_summary.get("PREVIEW") or "").strip()
+        if helper_preview_raw:
+            helper_preview_packages = [pkg.strip() for pkg in helper_preview_raw.split(",") if pkg.strip()]
+        log_debug(
+            "Using PM runtime helper preview summary "
+            f"(count={package_count}, snapshot={snapshot or 'none'}, preview={len(helper_preview_packages)})"
+        )
+
+    if package_count <= 0:
+        package_count = _count_updates_from_output(text)
+        if helper_summary:
+            log_debug("PM helper summary returned 0 packages; used parser fallback count")
     if package_count == 0:
         log_info("No packages to upgrade (count is 0)")
         return None, None, None, 0
 
-    snapshot = ""
-    if SYSTEM_PKG_MANAGER == "zypper":
+    if not snapshot and SYSTEM_PKG_MANAGER == "zypper":
         product_match = re.search(r"openSUSE Tumbleweed\s+\S+\s*->\s*([0-9T\-]+)", text)
         if product_match:
             snapshot = product_match.group(1)
@@ -48393,7 +49448,7 @@ def parse_output(output: str, include_preview: bool = True):
     message = "1 update is pending." if package_count == 1 else f"{package_count} updates are pending."
 
     if include_preview and package_count > 0:
-        preview_packages = extract_package_preview(text, max_packages=3)
+        preview_packages = helper_preview_packages or extract_package_preview(text, max_packages=3)
         if preview_packages:
             preview_str = ", ".join(preview_packages)
             if len(preview_packages) < package_count:
@@ -49341,122 +50396,18 @@ if [ -r "$CONFIG_FILE" ]; then
     . "$CONFIG_FILE"
 fi
 SYSTEM_PKG_MANAGER=""
-
-detect_system_package_manager() {
-    local id id_like
-    id=""
-    id_like=""
-
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
-        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
-    fi
-
-    case "${id}" in
-        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
-        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
-        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
-        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
-    esac
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        case "${id_like}" in
-            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
-            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
-            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
-            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
-        esac
-    fi
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        if command -v zypper >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="zypper"
-        elif command -v dnf >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="dnf"
-        elif command -v apt-get >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="apt"
-        elif command -v pacman >/dev/null 2>&1; then
-            SYSTEM_PKG_MANAGER="pacman"
-        fi
-    fi
-
-    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-        SYSTEM_PKG_MANAGER="zypper"
-    fi
-}
-
-detect_system_package_manager
+PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
+if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
+    log "ERROR: shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}"
+    say "⚠️  Shared package-manager helper is missing (${PM_RUNTIME_HELPER})."
+    say "Please re-run the installer: sudo zypper-auto-helper install"
+    exit 1
+fi
+# shellcheck disable=SC1091
+. "${PM_RUNTIME_HELPER}"
+znh_pm_ensure_detected
+SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
 log "Detected package manager: ${SYSTEM_PKG_MANAGER}"
-
-pm_is_lock_output_file() {
-    local out_file="${1:-}"
-    [ -n "${out_file}" ] || return 1
-    [ -f "${out_file}" ] || return 1
-
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            grep -qiE 'system management is locked|locked by the application with pid' "${out_file}" 2>/dev/null
-            ;;
-        apt)
-            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${out_file}" 2>/dev/null
-            ;;
-        dnf)
-            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${out_file}" 2>/dev/null
-            ;;
-        pacman)
-            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${out_file}" 2>/dev/null
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-pm_run_upgrade_streaming() {
-    local out_file="$1"
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper)
-            pkexec zypper dup 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        apt)
-            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        dnf)
-            pkexec dnf -y upgrade 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        pacman)
-            pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return "${PIPESTATUS[0]}"
-            ;;
-        *)
-            echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${LOG_FILE}" | tee "${out_file}"
-            return 1
-            ;;
-    esac
-}
-
-capture_package_snapshot() {
-    local out_file="$1"
-    case "${SYSTEM_PKG_MANAGER}" in
-        zypper|dnf)
-            rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}"
-            ;;
-        apt)
-            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null | sort > "${out_file}"
-            ;;
-        pacman)
-            pacman -Q 2>/dev/null | sort > "${out_file}"
-            ;;
-        *)
-            : > "${out_file}"
-            ;;
-    esac
-}
 
 run_hooks() {
     local stage="$1"
@@ -49529,54 +50480,12 @@ TERMINALS=("konsole" "gnome-terminal" "kitty" "alacritty" "xterm")
 ZYPP_LOCK_FILE="/run/zypp.pid"
 
 has_zypp_lock() {
-    # Prefer the zypp.pid lock file, which is what YaST/zypper use.
-    if [ -f "$ZYPP_LOCK_FILE" ]; then
-        local pid
-        pid=$(cat "$ZYPP_LOCK_FILE" 2>/dev/null || echo "")
-        if [ -n "$pid" ]; then
-            # NOTE: If /run/zypp.pid points to a live PID, zypper will treat the
-            # system as locked (even if the PID looks "odd" to us). So for
-            # correctness, we treat ANY live PID in zypp.pid as a lock.
-            if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-                # Best-effort classification for logging only.
-                local comm cmd
-                comm=$(ps -p "$pid" -o comm= 2>/dev/null || echo "")
-                cmd=$(ps -p "$pid" -o args= 2>/dev/null || echo "")
-                if printf '%s\n%s\n' "$comm" "$cmd" | grep -qiE 'zypper|yast|y2base|zypp|packagekitd'; then
-                    log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid (comm='$comm')"
-                else
-                    log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE exists with live pid $pid, but process does not look like zypp (comm='$comm'); treating as lock anyway"
-                fi
-                return 0
-            fi
-
-            log "has_zypp_lock: ignoring stale/invalid zypp lock file $ZYPP_LOCK_FILE with pid '$pid'"
-        else
-            log "has_zypp_lock: zypp lock file $ZYPP_LOCK_FILE present but empty"
-        fi
-    fi
-
-    # Fallback: any obviously zypper/YaST/zypp-related process. This is a
-    # broader net than just "zypper" so we also catch YaST and zypp-refresh.
-    if pgrep -x zypper >/dev/null 2>&1; then
-        local zpid
-        zpid=$(pgrep -x zypper | head -n1 || true)
-        log "has_zypp_lock: detected running zypper process pid ${zpid:-unknown}"
+    local lock_pid
+    if znh_pm_lock_is_active; then
+        lock_pid=$(znh_pm_lock_active_pid 2>/dev/null || echo "")
+        log "has_zypp_lock: shared PM helper reports active lock (pm=${SYSTEM_PKG_MANAGER}, pid=${lock_pid:-unknown})"
         return 0
     fi
-    if pgrep -f -i 'yast' >/dev/null 2>&1; then
-        local ypid
-        ypid=$(pgrep -f -i 'yast' | head -n1 || true)
-        log "has_zypp_lock: detected running YaST process pid ${ypid:-unknown}"
-        return 0
-    fi
-    if pgrep -f 'zypp.*refresh' >/dev/null 2>&1; then
-        local rpid
-        rpid=$(pgrep -f 'zypp.*refresh' | head -n1 || true)
-        log "has_zypp_lock: detected running zypp-refresh process pid ${rpid:-unknown}"
-        return 0
-    fi
-
     return 1
 }
 
@@ -49645,7 +50554,7 @@ __znh_wait_for_zypp_lock_smart() {
         return 0
     fi
 
-    local start now elapsed backoff attempt
+    local start now elapsed backoff attempt wait_step
     start="$(date +%s 2>/dev/null || echo 0)"
     backoff=2
     attempt=1
@@ -49667,7 +50576,16 @@ __znh_wait_for_zypp_lock_smart() {
         say "System management is currently locked by another update tool (zypper/YaST/PackageKit)."
         say "Waiting for the other updater to finish... (attempt ${attempt}, elapsed ${elapsed}s, retry in ${backoff}s)"
         __znh_log_zypp_lock_details
-
+        wait_step="${backoff}"
+        if [ $((max_wait_seconds - elapsed)) -lt "${wait_step}" ] 2>/dev/null; then
+            wait_step=$((max_wait_seconds - elapsed))
+        fi
+        if [ "${wait_step}" -lt 1 ] 2>/dev/null; then
+            wait_step=1
+        fi
+        if znh_pm_wait_for_lock_clear "${wait_step}" 1; then
+            return 0
+        fi
         sleep "${backoff}"
         backoff=$((backoff * 2))
         if [ "${backoff}" -gt 30 ] 2>/dev/null; then
@@ -49692,9 +50610,6 @@ __znh_run_zypper_dup_with_lock_retry() {
     if [ "${dup_max_attempts}" -gt 5 ] 2>/dev/null; then
         dup_max_attempts=5
     fi
-    if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
-        dup_max_attempts=1
-    fi
 
     local dup_attempt rc tmp_out locked
     dup_attempt=1
@@ -49704,14 +50619,14 @@ __znh_run_zypper_dup_with_lock_retry() {
         printf '\n===== %s attempt %s/%s =====\n' "${cmd_label}" "${dup_attempt}" "${dup_max_attempts}" | tee -a "${LOG_FILE}"
         log "RUN_UPDATE: starting ${cmd_label} (attempt ${dup_attempt}/${dup_max_attempts})"
 
-        pm_run_upgrade_streaming "${tmp_out}"
+        znh_pm_install_upgrade_streaming "${LOG_FILE}" "${tmp_out}"
         rc=$?
         __znh_write_run_install_tail >/dev/null 2>&1 || true
 
         log "RUN_UPDATE: ${cmd_label} finished (attempt ${dup_attempt}/${dup_max_attempts}, rc=${rc})"
 
         locked=0
-        if [ "${rc}" -ne 0 ] 2>/dev/null && pm_is_lock_output_file "${tmp_out}"; then
+        if [ "${rc}" -ne 0 ] 2>/dev/null && znh_pm_is_lock_output_file "${tmp_out}"; then
             locked=1
         fi
         rm -f "${tmp_out}" 2>/dev/null || true
@@ -49724,7 +50639,7 @@ __znh_run_zypper_dup_with_lock_retry() {
                 __znh_log_zypp_lock_details
             fi
 
-            if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${dup_attempt}" -lt "${dup_max_attempts}" ] 2>/dev/null; then
+            if [ "${dup_attempt}" -lt "${dup_max_attempts}" ] 2>/dev/null; then
                 say "Waiting for the lock to clear, then retrying the system upgrade..."
                 if ! __znh_wait_for_zypp_lock_smart "${lock_wait_seconds}"; then
                     log "RUN_UPDATE: still locked after waiting; not retrying further"
@@ -49818,7 +50733,7 @@ RUN_UPDATE() {
     DELTA_FILE="${PKG_DELTA_DIR}/update-delta-$(date +%Y%m%d-%H%M%S).log"
 
     log "RUN_UPDATE: Capturing pre-update package state into ${PKG_PRE_FILE}..."
-    if ! execute_guarded "Capture pre-update package snapshot (${SYSTEM_PKG_MANAGER})" capture_package_snapshot "${PKG_PRE_FILE}"; then
+    if ! execute_guarded "Capture pre-update package snapshot (${SYSTEM_PKG_MANAGER})" znh_pm_capture_package_snapshot "${PKG_PRE_FILE}"; then
         log "RUN_UPDATE: WARNING: failed to capture pre-update package snapshot (see log)"
     fi
 
@@ -49869,7 +50784,7 @@ RUN_UPDATE() {
     # and compute a delta file describing exactly which packages changed.
     if [ "$rc" -eq 0 ]; then
         log "RUN_UPDATE: Capturing post-update package state into ${PKG_POST_FILE}..."
-        if execute_guarded "Capture post-update package snapshot (${SYSTEM_PKG_MANAGER})" capture_package_snapshot "${PKG_POST_FILE}"; then
+        if execute_guarded "Capture post-update package snapshot (${SYSTEM_PKG_MANAGER})" znh_pm_capture_package_snapshot "${PKG_POST_FILE}"; then
             log "RUN_UPDATE: Computing package delta into ${DELTA_FILE}..."
             execute_guarded "Write package delta file" bash -lc "{
                 echo '=== Package Changes (post - pre) ==='
@@ -50378,59 +51293,22 @@ echo ""
 echo "Fetching update information..."
 echo ""
 
-# Detect package manager for preview command
-SYSTEM_PKG_MANAGER=""
-if [ -r /etc/os-release ]; then
+# Detect package manager + preview command through shared helper
+PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
+PREVIEW_OK=0
+SYSTEM_PKG_MANAGER="unknown"
+
+if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
+    echo "⚠️  Shared package-manager helper missing: ${PM_RUNTIME_HELPER}"
+else
     # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}" in
-        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
-        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
-        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
-        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
-    esac
-fi
-if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
-    if command -v zypper >/dev/null 2>&1; then
-        SYSTEM_PKG_MANAGER="zypper"
-    elif command -v dnf >/dev/null 2>&1; then
-        SYSTEM_PKG_MANAGER="dnf"
-    elif command -v apt-get >/dev/null 2>&1; then
-        SYSTEM_PKG_MANAGER="apt"
-    elif command -v pacman >/dev/null 2>&1; then
-        SYSTEM_PKG_MANAGER="pacman"
-    else
-        SYSTEM_PKG_MANAGER="zypper"
+    . "${PM_RUNTIME_HELPER}"
+    znh_pm_ensure_detected
+    SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-unknown}"
+    if znh_pm_view_changes_preview_run; then
+        PREVIEW_OK=1
     fi
 fi
-
-PREVIEW_OK=0
-case "${SYSTEM_PKG_MANAGER}" in
-    zypper)
-        if pkexec zypper --non-interactive dup --dry-run --details; then
-            PREVIEW_OK=1
-        fi
-        ;;
-    apt)
-        if pkexec env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade; then
-            PREVIEW_OK=1
-        fi
-        ;;
-    dnf)
-        pkexec dnf -q check-update
-        rc=$?
-        if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
-            PREVIEW_OK=1
-        fi
-        ;;
-    pacman)
-        pkexec pacman -Qu
-        rc=$?
-        if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
-            PREVIEW_OK=1
-        fi
-        ;;
-esac
 
 if [ "${PREVIEW_OK}" -eq 1 ]; then
     echo ""

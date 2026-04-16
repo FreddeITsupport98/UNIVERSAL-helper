@@ -217,6 +217,9 @@ In addition to the downloader, a small root service periodically runs the same
       (repo refresh fixes, orphan checks, dependency repair, `zypper clean --all`, deep GPG repair)
       when an active lock is detected.
       It also runs `zypper clean --all` when free space on `/` falls below ~1 GiB.
+    * Verification now derives a package-manager profile (`apt`/`dnf`/`pacman`/`zypper`) and adapts repo DNS/readability/refresh checks, orphan/dependency scans, and low-space cache cleanup commands per backend.
+    * zypper-only deep repairs (for example stale zypp cache sweeps, zypp lock final pass, and zypper turbo tuning) are explicitly skipped with reason logs on non-zypper backends, and RPM database checks are gated to RPM-backed managers (`zypper`/`dnf`).
+    * Deep signature/keyring auto-repair now includes backend-native remediation paths for `apt`/`dnf`/`pacman` when refresh failures are detected as GPG/signature-related (for example apt keyring package reinstall attempts, RPM key import for dnf repos, and pacman keyring refresh/populate steps).
 * **Timer:** `/etc/systemd/system/zypper-auto-verify.timer`
     * Default schedule is derived from `VERIFY_TIMER_INTERVAL_MINUTES` in
       `/etc/zypper-auto.conf` (allowed values: `1,5,10,15,30,60`). The
@@ -1408,6 +1411,46 @@ Run it:
 python3 regressions/test_webui_blank_guard_playwright_regression.py
 ```
 
+### 13. Verify Package-Manager Adaptive Regression (`test_verify_pm_adaptive_regression.sh`)
+
+Located under `regressions/`, this focused static regression guards phase-2
+verify/auto-healing backend adaptation in `run_verification_only()`.
+
+What it checks:
+- Verify profile helper wiring (`znh_pm_is_rpm_based`,
+  `znh_verify_primary_repo_host`, and derived `VERIFY_PM*` locals).
+- Backend-aware repo/DNS/orphan/dependency/cache-check wiring for
+  `apt`/`dnf`/`pacman`/`zypper`.
+- Non-zypper skip gating for zypper-specific deep repair checks
+  (for example stale zypp metadata sweep and zypper turbo tuning).
+- Non-RPM skip gating for RPM database repair/final-sanity checks.
+
+Run it:
+
+```bash
+bash regressions/test_verify_pm_adaptive_regression.sh zypper-auto.sh
+```
+
+### 14. Verify PM Profile Runtime Regression (`test_verify_pm_profile_runtime_regression.sh`)
+
+Located under `regressions/`, this runtime regression executes extracted verify
+PM profile helpers in a sandboxed fixture environment.
+
+What it checks:
+- Runtime behavior of `znh_pm_is_rpm_based` for explicit and
+  `SYSTEM_PKG_MANAGER`-inferred manager values.
+- Runtime parsing behavior of `znh_verify_primary_repo_host` for
+  `apt`/`dnf`/`pacman` fixture configs using helper path overrides
+  (`VERIFY_APT_SOURCES_LIST_PATH`, `VERIFY_DNF_REPOS_DIR`,
+  `VERIFY_PACMAN_MIRRORLIST_PATH`).
+- Deterministic fallback host behavior when fixture paths are missing.
+
+Run it:
+
+```bash
+bash regressions/test_verify_pm_profile_runtime_regression.sh zypper-auto.sh
+```
+
 -----
 
 <a id="diagnostics"></a>
@@ -2115,9 +2158,17 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - Verification checks 21/42/49/50 now run through shared `verify_pm_*` helper primitives (refresh/cache cleanup/signature detection/keyring remediation) with unified package-manager-aware repair flow, while keeping zypper lock-aware safeguards.
+  - Notifier update-summary parsing now prefers the shared runtime helper query path (`package-manager-runtime.sh --query preview-summary ...`) and falls back to in-script parsing only when helper output is unavailable.
+  - PM/runtime regression expectations were updated to assert direct `znh_pm_*` helper contracts (instead of removed local `pm_*` passthrough wrappers) and the new unified verify metadata/cache repair messaging.
   - `UNI-auto.sh` now detects `apt` / `dnf` / `pacman` / `zypper` and uses distro-aware package install hints for dependency/tooling paths (ShellCheck, PyGObject, pipx, Flatpak, Snapd, etc.) instead of hardcoded `zypper install` messages; core update workflow remains zypper-focused.
   - Update-engine phase 2 now wires downloader/notifier/install-helper/view-changes runtime paths through package-manager-aware command dispatchers (`apt` / `dnf` / `pacman` / `zypper`) instead of zypper-only preview/install command calls.
   - Notification conflict/recovery guidance is now backend-aware (manager-specific preview/refresh/manual-update hints), while zypper-only solver option guidance (`1/2/3/4`) is shown only on zypper systems.
+  - A shared runtime helper (`/usr/local/lib/zypper-auto/package-manager-runtime.sh`) is now generated and sourced by downloader/install/view flows, while the notifier queries it for package-manager and preview/manual command metadata to reduce backend drift across components.
+  - Added runtime regression `regressions/test_pm_runtime_helper_missing_runtime_regression.sh`, which extracts generated runtime consumer scripts and simulates a missing shared helper path to assert graceful wrapper/downloader/install/view behavior.
+  - Added runtime regression `regressions/test_pm_runtime_helper_query_runtime_regression.sh`, which extracts the shared helper and validates `--query notifier-preview-command-argv` as a NUL-delimited argv contract with package-manager-specific command prefixes.
+  - Verify/auto-healing now adapts Snapper/Btrfs repair stages to the detected root filesystem: non-Btrfs systems skip Snapper timer/root-config safety checks cleanly, while Btrfs systems keep Snapper-aware repair logic.
+  - Added static regression `regressions/test_verify_filesystem_adaptive_regression.sh` to guard root-filesystem detection helpers plus Snapper/Btrfs verify/safety-snapshot gating.
 
 - **v71** (2026-04-02): **Stability, Rocket UX, Snapper manager, and WebUI reliability release**
   - 🐛 **FIXED:** Self-Update WebUI wiring now defines `bgNotifyBtn` before guard/listener checks in `_wireSelfUpdateUI`, preventing `ReferenceError: bgNotifyBtn is not defined` and related dashboard blank-screen initialization aborts.
