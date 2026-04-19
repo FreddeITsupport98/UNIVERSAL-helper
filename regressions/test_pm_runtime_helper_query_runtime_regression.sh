@@ -3,11 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DEFAULT_TARGET_FILE="${REPO_ROOT}/UNI-auto.sh"
-if [ ! -f "${DEFAULT_TARGET_FILE}" ]; then
-    DEFAULT_TARGET_FILE="${REPO_ROOT}/zypper-auto.sh"
-fi
-TARGET_FILE="${1:-${DEFAULT_TARGET_FILE}}"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
+TARGET_FILE="$(znh_regression_resolve_target_file "${REPO_ROOT}" "${1:-}")"
 
 usage() {
     cat <<'EOF'

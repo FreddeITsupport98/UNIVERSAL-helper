@@ -3,11 +3,14 @@ import ast
 import contextlib
 import io
 import json
+import sys
 import tempfile
 import types
 import unittest
 from email.message import Message
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from target_resolver import resolve_target_script_path as _resolve_target_script_path
 from unittest import mock
 
 
@@ -43,8 +46,7 @@ def _extract_dashboard_api_python_source(script_text: str) -> str:
 
 class EmbeddedDashboardApiSyntaxRegressionTest(unittest.TestCase):
     def test_embedded_dashboard_api_python_parses(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        script_path = repo_root / "zypper-auto.sh"
+        script_path = _resolve_target_script_path(__file__)
         py_src = _extract_dashboard_api_python_source(script_path.read_text(encoding="utf-8"))
         ast.parse(py_src)
 
@@ -52,8 +54,7 @@ class EmbeddedDashboardApiSyntaxRegressionTest(unittest.TestCase):
 class SelfUpdateApiRuntimeRegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        script_path = repo_root / "zypper-auto.sh"
+        script_path = _resolve_target_script_path(__file__)
         py_src = _extract_dashboard_api_python_source(script_path.read_text(encoding="utf-8"))
 
         cls.ns: dict = {"__name__": "znh_dashboard_api_test_runtime"}

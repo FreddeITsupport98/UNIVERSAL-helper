@@ -3,11 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TARGET_FILE="${1:-${REPO_ROOT}/zypper-auto.sh}"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
+TARGET_FILE="$(znh_regression_resolve_target_file "${REPO_ROOT}" "${1:-}")"
 
 usage() {
     cat <<'EOF'
-Usage: ./test_stale_module_dirs_helper_regression.sh [path/to/zypper-auto.sh]
+Usage: ./test_stale_module_dirs_helper_regression.sh [path/to/UNI-auto.sh]
 
 Regression smoke test for stale module-dir helper wiring:
   - run_stale_module_dirs_only exists with safe audit/quarantine behavior

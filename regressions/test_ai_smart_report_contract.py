@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 import re
+import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from target_resolver import resolve_target_script_path as _resolve_target_script_path
 
 
 class AiSmartReportContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        cls.script_path = repo_root / "zypper-auto.sh"
+        cls.script_path = _resolve_target_script_path(__file__)
         cls.script_text = cls.script_path.read_text(encoding="utf-8")
 
     def _smart_report_block(self) -> str:

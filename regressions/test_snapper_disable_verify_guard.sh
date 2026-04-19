@@ -14,6 +14,8 @@ HELPER_BIN="${ZYPPER_AUTO_HELPER_BIN:-${DEFAULT_HELPER_BIN}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
 
 TRACK_UNITS=(
     "snapper-timeline.timer"
@@ -209,8 +211,9 @@ if ! [[ "${VERIFY_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || [ "${VERIFY_TIMEOUT_SECOND
 fi
 
 if [ ! -x "${HELPER_BIN}" ] 2>/dev/null; then
-    if [ -x "${REPO_ROOT}/zypper-auto.sh" ] 2>/dev/null; then
-        HELPER_BIN="${REPO_ROOT}/zypper-auto.sh"
+    fallback_helper_bin="$(znh_regression_default_target_file "${REPO_ROOT}")"
+    if [ -x "${fallback_helper_bin}" ] 2>/dev/null; then
+        HELPER_BIN="${fallback_helper_bin}"
     else
         fail "Helper binary not executable: ${HELPER_BIN}"
     fi

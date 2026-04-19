@@ -3,11 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TARGET_FILE="${1:-${REPO_ROOT}/zypper-auto.sh}"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
+TARGET_FILE="$(znh_regression_resolve_target_file "${REPO_ROOT}" "${1:-}")"
 
 usage() {
     cat <<'EOF'
-Usage: ./test_helper_path_install_uninstall_regression.sh [path/to/zypper-auto.sh]
+Usage: ./test_helper_path_install_uninstall_regression.sh [path/to/UNI-auto.sh]
 
 Regression smoke test for helper PATH accessibility + uninstall cleanup:
   - install flow defines a compatibility link path (/usr/bin/zypper-auto-helper)

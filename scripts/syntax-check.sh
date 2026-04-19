@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-MAIN_TARGET_DEFAULT="${REPO_ROOT}/zypper-auto.sh"
+TARGET_RESOLVER_SH="${REPO_ROOT}/regressions/target_resolver.sh"
+# shellcheck disable=SC1090,SC1091
+. "${TARGET_RESOLVER_SH}"
+MAIN_TARGET_DEFAULT="$(znh_regression_default_target_file "${REPO_ROOT}")"
 RUNNER_TARGET="${REPO_ROOT}/run_regression_suite.sh"
 REGRESSION_DIR="${REPO_ROOT}/regressions"
 

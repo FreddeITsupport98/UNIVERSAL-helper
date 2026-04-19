@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TARGET_RESOLVER_SH="${REPO_ROOT}/regressions/target_resolver.sh"
+# shellcheck disable=SC1090,SC1091
+. "${TARGET_RESOLVER_SH}"
+DEFAULT_TARGET_FILE="$(znh_regression_default_target_file "${REPO_ROOT}")"
 
 PLAYWRIGHT_BOOTSTRAP_PYTHON="${PLAYWRIGHT_BOOTSTRAP_PYTHON:-python3}"
 PLAYWRIGHT_VENV_DIR_DEFAULT="${REPO_ROOT}/.venv-playwright-regression"
@@ -100,7 +104,7 @@ fi
 
 printf '\nBootstrap complete.\n'
 printf 'Optional Playwright regression can now run with:\n'
-printf '  PLAYWRIGHT_TEST_PYTHON="%s" bash run_regression_suite.sh zypper-auto.sh\n' "${VENV_PYTHON}"
+printf '  PLAYWRIGHT_TEST_PYTHON="%s" bash run_regression_suite.sh "%s"\n' "${VENV_PYTHON}" "${DEFAULT_TARGET_FILE}"
 printf 'Full runtime override (required + optional Python runtimes):\n'
-printf '  RUNTIME_TEST_PYTHON="%s" PLAYWRIGHT_TEST_PYTHON="%s" bash run_regression_suite.sh zypper-auto.sh\n' "${VENV_PYTHON}" "${VENV_PYTHON}"
+printf '  RUNTIME_TEST_PYTHON="%s" PLAYWRIGHT_TEST_PYTHON="%s" bash run_regression_suite.sh "%s"\n' "${VENV_PYTHON}" "${VENV_PYTHON}" "${DEFAULT_TARGET_FILE}"
 printf 'Or rely on auto-detect when using default venv path.\n'

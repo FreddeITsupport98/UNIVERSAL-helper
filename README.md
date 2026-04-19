@@ -2158,6 +2158,10 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - Regression target resolution is now centralized via shared helpers (`regressions/target_resolver.sh` + `regressions/target_resolver.py`), and shell/python regressions now consume those helpers instead of duplicating `UNI-auto.sh`/`zypper-auto.sh` fallback logic per file.
+  - Tooling scripts (`run_regression_suite.sh`, `scripts/syntax-check.sh`, and `scripts/bootstrap_playwright_regression.sh`) now use the shared shell resolver helper for a single UNI-first target-selection contract across runner/preflight/bootstrap flows.
+  - Regression harness defaults are now repo-layout aware: `run_regression_suite.sh` and no-target shell/python regression scripts resolve `UNI-auto.sh` first and fall back to `zypper-auto.sh` when needed, so full-suite runs work in both layouts without manual target args.
+  - `scripts/syntax-check.sh` now also resolves `UNI-auto.sh` as the default scan target (with `zypper-auto.sh` fallback), so baseline syntax checks no longer fail when run without explicit `--target` in UNI-first repositories.
   - Verification checks 21/42/49/50 now run through shared `verify_pm_*` helper primitives (refresh/cache cleanup/signature detection/keyring remediation) with unified package-manager-aware repair flow, while keeping zypper lock-aware safeguards.
   - Notifier update-summary parsing now prefers the shared runtime helper query path (`package-manager-runtime.sh --query preview-summary ...`) and falls back to in-script parsing only when helper output is unavailable.
   - PM/runtime regression expectations were updated to assert direct `znh_pm_*` helper contracts (instead of removed local `pm_*` passthrough wrappers) and the new unified verify metadata/cache repair messaging.

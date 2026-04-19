@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- [2026-04-18 19:36 UTC] Centralized UNI-first target resolution into shared helpers: added `regressions/target_resolver.sh` and `regressions/target_resolver.py`, then refactored shell and Python regressions to consume those helpers instead of duplicating per-file `UNI-auto.sh`/`zypper-auto.sh` fallback blocks.
+- [2026-04-18 19:36 UTC] Updated tooling to consume the shared shell resolver (`run_regression_suite.sh`, `scripts/syntax-check.sh`, `scripts/bootstrap_playwright_regression.sh`) and adjusted regression Python imports/path setup so full suite preflight + runtime execution remains green under unittest path invocation.
+- [2026-04-16 23:40 UTC] Regression harness target resolution was normalized for UNI-first layouts: `run_regression_suite.sh` now defaults to `UNI-auto.sh` with `zypper-auto.sh` fallback, and no-target shell/python regressions were updated to use the same fallback strategy.
+- [2026-04-16 23:40 UTC] Updated static/runtime regression scripts that parse embedded dashboard/API blocks (`test_ai_smart_report_contract.py`, `test_ai_smart_report_runtime_regression.py`, `test_self_update_api_runtime_regression.py`, `test_snapper_start_contract.py`, plus optional Playwright harnesses) to resolve `UNI-auto.sh` first so full regression runs no longer fail on missing `zypper-auto.sh`.
+- [2026-04-16 23:40 UTC] `scripts/syntax-check.sh` now defaults to `UNI-auto.sh` (with `zypper-auto.sh` fallback), fixing baseline syntax-check invocations that run without explicit `--target`.
 - [2026-04-16 22:56 UTC] Verification checks 21/42/49/50 were consolidated onto shared `verify_pm_*` helper paths: refresh/cache cleanup/signature detection/keyring repair now run through unified package-manager-aware logic, while zypper lock-sensitive guards remain intact.
 - [2026-04-16 22:56 UTC] Notifier preview parsing now queries the shared runtime helper via `--query preview-summary` first and uses local regex parsing only as a fallback, reducing parser drift between downloader/runtime/notifier flows.
 - [2026-04-16 22:56 UTC] Updated PM regression contracts for the helperized runtime: `test_verify_pm_adaptive_regression.sh` and `test_cross_distro_package_manager_regression.sh` now assert direct `znh_pm_*` usage and unified verify/cache-repair messaging after removal of local `pm_*` passthrough wrappers.

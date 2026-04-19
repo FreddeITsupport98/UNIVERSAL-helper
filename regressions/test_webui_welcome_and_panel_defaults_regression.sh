@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-TARGET="${REPO_ROOT}/zypper-auto.sh"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
+TARGET="$(znh_regression_resolve_target_file "${REPO_ROOT}" "${1:-}")"
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2

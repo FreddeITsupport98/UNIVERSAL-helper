@@ -3,11 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TARGET_FILE="${1:-${REPO_ROOT}/zypper-auto.sh}"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
+TARGET_FILE="$(znh_regression_resolve_target_file "${REPO_ROOT}" "${1:-}")"
 
 usage() {
     cat <<'EOF'
-Usage: ./test_self_update_recommendation_regression.sh [path/to/zypper-auto.sh]
+Usage: ./test_self_update_recommendation_regression.sh [path/to/UNI-auto.sh]
 
 Focused regression smoke test for self-update recommendation and stable semantics:
   - backend exposes policy-aware latest-release-candidate + layered SHA256 recommendation helpers

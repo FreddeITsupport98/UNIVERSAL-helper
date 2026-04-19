@@ -2,8 +2,11 @@
 # RUNNER_OPTIONAL=1
 # RUNNER_RUNTIME=playwright
 import re
+import sys
 import unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from target_resolver import resolve_target_script_path as _resolve_target_script_path
 
 try:
     from playwright.sync_api import sync_playwright
@@ -14,8 +17,7 @@ except Exception:  # pragma: no cover - optional dependency
 class WebUiBlankGuardPlaywrightRegressionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        cls.script_path = repo_root / "zypper-auto.sh"
+        cls.script_path = _resolve_target_script_path(__file__)
         cls.script_text = cls.script_path.read_text(encoding="utf-8")
 
     @classmethod

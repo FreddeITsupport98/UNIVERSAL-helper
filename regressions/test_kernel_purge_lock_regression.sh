@@ -3,11 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TARGET_FILE="${1:-${REPO_ROOT}/zypper-auto.sh}"
+# shellcheck disable=SC1091
+. "${SCRIPT_DIR}/target_resolver.sh"
+TARGET_FILE="$(znh_regression_resolve_target_file "${REPO_ROOT}" "${1:-}")"
 
 usage() {
     cat <<'EOF'
-Usage: ./test_kernel_purge_lock_regression.sh [path/to/zypper-auto.sh]
+Usage: ./test_kernel_purge_lock_regression.sh [path/to/UNI-auto.sh]
 
 Regression smoke test for kernel purge lock handling:
   - __znh_kernel_purge_old_kernels defines lock helpers

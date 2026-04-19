@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REGRESSION_DIR="${SCRIPT_DIR}/regressions"
-DEFAULT_TARGET_FILE="${SCRIPT_DIR}/zypper-auto.sh"
+TARGET_RESOLVER_SH="${REGRESSION_DIR}/target_resolver.sh"
+# shellcheck disable=SC1090,SC1091
+. "${TARGET_RESOLVER_SH}"
+DEFAULT_TARGET_FILE="$(znh_regression_default_target_file "${SCRIPT_DIR}")"
 TARGET_FILE=""
 INCLUDE_STATEFUL=0
 PLAYWRIGHT_TEST_PYTHON_BIN=""
@@ -12,7 +15,7 @@ EXCLUDE_PATTERNS=()
 
 usage() {
     cat <<'EOF'
-Usage: ./run_regression_suite.sh [options] [path/to/zypper-auto.sh]
+Usage: ./run_regression_suite.sh [options] [path/to/UNI-auto.sh]
 
 Runs auto-discovered regressions from:
   - ./regressions/test_*.sh
