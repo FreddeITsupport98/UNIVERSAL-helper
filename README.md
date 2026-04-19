@@ -2159,6 +2159,7 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - Added runtime API regression `regressions/test_snapper_capabilities_api_runtime_regression.py`, which executes the embedded dashboard API block and validates `/api/snapper/capabilities` support/reason behavior across mocked prerequisite profiles.
   - WebUI Snapper/Ghost capability gating now adds prerequisite-aware gray-out behavior: unsupported systems show explicit capability banners, Snapper/Ghost action controls are disabled cleanly, and capability state is refreshed from a dedicated dashboard API endpoint (`/api/snapper/capabilities`).
   - scrub-ghost distro guard is now advisory (best-effort) instead of a hard openSUSE/Tumbleweed lock; non-openSUSE and openSUSE Leap systems no longer hard-exit at startup and are guided with warning text to run `--dry-run` first.
   - Regression tooling now auto-cleans generated Python bytecode caches: `scripts/syntax-check.sh` removes tracked `__pycache__` directories after `py_compile`, and `run_regression_suite.sh` performs `regressions/` `__pycache__` cleanup on exit.

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- [2026-04-19 20:28 UTC] Added runtime API regression `regressions/test_snapper_capabilities_api_runtime_regression.py` that executes the embedded dashboard API block and validates `/api/snapper/capabilities` support/reason behavior across mocked prerequisite profiles (supported, missing prerequisites, systemd-boot fallback).
 - [2026-04-19 20:20 UTC] Dashboard Snapper/Ghost UI now uses capability-aware gating via new API endpoint `GET /api/snapper/capabilities`: unsupported prerequisites show explicit reason banners, unsupported controls are disabled/grayed, and capability state refreshes during startup/status-only resume flows.
 - [2026-04-19 20:20 UTC] Removed scrub-ghost openSUSE hard-lock behavior in the embedded guard (`check_supported_os_or_die` now advisory best-effort), updated README support notes accordingly, and added static regression `regressions/test_scrub_ghost_cross_distro_guard_regression.sh` to prevent reintroducing distro hard-exit checks.
 - [2026-04-19 19:42 UTC] Regression tooling now auto-cleans generated Python bytecode cache directories: `scripts/syntax-check.sh` tracks and removes target `__pycache__` paths after compile checks, and `run_regression_suite.sh` removes `regressions/**/__pycache__` on exit.
