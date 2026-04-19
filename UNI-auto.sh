@@ -2870,8 +2870,10 @@ debug() {
 }
 
 check_supported_os_or_die() {
-  # This tool is intentionally scoped to openSUSE (Tumbleweed/Slowroll/immutable variants).
-  # Refuse to run on openSUSE Leap to avoid untested behavior.
+  # Backward-compatible function name kept for callers.
+  # Behavior is now advisory (best-effort) instead of a hard distro lock.
+  # This allows scrub-ghost to run on non-openSUSE systems when the required
+  # boot layout/prerequisites are present.
   local id="" name="" variant="" version_id="" id_like=""
 
   if [[ -r /etc/os-release ]]; then
@@ -2883,8 +2885,8 @@ check_supported_os_or_die() {
     version_id="${VERSION_ID:-}"
     id_like="${ID_LIKE:-}"
   else
-    err "Unsupported OS: /etc/os-release not found"
-    exit 1
+    warn "Could not detect OS metadata (/etc/os-release missing); continuing in generic best-effort mode."
+    return 0
   fi
 
   local is_opensuse=false
@@ -2894,23 +2896,21 @@ check_supported_os_or_die() {
     is_opensuse=true
   fi
 
-  if [[ "$is_opensuse" != true ]]; then
-    err "Unsupported OS: this tool only runs on openSUSE (detected: ID='${id:-unknown}' NAME='${name:-unknown}')"
-    exit 1
-  fi
 
   local is_leap=false
   if [[ "$id" == *leap* || "$variant" == *leap* || "$name" == *Leap* ]]; then
     is_leap=true
   fi
-
-  if [[ "$is_leap" == true ]]; then
-    err "Unsupported openSUSE variant: Leap (detected: ID='${id:-unknown}' NAME='${name:-unknown}' VERSION_ID='${version_id:-unknown}')"
-    err "This script supports openSUSE Tumbleweed/Slowroll and openSUSE immutable variants (e.g. MicroOS/Aeon/Kalpa)."
-    exit 1
+  if [[ "$is_opensuse" != true ]]; then
+    warn "Non-openSUSE OS detected (ID='${id:-unknown}' NAME='${name:-unknown}'); continuing in best-effort mode."
+    warn "Some defaults are tuned for openSUSE (BLS/snapper/systemd-boot layouts). Use --dry-run first."
+  elif [[ "$is_leap" == true ]]; then
+    warn "openSUSE Leap detected (ID='${id:-unknown}' NAME='${name:-unknown}' VERSION_ID='${version_id:-unknown}'); continuing in best-effort mode."
+    warn "This tool is tested primarily on Tumbleweed/Slowroll/immutable openSUSE variants."
+  else
+    debug "OS check: openSUSE profile detected (ID='${id:-unknown}' NAME='${name:-unknown}' VARIANT_ID='${variant:-}' VERSION_ID='${version_id:-}')"
   fi
-
-  debug "OS check: ok (ID='${id:-unknown}' NAME='${name:-unknown}' VARIANT_ID='${variant:-}' VERSION_ID='${version_id:-}')"
+  return 0
 }
 
 log_audit() {
@@ -11753,6 +11753,23 @@ generate_dashboard() {
     .znh-notify-item .meta { margin-top: 8px; font-size: 0.78rem; font-weight: 800; opacity: 0.72; }
     .znh-advanced-card { display: block; }
     .znh-advanced-card.znh-hidden-card { display: none !important; }
+    .znh-cap-banner {
+        margin: 8px 0 12px 0;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(148,163,184,0.30);
+        background: rgba(148,163,184,0.10);
+        color: var(--text);
+        font-weight: 850;
+        line-height: 1.4;
+        font-size: 0.88rem;
+        white-space: pre-wrap;
+    }
+    .znh-cap-disabled {
+        opacity: 0.64;
+        filter: grayscale(0.22);
+        transition: opacity 180ms ease, filter 180ms ease;
+    }
     .znh-welcome-overlay {
         position: fixed;
         inset: 0;
@@ -12626,6 +12643,7 @@ generate_dashboard() {
       <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
         Runs Snapper menu actions (1–6) through the local Dashboard API. Requires confirmation for any change.
       </div>
+      <div id="snapper-capability-banner" class="znh-cap-banner znh-hidden"></div>
 
       <div class="grid" style="margin-bottom: 12px;">
         <div class="stat-box">
@@ -12762,11 +12780,12 @@ generate_dashboard() {
         <pre id="snapper-output" style="max-height: min(70vh, 760px); min-height: 260px;">(no snapper action run yet)</pre>
       </div>
 
-      <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.10);">
+      <div id="scrub-ghost-section" style="margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.10);">
         <h3 style="margin: 0 0 8px 0;">🧹 Boot Entry Scrub (scrub-ghost)</h3>
         <div style="color:var(--muted); font-size:0.9rem; margin-bottom: 10px;">
           Runs <code>scrub-ghost</code> through the local Dashboard API. Start with <strong>scan (dry-run)</strong>. Any change requires confirmation. For full flags + crash-safe background jobs, use <strong>Launch Wizard (overlay)</strong>.
         </div>
+        <div id="scrub-capability-banner" class="znh-cap-banner znh-hidden"></div>
 
         <div class="grid">
           <div class="stat-box">
@@ -22360,6 +22379,186 @@ generate_dashboard() {
         });
     }
     window.znhSnapperRefreshTimerBadges = znhSnapperRefreshTimerBadges;
+    var _znhSnapperCapabilityState = null;
+
+    function _znhCapReasonList(v) {
+        var arr = [];
+        try {
+            if (Array.isArray(v)) arr = v;
+            else if (v != null && String(v || '').trim()) arr = [String(v)];
+        } catch (e0) {
+            arr = [];
+        }
+        var out = [];
+        var seen = {};
+        var i = 0;
+        for (i = 0; i < arr.length; i++) {
+            var s = '';
+            try { s = String(arr[i] || '').trim(); } catch (e1) { s = ''; }
+            if (!s) continue;
+            if (seen[s]) continue;
+            seen[s] = 1;
+            out.push(s);
+        }
+        return out;
+    }
+
+    function _znhCapSetBanner(id, lines) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        var arr = _znhCapReasonList(lines);
+        if (!arr.length) {
+            el.textContent = '';
+            el.classList.add('znh-hidden');
+            return;
+        }
+        el.textContent = arr.join(' • ');
+        el.classList.remove('znh-hidden');
+    }
+
+    function _znhCapSetSectionDisabled(id, disabled) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (disabled) el.classList.add('znh-cap-disabled');
+        else el.classList.remove('znh-cap-disabled');
+    }
+
+    function _znhCapDisableSelectors(selectors, disabled, titleText) {
+        var list = selectors || [];
+        var i = 0;
+        for (i = 0; i < list.length; i++) {
+            var sel = '';
+            try { sel = String(list[i] || '').trim(); } catch (e0) { sel = ''; }
+            if (!sel) continue;
+            var nodes = [];
+            try { nodes = Array.prototype.slice.call(document.querySelectorAll(sel) || []); } catch (e1) { nodes = []; }
+            var j = 0;
+            for (j = 0; j < nodes.length; j++) {
+                var n = nodes[j];
+                if (!n) continue;
+                try { n.disabled = !!disabled; } catch (e2) {}
+                try {
+                    if (disabled && titleText) n.title = String(titleText);
+                    else if (!disabled) n.removeAttribute('title');
+                } catch (e3) {}
+            }
+        }
+    }
+
+    function znhSnapperApplyCapabilities(caps) {
+        if (!caps || typeof caps !== 'object') return null;
+
+        function _bool(v, defv) {
+            try {
+                if (v === true) return true;
+                if (v === false) return false;
+                var s = String(v == null ? '' : v).trim().toLowerCase();
+                if (!s) return !!defv;
+                if (s === '1' || s === 'true' || s === 'yes' || s === 'on') return true;
+                if (s === '0' || s === 'false' || s === 'no' || s === 'off') return false;
+                return !!defv;
+            } catch (e0) {
+                return !!defv;
+            }
+        }
+
+        var snapperSupported = _bool(caps.snapper_supported, true);
+        var ghostSupported = _bool(caps.ghost_scrub_supported, true);
+        var sdbootDetected = _bool(caps.systemd_boot_detected, false);
+        var grubDetected = _bool(caps.grub_detected, false);
+
+        var snapReasons = _znhCapReasonList(caps.snapper_missing_reasons);
+        var ghostReasons = _znhCapReasonList(caps.ghost_missing_reasons);
+
+        if (!snapperSupported && snapReasons.length === 0) {
+            snapReasons.push('Snapper Manager prerequisites are not met on this system.');
+        }
+        if (!ghostSupported && ghostReasons.length === 0) {
+            ghostReasons.push('Ghost-Scrub prerequisites are not met on this system.');
+        }
+
+        var snapBannerLines = [];
+        if (!snapperSupported) {
+            snapBannerLines.push('Snapper Manager disabled on this system.');
+            snapBannerLines = snapBannerLines.concat(snapReasons);
+        }
+        _znhCapSetBanner('snapper-capability-banner', snapBannerLines);
+
+        var scrubBannerLines = [];
+        if (!ghostSupported) {
+            scrubBannerLines.push('Ghost-Scrub disabled on this system.');
+            scrubBannerLines = scrubBannerLines.concat(ghostReasons);
+        } else {
+            if (!sdbootDetected) {
+                scrubBannerLines.push('systemd-boot not detected: the "update sd-boot" toggle is disabled.');
+            }
+            if (!grubDetected) {
+                scrubBannerLines.push('GRUB not detected: the "rebuild grub.cfg" toggle is disabled.');
+            }
+        }
+        _znhCapSetBanner('scrub-capability-banner', scrubBannerLines);
+
+        _znhCapSetSectionDisabled('snapper-ghost-card', !snapperSupported);
+        _znhCapSetSectionDisabled('scrub-ghost-section', !ghostSupported);
+
+        var snapperActionSelectors = [
+            '#snapper-status-btn',
+            '#snapper-list-n',
+            '#snapper-list-btn',
+            '#snapper-desc',
+            '#snapper-create-btn',
+            '#snapper-rollback-id',
+            '#snapper-rollback-btn',
+            '#snapper-cleanup-mode',
+            '#snapper-cleanup-btn',
+            '#snapper-auto-enable-btn',
+            '#snapper-auto-disable-btn',
+            '#snapper-enable-timeline-btn',
+            '#snapper-enable-cleanup-btn',
+            '#snapper-enable-boot-btn',
+            '#snapper-disable-timeline-btn',
+            '#snapper-disable-cleanup-btn',
+            '#snapper-disable-boot-btn'
+        ];
+        var snapTitle = snapperSupported ? '' : ('Disabled: ' + snapReasons.join('; '));
+        _znhCapDisableSelectors(snapperActionSelectors, !snapperSupported, snapTitle);
+
+        var scrubSelectors = [
+            '#scrub-ghost-section input',
+            '#scrub-ghost-section select',
+            '#scrub-ghost-section button'
+        ];
+        var ghostTitle = ghostSupported ? '' : ('Disabled: ' + ghostReasons.join('; '));
+        _znhCapDisableSelectors(scrubSelectors, !ghostSupported, ghostTitle);
+
+        if (ghostSupported) {
+            _znhCapDisableSelectors(
+                ['#scrub-update-sdboot'],
+                !sdbootDetected,
+                sdbootDetected ? '' : 'Requires systemd-boot'
+            );
+            _znhCapDisableSelectors(
+                ['#scrub-rebuild-grub'],
+                !grubDetected,
+                grubDetected ? '' : 'Requires GRUB (grub.cfg) detection'
+            );
+        }
+
+        _znhSnapperCapabilityState = caps;
+        return caps;
+    }
+    window.znhSnapperApplyCapabilities = znhSnapperApplyCapabilities;
+
+    function znhSnapperCapabilityRefresh() {
+        return _api('/api/snapper/capabilities', { method: 'GET' }).then(function(r) {
+            if (!r) return null;
+            try { znhSnapperApplyCapabilities(r); } catch (e0) {}
+            return r;
+        }).catch(function(_e) {
+            return null;
+        });
+    }
+    window.znhSnapperCapabilityRefresh = znhSnapperCapabilityRefresh;
 
     function _snConfirmTokenErrorText(errObj) {
         var parts = [];
@@ -29915,6 +30114,8 @@ generate_dashboard() {
     try { if (typeof _wireBootStatsHelpUI === 'function') _wireBootStatsHelpUI(); } catch (e) {}
     // Wire scrub-ghost manager UI.
     _wireScrubUI();
+    // Apply Snapper/Ghost capability gray-out state.
+    try { if (typeof znhSnapperCapabilityRefresh === 'function') znhSnapperCapabilityRefresh(); } catch (eCAP0) {}
     // Wire rocket button (system update wizard).
     _wireRocketUI();
 
@@ -30695,6 +30896,7 @@ generate_dashboard() {
         try { pollDashboardMeta(); } catch (e3) {}
         if (!hidden) {
             try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e4) {}
+            try { if (typeof znhSnapperCapabilityRefresh === 'function') znhSnapperCapabilityRefresh(); } catch (e4b) {}
         }
         try { selfUpdateFetchStatus(false); } catch (eSU0) {}
         try {
@@ -31794,6 +31996,7 @@ generate_dashboard() {
             pollDashboardMeta();
             try { selfUpdateFetchStatus(false); } catch (eSU2) {}
             try { if (typeof znhSnapperRefreshTimerBadges === 'function') znhSnapperRefreshTimerBadges(); } catch (e0) {}
+            try { if (typeof znhSnapperCapabilityRefresh === 'function') znhSnapperCapabilityRefresh(); } catch (e0b) {}
         }
         document.addEventListener('visibilitychange', function() {
             if (!document.hidden) _refreshWhenResumed();
@@ -55689,6 +55892,159 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         # --- Snapper (dashboard) ---
+        if path == "/api/snapper/capabilities":
+            def _root_fstype() -> str:
+                try:
+                    p = subprocess.run(
+                        ["findmnt", "-n", "-o", "FSTYPE", "/"],
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=4,
+                    )
+                    s = str(p.stdout or "").strip().lower()
+                    if s:
+                        return s
+                except Exception:
+                    pass
+                try:
+                    with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as f:
+                        for ln in f:
+                            parts = str(ln or "").split()
+                            if len(parts) >= 3 and parts[1] == "/":
+                                s2 = str(parts[2] or "").strip().lower()
+                                if s2:
+                                    return s2
+                                break
+                except Exception:
+                    pass
+                return "unknown"
+
+            def _read_os_release_map() -> dict:
+                out = {}
+                try:
+                    with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as f:
+                        for ln in f:
+                            line = str(ln or "").strip()
+                            if not line or line.startswith("#") or "=" not in line:
+                                continue
+                            k, v = line.split("=", 1)
+                            k = str(k or "").strip()
+                            v = str(v or "").strip().strip("'").strip('"')
+                            if k:
+                                out[k] = v
+                except Exception:
+                    pass
+                return out
+
+            def _dedupe_lines(lines) -> list[str]:
+                out = []
+                seen = set()
+                for it in list(lines or []):
+                    try:
+                        s = str(it or "").strip()
+                    except Exception:
+                        s = ""
+                    if not s:
+                        continue
+                    if s in seen:
+                        continue
+                    seen.add(s)
+                    out.append(s)
+                return out
+
+            root_fstype = _root_fstype()
+            btrfs_root = (root_fstype == "btrfs")
+            snapper_installed = bool(shutil.which("snapper"))
+            snapper_root_config_present = bool(os.path.isfile("/etc/snapper/configs/root"))
+            snapper_supported = bool(btrfs_root and snapper_installed and snapper_root_config_present)
+
+            snapper_missing_reasons = []
+            if not btrfs_root:
+                snapper_missing_reasons.append(f"Root filesystem is '{root_fstype}' (requires btrfs)")
+            if not snapper_installed:
+                snapper_missing_reasons.append("snapper command is not installed")
+            if not snapper_root_config_present:
+                snapper_missing_reasons.append("Missing /etc/snapper/configs/root")
+            snapper_missing_reasons = _dedupe_lines(snapper_missing_reasons)
+
+            bls = _bls_entries_stats()
+            grub = _grub_stats()
+
+            bls_entries_present = bool(isinstance(bls, dict) and bls.get("ok"))
+            bls_entries_dir = ""
+            try:
+                if isinstance(bls, dict):
+                    bls_entries_dir = str(bls.get("dir") or "")
+            except Exception:
+                bls_entries_dir = ""
+
+            grub_detected = bool(isinstance(grub, dict) and grub.get("ok"))
+            grub_bls_mode = bool(isinstance(grub, dict) and grub.get("bls_mode"))
+
+            systemd_boot_detected = False
+            try:
+                if isinstance(grub, dict) and grub.get("present") is False:
+                    r0 = str(grub.get("reason") or "").strip().lower()
+                    if "systemd-boot" in r0 or "sd-boot" in r0:
+                        systemd_boot_detected = True
+            except Exception:
+                pass
+            if not systemd_boot_detected:
+                try:
+                    for p0 in ("/boot/loader/loader.conf", "/efi/loader/loader.conf"):
+                        if os.path.isfile(p0):
+                            systemd_boot_detected = True
+                            break
+                except Exception:
+                    pass
+
+            ghost_supported = bool(
+                snapper_supported
+                and bls_entries_present
+                and (systemd_boot_detected or grub_detected)
+            )
+
+            ghost_missing_reasons = []
+            if not snapper_supported:
+                ghost_missing_reasons.extend(snapper_missing_reasons)
+            if not bls_entries_present:
+                ghost_missing_reasons.append("BLS entries directory was not detected")
+            if not (systemd_boot_detected or grub_detected):
+                ghost_missing_reasons.append("No supported bootloader profile detected (systemd-boot or GRUB)")
+            ghost_missing_reasons = _dedupe_lines(ghost_missing_reasons)
+
+            os_rel = _read_os_release_map()
+            os_id = str(os_rel.get("ID", "") or "").strip().lower()
+            os_id_like = str(os_rel.get("ID_LIKE", "") or "").strip().lower()
+            opensuse_like = (
+                ("opensuse" in os_id)
+                or ("opensuse" in os_id_like)
+                or ("suse" in os_id_like)
+            )
+
+            return _json_response(self, 200, {
+                "ok": True,
+                "root_fstype": root_fstype,
+                "btrfs_root": bool(btrfs_root),
+                "snapper_installed": bool(snapper_installed),
+                "snapper_root_config_present": bool(snapper_root_config_present),
+                "snapper_supported": bool(snapper_supported),
+                "snapper_missing_reasons": snapper_missing_reasons,
+                "bls_entries_present": bool(bls_entries_present),
+                "bls_entries_dir": bls_entries_dir,
+                "systemd_boot_detected": bool(systemd_boot_detected),
+                "grub_detected": bool(grub_detected),
+                "grub_bls_mode": bool(grub_bls_mode),
+                "ghost_scrub_supported": bool(ghost_supported),
+                "ghost_missing_reasons": ghost_missing_reasons,
+                "os_id": os_id,
+                "os_id_like": os_id_like,
+                "opensuse_like": bool(opensuse_like),
+            }, origin)
         if path == "/api/snapper/timers":
             def _systemd_time_to_utc(raw: str) -> str:
                 s = str(raw or "").strip()

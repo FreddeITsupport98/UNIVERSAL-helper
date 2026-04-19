@@ -2,11 +2,8 @@
 # RUNNER_OPTIONAL=1
 # RUNNER_RUNTIME=playwright
 import re
-import sys
 import unittest
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from target_resolver import resolve_target_script_path as _resolve_target_script_path
+from python_regression_bootstrap import resolve_target_script_path as _resolve_target_script_path
 
 try:
     from playwright.sync_api import sync_playwright

@@ -17,6 +17,7 @@ INSTALL_MISSING=0
 TARGET_FILES=()
 PYTHON_TARGET_FILES=()
 NODE_TARGET_FILES=()
+PYCACHE_DIRS=()
 AUTO_CHMOD=1
 
 usage() {
@@ -179,6 +180,35 @@ append_unique() {
     arr_ref+=( "${value}" )
 }
 
+track_python_target_pycache_dir() {
+    local python_target="$1"
+    local parent_dir=""
+    parent_dir="$(dirname "${python_target}")"
+    [ -d "${parent_dir}" ] || return 0
+    append_unique "${parent_dir}/__pycache__" PYCACHE_DIRS
+}
+
+cleanup_tracked_pycache_dirs() {
+    local pycache_dir=""
+    local removed=0
+    local display_path=""
+    for pycache_dir in "${PYCACHE_DIRS[@]}"; do
+        [ -d "${pycache_dir}" ] || continue
+        rm -rf -- "${pycache_dir}" 2>/dev/null || true
+        if [ ! -d "${pycache_dir}" ]; then
+            removed=$((removed + 1))
+            display_path="${pycache_dir#"${REPO_ROOT}"/}"
+            if [ "${display_path}" = "${pycache_dir}" ]; then
+                display_path="${pycache_dir}"
+            fi
+            printf 'INFO: removed pycache dir %s\n' "${display_path}"
+        fi
+    done
+    if [ "${removed}" -gt 0 ] 2>/dev/null; then
+        printf 'INFO: pycache cleanup complete (removed=%s)\n' "${removed}"
+    fi
+}
+
 resolve_python_runtime() {
     local candidate="$1"
     if [ -x "${candidate}" ]; then
@@ -326,9 +356,11 @@ if [ "${#PYTHON_TARGET_FILES[@]}" -gt 0 ]; then
 
     printf '\n==> Python compile checks (%s)\n' "${PYTHON_BIN}"
     for path in "${PYTHON_TARGET_FILES[@]}"; do
+        track_python_target_pycache_dir "${path}"
         printf '%s -m py_compile %s\n' "${PYTHON_BIN}" "${path#"${REPO_ROOT}"/}"
         "${PYTHON_BIN}" -m py_compile "${path}"
     done
+    cleanup_tracked_pycache_dirs
 else
     printf '\n==> Python compile checks\n'
     printf 'No python targets selected\n'

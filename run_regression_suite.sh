@@ -136,6 +136,14 @@ ensure_test_executable_if_needed() {
     printf 'INFO: Marked test executable: %s\n' "${test_name}"
 }
 
+cleanup_regression_pycache_dirs() {
+    local pycache_dir=""
+    while IFS= read -r pycache_dir; do
+        [ -n "${pycache_dir}" ] || continue
+        rm -rf -- "${pycache_dir}" 2>/dev/null || true
+    done < <(find "${REGRESSION_DIR}" -type d -name '__pycache__' -print 2>/dev/null || true)
+}
+
 run_preflight_syntax_baseline() {
     local syntax_script="${SCRIPT_DIR}/scripts/syntax-check.sh"
     local syntax_skip_shellcheck="${RUNNER_SKIP_SHELLCHECK:-0}"
@@ -289,10 +297,12 @@ run_python_test() {
     local requires_root="0"
     local label=""
     local python_bin=""
+    local regression_pythonpath=""
     test_name="$(basename "${test_path}")"
     runtime_tag="$(runner_meta_value "${test_path}" "RUNNER_RUNTIME" "default")"
     requires_root="$(runner_meta_value "${test_path}" "RUNNER_REQUIRES_ROOT" "0")"
     python_bin="$(python_bin_for_runtime_tag "${runtime_tag}")"
+    regression_pythonpath="${REGRESSION_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
     if is_truthy "${optional}"; then
         label=" (optional)"
     fi
@@ -304,10 +314,10 @@ run_python_test() {
     printf '\n==> %s%s\n' "${test_name}" "${label}"
     printf 'Using python runtime: %s\n' "${python_bin}"
     if is_truthy "${optional}"; then
-        "${python_bin}" -m unittest -v "${test_path}" || printf 'WARN: Optional python test failed: %s\n' "${test_name}"
+        PYTHONPATH="${regression_pythonpath}" "${python_bin}" -m unittest -v "${test_path}" || printf 'WARN: Optional python test failed: %s\n' "${test_name}"
         return 0
     fi
-    "${python_bin}" -m unittest -v "${test_path}"
+    PYTHONPATH="${regression_pythonpath}" "${python_bin}" -m unittest -v "${test_path}"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -354,6 +364,7 @@ fi
 TARGET_FILE="${TARGET_FILE:-${DEFAULT_TARGET_FILE}}"
 [ -f "${TARGET_FILE}" ] || fail "Target file not found: ${TARGET_FILE}"
 [ -d "${REGRESSION_DIR}" ] || fail "Regression directory not found: ${REGRESSION_DIR}"
+trap cleanup_regression_pycache_dirs EXIT
 
 shopt -s nullglob
 all_shell_tests=( "${REGRESSION_DIR}"/test_*.sh )

@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 import re
-import sys
 import unittest
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from target_resolver import resolve_target_script_path as _resolve_target_script_path
+from python_regression_bootstrap import resolve_target_script_path as _resolve_target_script_path
 
 
 class AiSmartReportContractTest(unittest.TestCase):

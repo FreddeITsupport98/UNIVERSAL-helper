@@ -3,14 +3,12 @@ import ast
 import contextlib
 import io
 import json
-import sys
 import tempfile
 import types
 import unittest
 from email.message import Message
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from target_resolver import resolve_target_script_path as _resolve_target_script_path
+from python_regression_bootstrap import resolve_target_script_path as _resolve_target_script_path
 from unittest import mock
 
 

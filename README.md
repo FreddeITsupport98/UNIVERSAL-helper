@@ -426,8 +426,9 @@ High-stakes warning: bootloaders are high-stakes. Deleting/moving the wrong file
 - Know how to restore (see Backups & restore below)
 
 #### Supported / not supported
-- Supported: openSUSE Tumbleweed / Slowroll / immutable variants (Aeon/Kalpa/MicroOS)
-- Not supported: openSUSE Leap (the script/tool will refuse to run)
+- Best-tested profile: openSUSE Tumbleweed / Slowroll / immutable variants (Aeon/Kalpa/MicroOS)
+- openSUSE Leap: allowed in best-effort mode (no hard refusal), but less tested than the profiles above
+- Other Linux distributions: allowed in best-effort mode when required boot layout/prerequisites are present (always run `--dry-run` first)
 
 #### Recommended workflow (safe)
 ```bash path=null start=null
@@ -2158,6 +2159,11 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - WebUI Snapper/Ghost capability gating now adds prerequisite-aware gray-out behavior: unsupported systems show explicit capability banners, Snapper/Ghost action controls are disabled cleanly, and capability state is refreshed from a dedicated dashboard API endpoint (`/api/snapper/capabilities`).
+  - scrub-ghost distro guard is now advisory (best-effort) instead of a hard openSUSE/Tumbleweed lock; non-openSUSE and openSUSE Leap systems no longer hard-exit at startup and are guided with warning text to run `--dry-run` first.
+  - Regression tooling now auto-cleans generated Python bytecode caches: `scripts/syntax-check.sh` removes tracked `__pycache__` directories after `py_compile`, and `run_regression_suite.sh` performs `regressions/` `__pycache__` cleanup on exit.
+  - Added guard regression `regressions/test_target_resolver_sourcing_regression.sh`, which scans `regressions/test_*.sh` and fails with `FAIL SUMMARY (N)` if any shell regression stops sourcing `regressions/target_resolver.sh`.
+  - Added shared Python regression bootstrap module `regressions/python_regression_bootstrap.py`; the six Python regression tests now import target resolution through that module instead of duplicating per-file `sys.path` setup, and `run_regression_suite.sh` now exports regression-local `PYTHONPATH` for unittest execution.
   - Regression target resolution is now centralized via shared helpers (`regressions/target_resolver.sh` + `regressions/target_resolver.py`), and shell/python regressions now consume those helpers instead of duplicating `UNI-auto.sh`/`zypper-auto.sh` fallback logic per file.
   - Tooling scripts (`run_regression_suite.sh`, `scripts/syntax-check.sh`, and `scripts/bootstrap_playwright_regression.sh`) now use the shared shell resolver helper for a single UNI-first target-selection contract across runner/preflight/bootstrap flows.
   - Regression harness defaults are now repo-layout aware: `run_regression_suite.sh` and no-target shell/python regression scripts resolve `UNI-auto.sh` first and fall back to `zypper-auto.sh` when needed, so full-suite runs work in both layouts without manual target args.
