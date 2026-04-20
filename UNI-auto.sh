@@ -11280,6 +11280,11 @@ generate_dashboard() {
         --success: #16a34a;
         --danger: #ef4444;
         --warning: #f59e0b;
+        --welcome-overlay-bg: rgba(15, 23, 42, 0.36);
+        --welcome-card-bg: linear-gradient(180deg, rgba(37,99,235,0.10), rgba(255,255,255,0.92));
+        --welcome-card-border: rgba(37,99,235,0.30);
+        --welcome-card-shadow: 0 20px 48px rgba(15,23,42,0.22);
+        --welcome-box-bg: rgba(255,255,255,0.52);
 
         --radius: 16px;
         --radius-sm: 12px;
@@ -11299,6 +11304,11 @@ generate_dashboard() {
         --code-bg: #060b14;
         --code-text: #d1d5db;
         --focus: rgba(96, 165, 250, 0.40);
+        --welcome-overlay-bg: rgba(6, 11, 20, 0.84);
+        --welcome-card-bg: linear-gradient(180deg, rgba(37,99,235,0.16), rgba(17,24,39,0.92));
+        --welcome-card-border: rgba(59,130,246,0.35);
+        --welcome-card-shadow: 0 20px 48px rgba(0,0,0,0.40);
+        --welcome-box-bg: rgba(255,255,255,0.03);
     }
 
     /* Default to dark when system prefers dark, unless user forced a theme */
@@ -11316,6 +11326,11 @@ generate_dashboard() {
             --code-bg: #060b14;
             --code-text: #d1d5db;
             --focus: rgba(96, 165, 250, 0.40);
+            --welcome-overlay-bg: rgba(6, 11, 20, 0.84);
+            --welcome-card-bg: linear-gradient(180deg, rgba(37,99,235,0.16), rgba(17,24,39,0.92));
+            --welcome-card-border: rgba(59,130,246,0.35);
+            --welcome-card-shadow: 0 20px 48px rgba(0,0,0,0.40);
+            --welcome-box-bg: rgba(255,255,255,0.03);
         }
     }
 
@@ -11774,7 +11789,7 @@ generate_dashboard() {
         position: fixed;
         inset: 0;
         z-index: 16000;
-        background: rgba(6, 11, 20, 0.84);
+        background: var(--welcome-overlay-bg);
         display: none;
         align-items: center;
         justify-content: center;
@@ -11786,21 +11801,22 @@ generate_dashboard() {
         max-height: min(88vh, calc(100vh - 34px));
         overflow: auto;
         border-radius: 18px;
-        background: linear-gradient(180deg, rgba(37,99,235,0.16), rgba(17,24,39,0.92));
-        border: 1px solid rgba(59,130,246,0.35);
-        box-shadow: 0 20px 48px rgba(0,0,0,0.40);
+        background: var(--welcome-card-bg);
+        border: 1px solid var(--welcome-card-border);
+        box-shadow: var(--welcome-card-shadow);
+        color: var(--text);
         padding: 18px 18px 16px;
     }
     .znh-welcome-title { font-size: 1.28rem; font-weight: 950; margin: 0; }
     .znh-welcome-sub { margin-top: 8px; color: var(--muted); font-weight: 800; line-height: 1.45; }
     .znh-welcome-grid { display: grid; gap: 12px; margin-top: 14px; }
     .znh-welcome-box {
-        border: 1px solid rgba(255,255,255,0.12);
+        border: 1px solid var(--border);
         border-radius: 12px;
-        background: rgba(255,255,255,0.03);
+        background: var(--welcome-box-bg);
         padding: 10px 12px;
     }
-    .znh-welcome-box h3 { margin: 0 0 8px 0; font-size: 0.98rem; }
+    .znh-welcome-box h3 { margin: 0 0 8px 0; font-size: 0.98rem; color: var(--text); }
     .znh-welcome-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--muted); font-weight: 800; }
     .znh-welcome-list li { line-height: 1.4; }
     .znh-welcome-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
@@ -11809,6 +11825,12 @@ generate_dashboard() {
         color: var(--muted);
         font-size: 0.85rem;
         font-weight: 800;
+    }
+    #znh-welcome-release {
+        background: var(--subtle);
+        color: var(--text);
+        border: 1px solid var(--border);
+        box-shadow: none;
     }
 
     /* Managers bubble (minimized "Update manager / Rocket manager" overlay) */
@@ -17323,9 +17345,14 @@ generate_dashboard() {
                 document.addEventListener('znh-network-error', function(ev) {
                     try {
                         var d = (ev && ev.detail) ? ev.detail : {};
+                        var src = String(d.source || '');
                         var url = String(d.url || d.path || '');
                         var err = String(d.error || 'network error');
                         if (err.length > 260) err = err.slice(0, 260) + '…';
+                        var parseLike = false;
+                        try {
+                            parseLike = /JSON\.parse|JSON parse|unexpected token|expected ','|status-data\.json JSON parse failed|snippet:/i.test(err);
+                        } catch (eLP0) { parseLike = false; }
 
                         var sig = url + '|' + err;
                         var now = 0;
@@ -17334,8 +17361,15 @@ generate_dashboard() {
                         _lastNetSig = sig;
                         _lastNetTs = now;
 
+                        var intro = '';
+                        if (parseLike || src === 'pollLive' || url.indexOf('status-data.json') !== -1) {
+                            intro = 'Live status refresh failed to read status-data.json (invalid or partial JSON). This is usually temporary during file refresh.\\n\\n';
+                        } else {
+                            intro = 'A WebUI request failed. This is usually temporary (API restart or network hiccup).\\n\\n';
+                        }
+
                         var body = ''
-                            + 'A WebUI request failed. This is usually temporary (API restart, token mismatch, network hiccup).\n\n'
+                            + intro
                             + 'Error: ' + err + '\n'
                             + (url ? ('URL: ' + url + '\n\n') : '\n')
                             + 'Common fixes:\n'
@@ -30841,6 +30875,18 @@ generate_dashboard() {
     }
 
     var liveFailures = 0;
+    var _pollLiveLastGoodData = null;
+    var _pollLiveLastGoodTs = 0;
+    var _pollLiveParseWarnLastMs = 0;
+
+    function _pollLiveWarnParse(msg) {
+        try {
+            var nowMs = Date.now();
+            if (_pollLiveParseWarnLastMs && (nowMs - _pollLiveParseWarnLastMs) < 12000) return;
+            _pollLiveParseWarnLastMs = nowMs;
+        } catch (e0) {}
+        try { znhUiWarn(String(msg || 'pollLive parse warning')); } catch (e1) {}
+    }
 
     // Poller in-flight guards to prevent overlapping fetches (and browser request pile-ups)
     // when responses are slow or the tab is backgrounded.
@@ -30981,26 +31027,84 @@ generate_dashboard() {
                 return r.text();
             })
             .then(function(txt) {
-                var p = null;
-                try { p = znhParseJsonLenient(txt, 'pollLive'); } catch (e0) { p = null; }
+                function _parsePayload(rawText, parseLabel) {
+                    var p0 = null;
+                    try { p0 = znhParseJsonLenient(rawText, parseLabel); } catch (e0) { p0 = null; }
+                    if (p0 && p0.ok) return { ok: true, value: p0.value, recovered: !!p0.recovered, error: '', snippet: '' };
+                    var sn = '';
+                    try { sn = p0 && p0.snippet ? String(p0.snippet) : ''; } catch (e1) { sn = ''; }
+                    var em = (p0 && p0.error) ? String(p0.error) : 'status-data.json JSON parse failed';
+                    return { ok: false, value: null, recovered: false, error: em, snippet: sn };
+                }
 
-                if (!p || !p.ok) {
+                function _formatParseError(parsed) {
+                    var emsg = (parsed && parsed.error) ? String(parsed.error) : 'status-data.json JSON parse failed';
                     var snippet = '';
-                    try { snippet = p && p.snippet ? String(p.snippet) : ''; } catch (e1) { snippet = ''; }
-                    var emsg = (p && p.error) ? p.error : 'status-data.json JSON parse failed';
+                    try { snippet = parsed && parsed.snippet ? String(parsed.snippet) : ''; } catch (e0) { snippet = ''; }
                     if (snippet) emsg = emsg + ' (snippet: ' + snippet + ')';
-                    throw new Error(emsg);
+                    return emsg;
                 }
 
-                if (p.recovered) {
-                    // Do not persist this as a crash; it's usually transient / harmless.
-                    try { znhUiWarn('pollLive recovered from invalid JSON in status-data.json (trimmed extra bytes)'); } catch (e2) {}
+                var p1 = _parsePayload(txt, 'pollLive');
+                if (p1.ok) {
+                    if (p1.recovered) {
+                        _pollLiveWarnParse('pollLive recovered from invalid JSON in status-data.json (trimmed extra bytes)');
+                    }
+                    return p1.value;
                 }
 
-                return p.value;
+                var retryUrl = 'status-data.json?ts=' + Date.now() + '&retry=1';
+                return znhFetch(retryUrl, { cache: 'no-store' })
+                    .then(function(r2) {
+                        if (!r2.ok) {
+                            var e2 = new Error('HTTP ' + r2.status);
+                            try { e2.http_status = r2.status; } catch (e3) {}
+                            throw e2;
+                        }
+                        return r2.text();
+                    })
+                    .then(function(txt2) {
+                        var p2 = _parsePayload(txt2, 'pollLive(retry)');
+                        if (p2.ok) {
+                            _pollLiveWarnParse('pollLive recovered after retrying status-data.json fetch');
+                            return p2.value;
+                        }
+
+                        // Fallback: keep the UI stable with the most recent valid payload
+                        // when parsing fails repeatedly (usually transient file-refresh race).
+                        if (_pollLiveLastGoodData) {
+                            var ageMs = 0;
+                            try { ageMs = Date.now() - (_pollLiveLastGoodTs || 0); } catch (e4) { ageMs = 0; }
+                            if (!ageMs || ageMs < (15 * 60 * 1000)) {
+                                _pollLiveWarnParse('pollLive using cached last-good status snapshot after parse failure');
+                                return _pollLiveLastGoodData;
+                            }
+                        }
+
+                        throw new Error(_formatParseError(p2));
+                    })
+                    .catch(function(retryErr) {
+                        if (_pollLiveLastGoodData) {
+                            var ageMs2 = 0;
+                            try { ageMs2 = Date.now() - (_pollLiveLastGoodTs || 0); } catch (e5) { ageMs2 = 0; }
+                            if (!ageMs2 || ageMs2 < (15 * 60 * 1000)) {
+                                _pollLiveWarnParse('pollLive retry failed; reusing cached last-good status snapshot');
+                                return _pollLiveLastGoodData;
+                            }
+                        }
+                        var baseErr = _formatParseError(p1);
+                        var reMsg = (retryErr && retryErr.message) ? String(retryErr.message) : 'retry failed';
+                        throw new Error(baseErr + ' | retry: ' + reMsg);
+                    });
             })
             .then(function(d) {
                 liveFailures = 0;
+                try {
+                    if (d && typeof d === 'object') {
+                        _pollLiveLastGoodData = d;
+                        _pollLiveLastGoodTs = Date.now();
+                    }
+                } catch (eCache0) {}
 
                 // Event-driven architecture: broadcast update and let listeners apply UI.
                 // If dispatch fails, fall back to direct apply so the dashboard still works.
@@ -32029,17 +32133,48 @@ JSON_EOF
     local out_json_root
     out_json_root="${LOG_DIR}/status-data.json"
 
+    local json_generated_iso json_generated_human
     local json_last_status json_last_install_log json_last_install_tail json_flight_report_raw json_flight_report_log
+    local json_pending_count json_verify_last_fixed json_verify_last_detected json_verify_last_remaining json_disk_percent
+    json_generated_iso="$(_json_escape "$now_iso")"
+    json_generated_human="$(_json_escape "$now")"
     json_last_status="$(_json_escape "$last_status")"
     json_last_install_log="$(_json_escape "$last_install_log")"
     json_last_install_tail="$(_json_escape "$last_install_tail")"
     json_flight_report_raw="$(_json_escape "$flight_report_raw")"
     json_flight_report_log="$(_json_escape "$flight_report_log")"
 
+    json_pending_count=0
+    if [[ "${pending_count:-}" =~ ^-?[0-9]+$ ]]; then
+        json_pending_count="${pending_count}"
+    fi
+
+    json_verify_last_fixed=0
+    if [[ "${verify_last_fixed:-}" =~ ^-?[0-9]+$ ]]; then
+        json_verify_last_fixed="${verify_last_fixed}"
+    fi
+
+    json_verify_last_detected=0
+    if [[ "${verify_last_detected:-}" =~ ^-?[0-9]+$ ]]; then
+        json_verify_last_detected="${verify_last_detected}"
+    fi
+
+    json_verify_last_remaining=0
+    if [[ "${verify_last_remaining:-}" =~ ^-?[0-9]+$ ]]; then
+        json_verify_last_remaining="${verify_last_remaining}"
+    fi
+
+    json_disk_percent=0
+    if [[ "${disk_percent:-}" =~ ^-?[0-9]+$ ]]; then
+        json_disk_percent="${disk_percent}"
+    fi
+    if [ "${json_disk_percent}" -lt 0 ] 2>/dev/null; then json_disk_percent=0; fi
+    if [ "${json_disk_percent}" -gt 100 ] 2>/dev/null; then json_disk_percent=100; fi
+
     write_atomic "${out_json_root}" <<JSON_EOF
 {
-  "generated_iso": "${now_iso}",
-  "generated_human": "${now}",
+  "generated_iso": "${json_generated_iso}",
+  "generated_human": "${json_generated_human}",
   "run_id": "$(_json_escape "$RUN_ID")",
 
   "last_status": "${json_last_status}",
@@ -32050,7 +32185,7 @@ JSON_EOF
   "zypp_lock_pid": "$(_json_escape "$zypp_lock_pid")",
   "zypp_lock_file": "$(_json_escape "$zypp_lock_file")",
 
-  "pending_count": ${pending_count},
+  "pending_count": ${json_pending_count},
 
   "feat_flatpak": $([[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]] && echo true || echo false),
   "feat_snap": $([[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]] && echo true || echo false),
@@ -32062,9 +32197,9 @@ JSON_EOF
   "verify_timer": "$(_json_escape "$verify_timer")",
   "nt_timer": "$(_json_escape "$nt_timer")",
 
-  "verify_last_fixed": ${verify_last_fixed},
-  "verify_last_detected": ${verify_last_detected},
-  "verify_last_remaining": ${verify_last_remaining},
+  "verify_last_fixed": ${json_verify_last_fixed},
+  "verify_last_detected": ${json_verify_last_detected},
+  "verify_last_remaining": ${json_verify_last_remaining},
   "verify_last_ts": "$(_json_escape "$verify_last_ts")",
 
   "snapper_timeline_timer": "$(_json_escape "$snapper_timeline_timer")",
@@ -32075,7 +32210,7 @@ JSON_EOF
   "uptime_info": "$(_json_escape "$uptime_info")",
   "mem_usage": "$(_json_escape "$mem_usage")",
   "disk_usage_display": "$(_json_escape "$disk_usage_display")",
-  "disk_percent": ${disk_percent},
+  "disk_percent": ${json_disk_percent},
 
   "last_install_log": "${json_last_install_log}",
   "last_install_tail": "${json_last_install_tail}",

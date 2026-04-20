@@ -2159,8 +2159,13 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - Added focused static regression `regressions/test_webui_poll_parse_recovery_regression.sh` to guard WebUI `pollLive` parse-recovery wiring: parse-warning throttling, one-shot retry fetch for `status-data.json`, bounded last-good snapshot fallback, and parse-specific notification copy (no stale token-mismatch phrasing).
+  - Added optional browser/runtime regression `regressions/test_webui_poll_parse_recovery_playwright_regression.py` (Playwright) that executes extracted `pollLive()` logic against malformed→malformed(retry)→valid payload flow and verifies UI keeps rendering cached last-good state before recovery to newer valid status.
   - Added runtime API regression `regressions/test_snapper_capabilities_api_runtime_regression.py`, which executes the embedded dashboard API block and validates `/api/snapper/capabilities` support/reason behavior across mocked prerequisite profiles.
   - Expanded `regressions/test_snapper_capabilities_api_runtime_regression.py` with a shared profile-based mock context helper and an explicit runtime case that forces the `No supported bootloader profile detected (systemd-boot or GRUB)` reason path.
+  - WebUI live polling now hardens `status-data.json` parsing: `pollLive()` retries once with a cache-busting fetch on parse failure and can reuse a recent last-good payload snapshot (bounded window) to avoid transient UI breakage during file-refresh races.
+  - WebUI network/error notification messaging now distinguishes `status-data.json` JSON parse/read issues from generic API/network failures (removing misleading token-mismatch wording for parse-specific failures).
+  - Welcome overlay styling now follows light/dark theme variables for overlay/card/box/release-note surfaces so text/background contrast remains consistent across theme modes.
   - WebUI Snapper/Ghost capability gating now adds prerequisite-aware gray-out behavior: unsupported systems show explicit capability banners, Snapper/Ghost action controls are disabled cleanly, and capability state is refreshed from a dedicated dashboard API endpoint (`/api/snapper/capabilities`).
   - scrub-ghost distro guard is now advisory (best-effort) instead of a hard openSUSE/Tumbleweed lock; non-openSUSE and openSUSE Leap systems no longer hard-exit at startup and are guided with warning text to run `--dry-run` first.
   - Regression tooling now auto-cleans generated Python bytecode caches: `scripts/syntax-check.sh` removes tracked `__pycache__` directories after `py_compile`, and `run_regression_suite.sh` performs `regressions/` `__pycache__` cleanup on exit.
