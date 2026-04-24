@@ -2159,6 +2159,11 @@ systemctl status zypper-autodownload.service
 
 - **Unreleased (next build):**
   - _TBD_
+  - Rocket Update Wizard WebUI flow is now package-manager aware end-to-end (`zypper`/`apt`/`dnf`/`pacman`) for preview/start/recovery/SSE progress handling: PM-specific command dispatch, lock-wait handling, simulation return-code normalization, restart-check marker parsing, and output prettification now follow the detected backend instead of assuming zypper-only paths.
+  - Verification checks 18 and 46 now classify failed systemd units into actionable vs low-priority/noise buckets, suppressing recurring transient noise while preserving hard-failure gates for critical update/network/helper units.
+  - Regression contracts were extended to guard the new Rocket PM-aware wiring and failed-unit filtering helpers (`regressions/test_cross_distro_package_manager_regression.sh`, `regressions/test_verify_pm_adaptive_regression.sh`).
+  - Verification Check 17 (`rpm -V` critical packages) now filters targets to installed RPM package names before verification; on dnf5-based systems this avoids false warning noise such as “package dnf is not installed” while preserving real integrity-difference reporting.
+  - Added coverage in `regressions/test_verify_pm_adaptive_regression.sh` for the RPM critical-package target filter helper and dnf5/libdnf5 fallback target wiring.
   - Added focused static regression `regressions/test_webui_poll_parse_recovery_regression.sh` to guard WebUI `pollLive` parse-recovery wiring: parse-warning throttling, one-shot retry fetch for `status-data.json`, bounded last-good snapshot fallback, and parse-specific notification copy (no stale token-mismatch phrasing).
   - Added optional browser/runtime regression `regressions/test_webui_poll_parse_recovery_playwright_regression.py` (Playwright) that executes extracted `pollLive()` logic against malformed→malformed(retry)→valid payload flow and verifies UI keeps rendering cached last-good state before recovery to newer valid status.
   - Added runtime API regression `regressions/test_snapper_capabilities_api_runtime_regression.py`, which executes the embedded dashboard API block and validates `/api/snapper/capabilities` support/reason behavior across mocked prerequisite profiles.

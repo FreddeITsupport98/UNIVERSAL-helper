@@ -33307,6 +33307,123 @@ run_verification_only() {
         esac
     }
 
+    verify_collect_failed_units() {
+        systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true
+    }
+
+    verify_count_units() {
+        local text="${1:-}"
+        local c
+        c=$(printf '%s\n' "${text}" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ' || true)
+        if ! [[ "${c:-}" =~ ^[0-9]+$ ]]; then
+            c=0
+        fi
+        printf '%s' "${c}"
+    }
+
+    verify_units_inline() {
+        local text="${1:-}"
+        printf '%s\n' "${text}" | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
+    }
+
+    verify_unit_list_append() {
+        local var_name="${1:-}"
+        local unit="${2:-}"
+        local cur
+        [ -n "${var_name}" ] || return 1
+        [ -n "${unit}" ] || return 0
+        cur="${!var_name:-}"
+        if printf '%s\n' "${cur}" | sed '/^[[:space:]]*$/d' | grep -Fxq -- "${unit}"; then
+            return 0
+        fi
+        if [ -n "${cur}" ]; then
+            printf -v "${var_name}" "%s\n%s" "${cur}" "${unit}"
+        else
+            printf -v "${var_name}" "%s" "${unit}"
+        fi
+    }
+
+    verify_failed_unit_is_critical() {
+        local unit low
+        unit="${1:-}"
+        low="$(printf '%s' "${unit}" | tr '[:upper:]' '[:lower:]')"
+        [ -n "${low}" ] || return 1
+
+        case "${low}" in
+            zypper-autodownload.service|zypper-autodownload.timer|zypper-cache-cleanup.service|zypper-auto-verify.service|zypper-auto-verify.timer|zypper-auto-dashboard-api.service|zypper-notify-user.service|zypper-notify-user.timer)
+                return 0
+                ;;
+        esac
+
+        if printf '%s\n' "${low}" | grep -qiE '(zypper|zypp|apt|dpkg|unattended|dnf|yum|pacman|networkmanager|systemd-networkd|wicked|wpa_supplicant|systemd-resolved|iwd|connman|netconfig)'; then
+            return 0
+        fi
+
+        return 1
+    }
+
+    verify_failed_unit_is_noise() {
+        local unit low
+        unit="${1:-}"
+        low="$(printf '%s' "${unit}" | tr '[:upper:]' '[:lower:]')"
+        [ -n "${low}" ] || return 0
+
+        case "${low}" in
+            znh-webui-*|run-*.service|session-*.scope|user@*.service|user-runtime-dir@*.service|app-*.scope|*.mount|*.automount|*.slice|*.scope|*.path|*.device)
+                return 0
+                ;;
+        esac
+
+        case "${low}" in
+            packagekit.service|packagekit-offline-update.service|flatpak-system-helper.service|man-db.service|plocate-updatedb.service|updatedb.service|bluetooth.service|cups.service|cups-browsed.service|avahi-daemon.service|modemmanager.service|fwupd.service|fwupd-refresh.service|abrt*.service|kdump.service|akmods.service)
+                return 0
+                ;;
+        esac
+
+        if printf '%s\n' "${low}" | grep -qiE '(^systemd-coredump@|^dracut-.*|^tmp\.mount$)'; then
+            return 0
+        fi
+
+        return 1
+    }
+
+    verify_classify_failed_units() {
+        local units_text="${1:-}"
+        local unit clean
+
+        VERIFY_FAILED_UNITS_CRITICAL=""
+        VERIFY_FAILED_UNITS_REVIEW=""
+        VERIFY_FAILED_UNITS_NOISE=""
+
+        while IFS= read -r unit; do
+            clean="$(printf '%s' "${unit}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+            [ -n "${clean}" ] || continue
+            if verify_failed_unit_is_critical "${clean}"; then
+                verify_unit_list_append VERIFY_FAILED_UNITS_CRITICAL "${clean}"
+            elif verify_failed_unit_is_noise "${clean}"; then
+                verify_unit_list_append VERIFY_FAILED_UNITS_NOISE "${clean}"
+            else
+                verify_unit_list_append VERIFY_FAILED_UNITS_REVIEW "${clean}"
+            fi
+        done <<< "${units_text}"
+    }
+
+    verify_actionable_failed_units() {
+        local out=""
+        if [ -n "${VERIFY_FAILED_UNITS_CRITICAL:-}" ]; then
+            out="${VERIFY_FAILED_UNITS_CRITICAL}"
+        fi
+        if [ -n "${VERIFY_FAILED_UNITS_REVIEW:-}" ]; then
+            if [ -n "${out}" ]; then
+                out="${out}
+${VERIFY_FAILED_UNITS_REVIEW}"
+            else
+                out="${VERIFY_FAILED_UNITS_REVIEW}"
+            fi
+        fi
+        printf '%s\n' "${out}" | sed '/^[[:space:]]*$/d'
+    }
+
     log_info ">>> Running advanced installation verification and auto-repair..."
     update_status "Verifying installation..."
 
@@ -33973,14 +34090,49 @@ if [ "${VERIFY_PM_IS_RPM_BASED:-0}" -eq 1 ] 2>/dev/null && command -v rpm >/dev/
     (
         set +e
         critical_pkgs=(glibc systemd rpm)
+        critical_pkgs_filtered=()
+        missing_critical_pkgs=()
+
+        _verify_add_pkg_if_installed() {
+            local pkg_name="${1:-}"
+            [ -n "${pkg_name}" ] || return 0
+            if rpm -q --quiet "${pkg_name}" >/dev/null 2>&1; then
+                critical_pkgs+=("${pkg_name}")
+            fi
+        }
         if [ "${VERIFY_PM}" = "zypper" ]; then
-            critical_pkgs+=(zypper libzypp)
+            _verify_add_pkg_if_installed zypper
+            _verify_add_pkg_if_installed libzypp
         elif [ "${VERIFY_PM}" = "dnf" ]; then
-            critical_pkgs+=(dnf)
+            # Fedora has transitioned from legacy dnf package naming to dnf5 on newer releases.
+            # Add whichever package names are actually installed to avoid false-positive
+            # "package ... is not installed" noise in rpm -V output.
+            _verify_add_pkg_if_installed dnf
+            _verify_add_pkg_if_installed dnf5
+            _verify_add_pkg_if_installed libdnf
+            _verify_add_pkg_if_installed libdnf5
+        fi
+        for pkg in "${critical_pkgs[@]}"; do
+            if rpm -q --quiet "${pkg}" >/dev/null 2>&1; then
+                critical_pkgs_filtered+=("${pkg}")
+            else
+                missing_critical_pkgs+=("${pkg}")
+            fi
+        done
+        critical_pkgs=("${critical_pkgs_filtered[@]}")
+
+        if [ "${#missing_critical_pkgs[@]}" -gt 0 ] 2>/dev/null; then
+            log_info "ℹ rpm -V package targets skipped (not installed): ${missing_critical_pkgs[*]}"
         fi
 
-        rpm_verify_out=$(rpm -V --nomtime --nosize "${critical_pkgs[@]}" 2>&1)
-        rpm_verify_rc=$?
+        if [ "${#critical_pkgs[@]}" -eq 0 ] 2>/dev/null; then
+            log_info "ℹ rpm -V critical package verification skipped (no installed package targets)"
+            rpm_verify_out=""
+            rpm_verify_rc=0
+        else
+            rpm_verify_out=$(rpm -V --nomtime --nosize "${critical_pkgs[@]}" 2>&1)
+            rpm_verify_rc=$?
+        fi
         set -e
 
         if [ "$rpm_verify_rc" -eq 0 ] && [ -z "${rpm_verify_out:-}" ]; then
@@ -34002,22 +34154,51 @@ fi
 
 # Check 18: Global systemd failed units (auto-fix enabled)
 log_debug "[18/${TOTAL_CHECKS}] Checking for failed systemd units (global)..."
-FAILED_UNITS=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+FAILED_UNITS=$(verify_collect_failed_units)
 if [ -z "${FAILED_UNITS:-}" ]; then
     log_success "✓ No failed systemd units detected"
 else
-    log_warn "⚠ Failed systemd units detected: $(echo "$FAILED_UNITS" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+    verify_classify_failed_units "${FAILED_UNITS}"
+    failed_critical_count=$(verify_count_units "${VERIFY_FAILED_UNITS_CRITICAL:-}")
+    failed_review_count=$(verify_count_units "${VERIFY_FAILED_UNITS_REVIEW:-}")
+    failed_noise_count=$(verify_count_units "${VERIFY_FAILED_UNITS_NOISE:-}")
+    failed_actionable_units="$(verify_actionable_failed_units)"
+    failed_actionable_count=$(verify_count_units "${failed_actionable_units:-}")
+
+    if [ "${failed_actionable_count}" -gt 0 ] 2>/dev/null; then
+        log_warn "⚠ Failed systemd units detected (critical=${failed_critical_count}, review=${failed_review_count}, noise-suppressed=${failed_noise_count})"
+        log_warn "  → Actionable failed units: $(verify_units_inline "${failed_actionable_units}")"
+        if [ "${failed_noise_count}" -gt 0 ] 2>/dev/null; then
+            log_info "  → Suppressed low-priority/noise units: $(verify_units_inline "${VERIFY_FAILED_UNITS_NOISE}")"
+        fi
+    else
+        log_info "ℹ Failed systemd units are currently low-priority/noise (suppressed from hard failure): $(verify_units_inline "${VERIFY_FAILED_UNITS_NOISE}")"
+    fi
     log_info "  → Attempting auto-repair: resetting failed unit states..."
 
     if execute_guarded "Reset failed systemd units" systemctl reset-failed; then
         REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-        FAILED_UNITS_AFTER=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+        FAILED_UNITS_AFTER=$(verify_collect_failed_units)
         if [ -z "${FAILED_UNITS_AFTER:-}" ]; then
             log_success "  ✓ Auto-repair successful: All failed states cleared"
         else
-            log_error "  ✗ Some units remain failed: $(echo "$FAILED_UNITS_AFTER" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
-            # Only fail verification for units likely to impact updates/networking.
-            if echo "$FAILED_UNITS_AFTER" | grep -qE '(zypper|zypp|NetworkManager|wicked|systemd-networkd|wpa_supplicant)'; then
+            verify_classify_failed_units "${FAILED_UNITS_AFTER}"
+            failed_after_critical_count=$(verify_count_units "${VERIFY_FAILED_UNITS_CRITICAL:-}")
+            failed_after_noise_count=$(verify_count_units "${VERIFY_FAILED_UNITS_NOISE:-}")
+            failed_after_actionable_units="$(verify_actionable_failed_units)"
+            failed_after_actionable_count=$(verify_count_units "${failed_after_actionable_units:-}")
+
+            if [ "${failed_after_actionable_count}" -eq 0 ] 2>/dev/null; then
+                log_success "  ✓ Only low-priority/noise failed units remain after reset"
+                if [ "${failed_after_noise_count}" -gt 0 ] 2>/dev/null; then
+                    log_info "  → Remaining suppressed units: $(verify_units_inline "${VERIFY_FAILED_UNITS_NOISE}")"
+                fi
+            else
+                log_warn "  ⚠ Actionable failed units still present after reset: $(verify_units_inline "${failed_after_actionable_units}")"
+            fi
+
+            if [ "${failed_after_critical_count}" -gt 0 ] 2>/dev/null; then
+                log_error "  ✗ Critical failed units still present after reset: $(verify_units_inline "${VERIFY_FAILED_UNITS_CRITICAL}")"
                 VERIFICATION_FAILED=1
             fi
         fi
@@ -35617,16 +35798,53 @@ fi
 log_debug "[46/${TOTAL_CHECKS}] Checking overall systemd health (is-system-running)..."
 sys_state=$(systemctl is-system-running 2>/dev/null || echo "unknown")
 if printf '%s' "${sys_state}" | grep -qE '^(running|degraded)$'; then
-    failed_units=$(systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}' | sed '/^$/d' || true)
+    failed_units=$(verify_collect_failed_units)
 
     if [ -n "${failed_units:-}" ]; then
-        log_warn "⚠ Systemd state is '${sys_state}'. Failed unit(s) detected:"
-        printf '%s\n' "${failed_units}" | sed 's/^/  - /' | tee -a "${LOG_FILE}"
+        verify_classify_failed_units "${failed_units}"
+        final_critical_count=$(verify_count_units "${VERIFY_FAILED_UNITS_CRITICAL:-}")
+        final_review_count=$(verify_count_units "${VERIFY_FAILED_UNITS_REVIEW:-}")
+        final_noise_count=$(verify_count_units "${VERIFY_FAILED_UNITS_NOISE:-}")
+        final_actionable_units="$(verify_actionable_failed_units)"
+        final_actionable_count=$(verify_count_units "${final_actionable_units:-}")
+
+        if [ "${final_actionable_count}" -gt 0 ] 2>/dev/null; then
+            log_warn "⚠ Systemd state is '${sys_state}'. Actionable failed unit(s) detected (critical=${final_critical_count}, review=${final_review_count}, noise-suppressed=${final_noise_count})"
+            log_warn "  → Actionable units: $(verify_units_inline "${final_actionable_units}")"
+            if [ "${final_noise_count}" -gt 0 ] 2>/dev/null; then
+                log_info "  → Suppressed low-priority/noise units: $(verify_units_inline "${VERIFY_FAILED_UNITS_NOISE}")"
+            fi
+        else
+            log_info "ℹ Systemd state is '${sys_state}' with only low-priority/noise failed units (suppressed): $(verify_units_inline "${VERIFY_FAILED_UNITS_NOISE}")"
+        fi
 
         log_info "  → Auto-repair: resetting failed unit states (best-effort)..."
         if execute_guarded "Reset failed systemd units (final health)" systemctl reset-failed; then
             REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
-            log_success "  ✓ Failed unit states cleared (monitor if they fail again)"
+            failed_units_after=$(verify_collect_failed_units)
+            if [ -z "${failed_units_after:-}" ]; then
+                log_success "  ✓ Failed unit states cleared"
+            else
+                verify_classify_failed_units "${failed_units_after}"
+                final_after_critical_count=$(verify_count_units "${VERIFY_FAILED_UNITS_CRITICAL:-}")
+                final_after_noise_count=$(verify_count_units "${VERIFY_FAILED_UNITS_NOISE:-}")
+                final_after_actionable_units="$(verify_actionable_failed_units)"
+                final_after_actionable_count=$(verify_count_units "${final_after_actionable_units:-}")
+
+                if [ "${final_after_actionable_count}" -gt 0 ] 2>/dev/null; then
+                    log_warn "  ⚠ Actionable failed units still present after final reset: $(verify_units_inline "${final_after_actionable_units}")"
+                else
+                    log_info "  → Remaining failed units are low-priority/noise: $(verify_units_inline "${VERIFY_FAILED_UNITS_NOISE}")"
+                    if [ "${final_after_noise_count}" -eq 0 ] 2>/dev/null; then
+                        log_success "  ✓ Final failed-unit state is low-noise and non-actionable"
+                    fi
+                fi
+
+                if [ "${final_after_critical_count}" -gt 0 ] 2>/dev/null; then
+                    log_error "  ✗ Critical failed units remain in final health check: $(verify_units_inline "${VERIFY_FAILED_UNITS_CRITICAL}")"
+                    VERIFICATION_FAILED=1
+                fi
+            fi
         else
             log_warn "  ⚠ Failed to reset failed unit states"
         fi
@@ -52299,7 +52517,9 @@ HELPER_BIN = "/usr/local/bin/zypper-auto-helper"
 SELF_UPDATE_STATE_FILE = "/var/lib/zypper-auto/self-update-state.json"
 
 # --- System update helpers (Rocket Update Wizard) ---
+PM_RUNTIME_HELPER = "/usr/local/lib/zypper-auto/package-manager-runtime.sh"
 ZYPPER_BIN = "/usr/bin/zypper"
+SUPPORTED_PACKAGE_MANAGERS = {"zypper", "apt", "dnf", "pacman"}
 
 # Keep the dashboard's cached dry-run output in sync with the Rocket Wizard preview.
 # This file is consumed by:
@@ -52321,31 +52541,210 @@ def _write_atomic_text(path: str, text: str, *, mode: int = 0o644) -> None:
         pass
     os.replace(tmp, path)
 
+def _normalize_pm(pm: str | None) -> str:
+    raw = str(pm or "").strip().lower()
+    if raw not in SUPPORTED_PACKAGE_MANAGERS:
+        return "zypper"
+    return raw
 
-def _reboot_required() -> bool:
-    # Prefer zypper's own hint when available.
+
+def _command_exists(name: str) -> bool:
     try:
-        p = subprocess.run(
-            [ZYPPER_BIN, "needs-reboot"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=8,
-        )
-        # On openSUSE, rc=1 means reboot needed, rc=0 means no reboot.
-        if int(p.returncode) == 1:
-            return True
-        if int(p.returncode) == 0:
-            return False
+        return bool(shutil.which(str(name or "").strip()))
+    except Exception:
+        return False
+
+
+def _detect_system_package_manager() -> str:
+    # Prefer the shared runtime helper so Rocket follows the same detection path
+    # as downloader/notifier/install flows.
+    try:
+        if os.path.isfile(PM_RUNTIME_HELPER):
+            p = subprocess.run(
+                [PM_RUNTIME_HELPER, "--query", "package-manager"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=8,
+            )
+            if int(p.returncode) == 0:
+                pm = _normalize_pm((p.stdout or "").strip())
+                if pm in SUPPORTED_PACKAGE_MANAGERS:
+                    return pm
     except Exception:
         pass
 
-    # Fallback marker files used by various tools.
+    # Fallback when helper is missing/corrupt.
+    os_id = ""
+    os_like = ""
+    try:
+        with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+        for raw in (txt or "").splitlines():
+            line = str(raw or "").strip()
+            if line.startswith("ID="):
+                os_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+            elif line.startswith("ID_LIKE="):
+                os_like = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+    except Exception:
+        os_id = ""
+        os_like = ""
+
+    if os_id.startswith("opensuse") or os_id in ("sles", "sled"):
+        return "zypper"
+    if os_id in ("ubuntu", "debian", "linuxmint", "pop", "elementary", "neon", "kali", "raspbian"):
+        return "apt"
+    if os_id in ("fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"):
+        return "dnf"
+    if os_id in ("arch", "manjaro", "endeavouros", "garuda"):
+        return "pacman"
+
+    if "suse" in os_like:
+        return "zypper"
+    if "debian" in os_like:
+        return "apt"
+    if "rhel" in os_like or "fedora" in os_like:
+        return "dnf"
+    if "arch" in os_like:
+        return "pacman"
+
+    if _command_exists("zypper"):
+        return "zypper"
+    if _command_exists("dnf"):
+        return "dnf"
+    if _command_exists("apt-get"):
+        return "apt"
+    if _command_exists("pacman"):
+        return "pacman"
+
+    return "zypper"
+
+
+def _rocket_preview_command(pm: str, extra_flags: list[str] | None = None) -> list[str]:
+    manager = _normalize_pm(pm)
+    flags = [str(x) for x in (extra_flags or []) if str(x).strip()]
+    if manager == "zypper":
+        return [ZYPPER_BIN, "--non-interactive", "dup", "--dry-run", "--details"] + flags
+    if manager == "apt":
+        return ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-s", "dist-upgrade"]
+    if manager == "dnf":
+        return ["dnf", "-q", "check-update"]
+    if manager == "pacman":
+        return ["pacman", "-Qu"]
+    return [ZYPPER_BIN, "--non-interactive", "dup", "--dry-run", "--details"] + flags
+
+
+def _rocket_update_command_argv(pm: str, *, simulate: bool, use_xmlout: bool, extra_flags: list[str] | None = None) -> list[str]:
+    manager = _normalize_pm(pm)
+    flags = [str(x) for x in (extra_flags or []) if str(x).strip()]
+    if manager == "zypper":
+        argv = [ZYPPER_BIN, "--non-interactive"]
+        if use_xmlout:
+            argv.append("--xmlout")
+        argv.extend(["dup", "--dry-run", "--details"] if simulate else ["dup", "-y", "--details"])
+        argv.extend(flags)
+        return argv
+    if manager == "apt":
+        return ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-s", "dist-upgrade"] if simulate else ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "dist-upgrade"]
+    if manager == "dnf":
+        return ["dnf", "-q", "check-update"] if simulate else ["dnf", "-y", "upgrade"]
+    if manager == "pacman":
+        return ["pacman", "-Qu"] if simulate else ["pacman", "-Syu", "--noconfirm"]
+    return _rocket_update_command_argv("zypper", simulate=simulate, use_xmlout=use_xmlout, extra_flags=flags)
+
+
+def _rocket_preview_rc_ok(pm: str, rc: int) -> bool:
+    manager = _normalize_pm(pm)
+    if int(rc) == 0:
+        return True
+    if manager == "dnf" and int(rc) == 100:
+        return True
+    if manager == "pacman" and int(rc) == 1:
+        return True
+    return False
+
+
+def _pid_is_alive(pid: str) -> bool:
+    try:
+        if not re.fullmatch(r"[0-9]+", str(pid or "")):
+            return False
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def _first_pid_from_pgrep(names: list[str]) -> str:
+    for nm in (names or []):
+        name = str(nm or "").strip()
+        if not name:
+            continue
+        try:
+            p = subprocess.run(
+                ["pgrep", "-x", name],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=2,
+            )
+            if int(p.returncode) != 0:
+                continue
+            first = ((p.stdout or "").splitlines() or [""])[0].strip()
+            if re.fullmatch(r"[0-9]+", first or ""):
+                return first
+        except Exception:
+            continue
+    return ""
+
+
+def _reboot_required(pm: str = "zypper") -> bool:
+    manager = _normalize_pm(pm)
+
+    if manager == "zypper":
+        # On openSUSE: rc=1 means reboot needed, rc=0 means no reboot.
+        try:
+            p = subprocess.run(
+                [ZYPPER_BIN, "needs-reboot"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            if int(p.returncode) == 1:
+                return True
+            if int(p.returncode) == 0:
+                return False
+        except Exception:
+            pass
+    elif manager == "dnf" and _command_exists("needs-restarting"):
+        try:
+            p = subprocess.run(
+                ["needs-restarting", "-r"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            # dnf-utils/libdnf returns non-zero when reboot is recommended.
+            if int(p.returncode) != 0:
+                return True
+            return False
+        except Exception:
+            pass
+
+    # Generic fallback marker files used by apt/dnf/pacman tools.
     for f in (
         "/run/reboot-needed",
         "/var/run/reboot-needed",
         "/run/reboot-required",
         "/var/run/reboot-required",
+        "/var/run/reboot-required.pkgs",
     ):
         try:
             if os.path.exists(f):
@@ -52355,97 +52754,167 @@ def _reboot_required() -> bool:
 
     return False
 
-def _zypp_lock_info() -> tuple[str, str, bool]:
-    """Return (lock_file, pid, active)."""
+
+def _zypp_lock_info(pm: str = "zypper") -> tuple[str, str, bool]:
+    """Return (lock_file, pid, active) for the selected package manager."""
+    manager = _normalize_pm(pm)
     lock_file = ""
     pid = ""
-
-    try:
-        if os.path.exists("/run/zypp.pid"):
-            lock_file = "/run/zypp.pid"
-        elif os.path.exists("/var/run/zypp.pid"):
-            lock_file = "/var/run/zypp.pid"
-    except Exception:
-        lock_file = ""
-
-    if not lock_file:
-        return "", "", False
-
-    try:
-        with open(lock_file, "r", encoding="utf-8", errors="replace") as f:
-            pid = (f.read() or "").strip()
-    except Exception:
-        pid = ""
-
-    # Active if PID exists and is alive, OR if any zypper process exists.
     active = False
-    try:
-        if pid and re.fullmatch(r"[0-9]+", pid or ""):
-            p = subprocess.run(["/usr/bin/kill", "-0", pid], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if p.returncode == 0:
-                active = True
-    except Exception:
-        pass
 
-    if not active:
+    if manager == "zypper":
         try:
-            p2 = subprocess.run(["/usr/bin/pgrep", "-x", "zypper"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if p2.returncode == 0:
-                active = True
+            if os.path.exists("/run/zypp.pid"):
+                lock_file = "/run/zypp.pid"
+            elif os.path.exists("/var/run/zypp.pid"):
+                lock_file = "/var/run/zypp.pid"
         except Exception:
-            pass
+            lock_file = ""
+        if lock_file:
+            try:
+                with open(lock_file, "r", encoding="utf-8", errors="replace") as f:
+                    pid = (f.read() or "").strip()
+            except Exception:
+                pid = ""
+        if _pid_is_alive(pid):
+            active = True
+        else:
+            pid2 = _first_pid_from_pgrep(["zypper"])
+            if pid2:
+                pid = pid2
+                active = True
+        return lock_file, pid, bool(active)
 
-    return lock_file, pid, bool(active)
+    if manager == "apt":
+        for lf in ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock", "/var/cache/apt/archives/lock"):
+            try:
+                if os.path.exists(lf):
+                    lock_file = lf
+                    break
+            except Exception:
+                continue
+        pid = _first_pid_from_pgrep(["apt", "apt-get", "aptitude", "dpkg", "unattended-upgrade"])
+        active = bool(pid)
+        return lock_file, pid, bool(active)
+
+    if manager == "dnf":
+        for lf in ("/run/dnf.pid", "/var/run/dnf.pid", "/var/cache/dnf/metadata_lock.pid"):
+            try:
+                if os.path.exists(lf):
+                    lock_file = lf
+                    break
+            except Exception:
+                continue
+        if lock_file:
+            try:
+                with open(lock_file, "r", encoding="utf-8", errors="replace") as f:
+                    pid = (f.read() or "").strip()
+            except Exception:
+                pid = ""
+        if _pid_is_alive(pid):
+            active = True
+        else:
+            pid2 = _first_pid_from_pgrep(["dnf", "yum", "rpm"])
+            if pid2:
+                pid = pid2
+                active = True
+        return lock_file, pid, bool(active)
+
+    if manager == "pacman":
+        try:
+            if os.path.exists("/var/lib/pacman/db.lck"):
+                lock_file = "/var/lib/pacman/db.lck"
+        except Exception:
+            lock_file = ""
+        pid = _first_pid_from_pgrep(["pacman", "makepkg"])
+        active = bool(lock_file and pid)
+        return lock_file, pid, bool(active)
+
+    return "", "", False
 
 
-def _wait_for_zypp_lock(max_wait_s: int, *, step_s: float = 5.0) -> tuple[int, str, str, bool]:
-    """Wait for zypp lock up to max_wait_s. Returns (waited_s, lock_file, pid, timed_out)."""
+def _wait_for_zypp_lock(max_wait_s: int, *, step_s: float = 5.0, pm: str = "zypper") -> tuple[int, str, str, bool]:
+    """Wait for package-manager lock up to max_wait_s. Returns (waited_s, lock_file, pid, timed_out)."""
     waited = 0
     timed_out = False
+    manager = _normalize_pm(pm)
+    wait_limit = int(max(0, max_wait_s))
+    step = int(step_s) if int(step_s) > 0 else 1
 
-    while waited < int(max_wait_s):
-        lf, pid, active = _zypp_lock_info()
+    while waited < wait_limit:
+        lf, pid, active = _zypp_lock_info(manager)
         if not active:
             return waited, lf, pid, False
-        time.sleep(step_s)
-        waited += int(step_s)
+        time.sleep(step)
+        waited += step
 
-    lf, pid, active = _zypp_lock_info()
+    lf, pid, active = _zypp_lock_info(manager)
     if active:
         timed_out = True
     return waited, lf, pid, bool(timed_out)
 
 
-def _detect_solver_conflict(text: str, rc: int) -> tuple[bool, str]:
-    """Best-effort solver conflict detection for zypper output."""
-    if rc == 0:
+def _detect_solver_conflict(text: str, rc: int, pm: str = "zypper") -> tuple[bool, str]:
+    """Best-effort dependency/solver conflict detection across package managers."""
+    if int(rc) == 0:
         return False, ""
 
+    manager = _normalize_pm(pm)
     t = (text or "")
     low = t.lower()
 
-    # Common patterns for libzypp/zypper solver problems.
     markers = [
-        "problem:",
-        "solverrun solutions:",
-        "choose from above solutions",
-        "choose from above solutions by number",
         "nothing provides",
         "conflict",
-        "package requires",
         "unresolvable",
-        "found incompatible",
         "requires:",
+        "dependency",
     ]
+    if manager == "zypper":
+        markers.extend([
+            "problem:",
+            "solverrun solutions:",
+            "choose from above solutions",
+            "choose from above solutions by number",
+            "found incompatible",
+        ])
+    elif manager == "apt":
+        markers.extend([
+            "unmet dependencies",
+            "held broken packages",
+            "depends:",
+            "unable to correct problems",
+        ])
+    elif manager == "dnf":
+        markers.extend([
+            "conflicting requests",
+            "transaction test error",
+            "problem:",
+        ])
+    elif manager == "pacman":
+        markers.extend([
+            "failed to prepare transaction",
+            "failed to commit transaction",
+            "conflicting dependencies",
+            "unresolvable package conflicts",
+        ])
 
     if not any(m in low for m in markers):
         return False, ""
 
-    # Try to extract a short, readable summary block.
     lines = t.splitlines()
     start = 0
+    starts = (
+        "problem:",
+        "error:",
+        "unmet dependencies",
+        "conflicting requests",
+        "failed to prepare transaction",
+        "unable to correct problems",
+    )
     for i, ln in enumerate(lines):
-        if "problem:" in (ln or "").lower():
+        l2 = (ln or "").lower()
+        if any(s in l2 for s in starts):
             start = i
             break
     snippet = "\n".join(lines[start:start + 30]).strip()
@@ -53491,7 +53960,7 @@ def _recover_scrub_job(job_id: str) -> dict | None:
         "rc": rc,
         "stage": stage,
         "progress": int(progress),
-        "output": tail,
+        "output": full_txt,
         "output_truncated": bool(truncated),
         "resumed": True,
         "unit": unit,
@@ -54847,6 +55316,7 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
     sub = props.get("SubState", "")
 
     status = _read_kv_status(status_path) if os.path.exists(status_path) else {}
+    pm_name = _normalize_pm(str(status.get("package_manager", "zypper") or "zypper"))
 
     done = False
     rc = None
@@ -54883,6 +55353,21 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
 
     tail, truncated = _tail_file(log_path, JOB_OUTPUT_TAIL_CHARS) if os.path.exists(log_path) else ("", False)
 
+    # Backward-compatible fallback for older status files that did not persist package_manager.
+    try:
+        if not str(status.get("package_manager", "") or "").strip():
+            low_tail = (tail or "").lower()
+            if "debian_frontend=noninteractive apt-get" in low_tail or " apt-get " in f" {low_tail} ":
+                pm_name = "apt"
+            elif " dnf " in f" {low_tail} " or "dnf -q check-update" in low_tail:
+                pm_name = "dnf"
+            elif " pacman " in f" {low_tail} " or "pacman -qu" in low_tail:
+                pm_name = "pacman"
+            else:
+                pm_name = "zypper"
+    except Exception:
+        pm_name = _normalize_pm(pm_name)
+
     # Best-effort progress from available output
     jtmp = {
         "stage": status.get("stage") or ("Running" if active == "active" else "Starting"),
@@ -54890,7 +55375,7 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
     }
     try:
         for ln in (tail or "").splitlines(True):
-            _job_update_progress_dup(jtmp, ln)
+            _job_update_progress_dup(jtmp, ln, pm=pm_name)
     except Exception:
         pass
 
@@ -54907,27 +55392,41 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
     # Restart check section (best-effort from tail)
     restart_out = ""
     try:
-        marker = "=== ZYPPER PS -s (restart check) ==="
-        if marker in (tail or ""):
-            restart_out = (tail.split(marker, 1)[1] or "").strip()
+        markers = (
+            "=== RESTART CHECK (zypper ps -s) ===",
+            "=== RESTART CHECK (needs-restarting -s) ===",
+            "=== RESTART CHECK (reboot-required markers) ===",
+            "=== RESTART CHECK (pacman marker scan) ===",
+            "=== ZYPPER PS -s (restart check) ===",
+            "=== RESTART CHECK ===",
+        )
+        marker_idx = -1
+        marker_used = ""
+        for mk in markers:
+            idx = (tail or "").rfind(mk)
+            if idx > marker_idx:
+                marker_idx = idx
+                marker_used = mk
+        if marker_idx >= 0 and marker_used:
+            restart_out = ((tail or "")[marker_idx + len(marker_used):] or "").strip()
             if len(restart_out) > 60_000:
                 restart_out = restart_out[-60_000:]
     except Exception:
         restart_out = ""
-
-    tail_pretty = _zypper_xml_pretty(tail)
+    tail_pretty = _zypper_xml_pretty(tail) if pm_name == "zypper" else tail
 
     conflict_detected = False
     conflict_summary = ""
     try:
         if rc is not None:
-            conflict_detected, conflict_summary = _detect_solver_conflict(tail_pretty, int(rc))
+            conflict_detected, conflict_summary = _detect_solver_conflict(tail_pretty, int(rc), pm=pm_name)
     except Exception:
         conflict_detected, conflict_summary = False, ""
 
     return {
         "job_id": jid,
         "type": "system-dup",
+        "package_manager": pm_name,
         "simulate": bool(str(status.get("simulate", "0")).strip() in ("1", "true", "yes")),
         "running": bool(running),
         "done": bool(done),
@@ -55243,14 +55742,11 @@ def _job_update_progress(job: dict, line: str) -> None:
     job["progress"] = prog
 
 
-def _job_update_progress_dup(job: dict, line: str) -> None:
-    """Best-effort progress estimation for system updates (zypper dup).
-
-    This is heuristic: zypper output varies by version/locale.
-    If zypper is run with --xmlout, we also attempt to parse percent progress.
-    """
+def _job_update_progress_dup(job: dict, line: str, pm: str = "zypper") -> None:
+    """Best-effort progress estimation for Rocket system updates across package managers."""
     raw = (line or "")
     l = raw.lower()
+    manager = _normalize_pm(pm)
     stage = job.get("stage") or "Starting"
     prog = int(job.get("progress") or 0)
 
@@ -55259,9 +55755,17 @@ def _job_update_progress_dup(job: dict, line: str) -> None:
         if p > prog:
             prog = p
         stage = st
+
+    running_label = f"Running {manager}"
+    if manager == "zypper":
+        running_label = "Running zypper"
+
     if "[webui] stage: waiting-for-lock" in l:
         bump(5, "Waiting for lock")
+    elif "[webui] stage: running-package-manager" in l:
+        bump(18, running_label)
     elif "[webui] stage: running-zypper" in l:
+        # Backward compatibility for older Rocket stages.
         bump(18, "Running zypper")
     elif "[webui] stage: optional-updates" in l:
         bump(86, "Optional updates")
@@ -55273,13 +55777,19 @@ def _job_update_progress_dup(job: dict, line: str) -> None:
         bump(99, "Finalizing")
 
     # Lock wait UX
-    if "zypp" in l and "lock" in l and "wait" in l:
-        bump(5, "Waiting for lock")
+    if "lock" in l and ("wait" in l or "held" in l):
+        if manager == "zypper" and ("zypp" in l or "zypper" in l):
+            bump(5, "Waiting for lock")
+        elif manager == "apt" and ("apt" in l or "dpkg" in l):
+            bump(5, "Waiting for lock")
+        elif manager == "dnf" and ("dnf" in l or "yum" in l):
+            bump(5, "Waiting for lock")
+        elif manager == "pacman" and "pacman" in l:
+            bump(5, "Waiting for lock")
 
     # XML progress parsing (zypper --xmlout)
-    # Example patterns vary, but many include percent="NN".
     try:
-        if "<progress" in l and "percent=\"" in l:
+        if manager == "zypper" and "<progress" in l and "percent=\"" in l:
             m = re.search(r"percent=\"([0-9]{1,3})\"", raw)
             if m:
                 p = int(m.group(1))
@@ -55293,19 +55803,25 @@ def _job_update_progress_dup(job: dict, line: str) -> None:
 
     if "dry run" in l or "dry-run" in l:
         bump(10, "Dry-run")
+    elif manager == "apt" and ("reading package lists" in l or "building dependency tree" in l or "calculating upgrade" in l):
+        bump(18, "Computing")
+    elif manager == "dnf" and ("metadata expiration check" in l or "dependencies resolved" in l):
+        bump(28, "Computing")
+    elif manager == "pacman" and ("synchronizing package databases" in l or "resolving dependencies" in l):
+        bump(20, "Refreshing")
     elif "loading repository data" in l or "retrieving" in l or "refreshing" in l:
         bump(15, "Refreshing")
     elif "computing distribution upgrade" in l or "computing" in l:
         bump(28, "Computing")
-    elif "overall download size" in l or "downloading" in l or "download" in l:
+    elif "overall download size" in l or "downloading" in l or "download" in l or "get:" in l:
         bump(60, "Downloading")
-    elif "installing" in l:
+    elif "installing" in l or "upgrading" in l or "transaction test succeeded" in l or "running transaction" in l:
         bump(78, "Installing")
-    elif "removing" in l:
+    elif "removing" in l or "erasing" in l:
         bump(82, "Removing")
     elif "committing" in l or "verifying" in l:
         bump(88, "Committing")
-    elif "restart check" in l or "zypper ps" in l:
+    elif "restart check" in l or "zypper ps" in l or "needs-restarting" in l or "reboot required marker" in l:
         bump(96, "Restart check")
     elif "done" in l or "complete" in l or "finished" in l:
         bump(100, "Done")
@@ -55522,6 +56038,16 @@ class Handler(BaseHTTPRequestHandler):
                     return "Waiting for lock"
                 return raw
 
+            def _status_package_manager(default_pm: str = "zypper") -> str:
+                pm0 = _normalize_pm(default_pm)
+                try:
+                    if job_type == "system-dup" and os.path.exists(status_path):
+                        st = _read_kv_status(status_path)
+                        pm0 = _normalize_pm(str(st.get("package_manager", pm0) or pm0))
+                except Exception:
+                    pass
+                return pm0
+
             # Best-effort initial tail
             try:
                 max_tail = JOB_OUTPUT_TAIL_CHARS
@@ -55554,6 +56080,9 @@ class Handler(BaseHTTPRequestHandler):
             # Track stage/progress across streamed chunks.
             stg = "Starting"
             pct = 0
+            pm_stream = "zypper"
+            if job_type == "system-dup":
+                pm_stream = _status_package_manager("zypper")
             try:
                 # Prefer status-based stage immediately.
                 done0, rc0, stage0 = _status_done_rc()
@@ -55580,7 +56109,7 @@ class Handler(BaseHTTPRequestHandler):
                 jtmp = {"stage": stg, "progress": int(pct)}
                 if job_type == "system-dup":
                     for ln in (tail_txt or "").splitlines(True):
-                        _job_update_progress_dup(jtmp, ln)
+                        _job_update_progress_dup(jtmp, ln, pm=pm_stream)
                 elif job_type == "self-update":
                     for ln in (tail_txt or "").splitlines(True):
                         _job_update_progress(jtmp, ln)
@@ -55602,7 +56131,7 @@ class Handler(BaseHTTPRequestHandler):
             # Pretty-print zypper --xmlout stream for Rocket/system-dup.
             tail_send = tail_txt
             try:
-                if job_type == "system-dup":
+                if job_type == "system-dup" and pm_stream == "zypper":
                     tail_send = _zypper_xml_pretty(tail_txt)
             except Exception:
                 tail_send = tail_txt
@@ -55616,6 +56145,7 @@ class Handler(BaseHTTPRequestHandler):
                     "unit": unit,
                     "log_path": log_path,
                     "status_path": status_path,
+                    "package_manager": pm_stream if job_type == "system-dup" else "",
                     "stage": stg,
                     "progress": int(pct),
                     "running": True,
@@ -55668,10 +56198,12 @@ class Handler(BaseHTTPRequestHandler):
                 if chunk:
                     # Progress parsing (use raw chunk for xml percent parsing).
                     try:
+                        if job_type == "system-dup":
+                            pm_stream = _status_package_manager(pm_stream)
                         jtmp2 = {"stage": stg, "progress": int(pct)}
                         if job_type == "system-dup":
                             for ln in chunk.splitlines(True):
-                                _job_update_progress_dup(jtmp2, ln)
+                                _job_update_progress_dup(jtmp2, ln, pm=pm_stream)
                         elif job_type == "self-update":
                             for ln in chunk.splitlines(True):
                                 _job_update_progress(jtmp2, ln)
@@ -55706,7 +56238,7 @@ class Handler(BaseHTTPRequestHandler):
 
                     send_txt = chunk
                     try:
-                        if job_type == "system-dup":
+                        if job_type == "system-dup" and pm_stream == "zypper":
                             send_txt = _zypper_xml_pretty(chunk)
                     except Exception:
                         send_txt = chunk
@@ -55717,6 +56249,7 @@ class Handler(BaseHTTPRequestHandler):
                             "ts": time.time(),
                             "job_type": job_type,
                             "job_id": job_id,
+                            "package_manager": pm_stream if job_type == "system-dup" else "",
                             "stage": stg,
                             "progress": int(pct),
                             "done": False,
@@ -55729,6 +56262,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Done?
                 done, rc, stage_s = _status_done_rc()
                 if done:
+                    if job_type == "system-dup":
+                        pm_stream = _status_package_manager(pm_stream)
                     st_done = "Done" if (rc == 0) else "Failed"
                     if stage_s:
                         st_done = _normalize_stage(stage_s)
@@ -55743,6 +56278,7 @@ class Handler(BaseHTTPRequestHandler):
                             "ts": time.time(),
                             "job_type": job_type,
                             "job_id": job_id,
+                            "package_manager": pm_stream if job_type == "system-dup" else "",
                             "stage": st_done,
                             "progress": 100,
                             "running": False,
@@ -57012,6 +57548,7 @@ class Handler(BaseHTTPRequestHandler):
         # --- System update (Rocket) preview ---
         if path == "/api/system/dup/preview":
             eff, _warnings, _invalid = _read_conf(self.server.conf_path)
+            pm_name = _detect_system_package_manager()
             extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
 
             # Rocket-specific vendor policy (does not affect background downloader/notifier).
@@ -57020,10 +57557,9 @@ class Handler(BaseHTTPRequestHandler):
                 allow_vendor_change = str(eff.get("ROCKET_WIZARD_ALLOW_VENDOR_CHANGE", "false") or "false").strip().lower() == "true"
             except Exception:
                 allow_vendor_change = False
-            if allow_vendor_change and "--allow-vendor-change" not in extra_flags:
+            if pm_name == "zypper" and allow_vendor_change and "--allow-vendor-change" not in extra_flags:
                 extra_flags = ["--allow-vendor-change"] + list(extra_flags)
-
-            # Better lock handling: if zypper/YaST is running, wait a bit instead of failing instantly.
+            # Better lock handling: if package manager lock is active, wait a bit instead of failing instantly.
             # Controlled via /etc/zypper-auto.conf (and WebUI Settings).
             lock_wait_s = 180
             try:
@@ -57038,19 +57574,24 @@ class Handler(BaseHTTPRequestHandler):
             if lock_wait_s <= 0:
                 waited_s, lock_file, lock_pid, timed_out = 0, "", "", False
             else:
-                waited_s, lock_file, lock_pid, timed_out = _wait_for_zypp_lock(float(lock_wait_s), step_s=5.0)
+                waited_s, lock_file, lock_pid, timed_out = _wait_for_zypp_lock(float(lock_wait_s), step_s=5.0, pm=pm_name)
             preface = ""
             if waited_s > 0:
                 who = f"pid={lock_pid}" if lock_pid else "(unknown pid)"
-                preface = f"[webui] Waiting for zypp lock: {lock_file} {who} (waited {waited_s}s)\n"
+                preface = f"[webui] Waiting for {pm_name} lock: {lock_file or '(no lock file)'} {who} (waited {waited_s}s)\n"
             if timed_out:
-                msg = preface + "[webui] ERROR: zypp lock still active. Please close YaST/zypper and try again.\n"
+                msg = preface + f"[webui] ERROR: {pm_name} lock still active. Close any running package-manager process and try again.\n"
                 return _json_response(self, 200, {
                     "ok": False,
                     "rc": 1,
                     "output": msg,
-                    "cmd": "(preview blocked by zypp lock)",
+                    "cmd": f"(preview blocked by {pm_name} lock)",
+                    "package_manager": pm_name,
                     "used_systemd_run": True,
+                    "pm_lock_waited_seconds": waited_s,
+                    "pm_lock_file": lock_file,
+                    "pm_lock_pid": lock_pid,
+                    "pm_lock_timed_out": True,
                     "zypp_lock_waited_seconds": waited_s,
                     "zypp_lock_file": lock_file,
                     "zypp_lock_pid": lock_pid,
@@ -57058,10 +57599,9 @@ class Handler(BaseHTTPRequestHandler):
                     "conflict_detected": False,
                     "conflict_summary": "",
                 }, origin)
+            cmd = _rocket_preview_command(pm_name, extra_flags)
 
-            cmd = [ZYPPER_BIN, "--non-interactive", "dup", "--dry-run", "--details"] + extra_flags
-
-            # Prefer running via systemd-run so the zypper process is not confined
+            # Prefer running via systemd-run so the package-manager process is not confined
             # by this API service's sandbox (ProtectSystem=strict).
             unit = f"znh-webui-dup-preview-{secrets.token_hex(4)}"
             sys_cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "--"] + cmd
@@ -57108,14 +57648,15 @@ class Handler(BaseHTTPRequestHandler):
                 # Fallback: run directly (may fail under sandbox, but still best-effort).
                 used_systemd_run = False
                 rc, out = _run_cmd(cmd, timeout_s=240, log=getattr(self.server, "_znh_log", None))
-
-            out_zypper = out or ""
-            out_full = (preface or "") + out_zypper
-            conflict_detected, conflict_summary = _detect_solver_conflict(out_full, rc)
+            out_pm = out or ""
+            raw_rc = int(rc)
+            effective_rc = 0 if _rocket_preview_rc_ok(pm_name, raw_rc) else raw_rc
+            out_full = (preface or "") + out_pm
+            conflict_detected, conflict_summary = _detect_solver_conflict(out_full, effective_rc, pm=pm_name)
 
             reboot_required = False
             try:
-                reboot_required = bool(_reboot_required())
+                reboot_required = bool(_reboot_required(pm_name))
             except Exception:
                 reboot_required = False
 
@@ -57123,23 +57664,28 @@ class Handler(BaseHTTPRequestHandler):
             # Only update the cache on successful previews.
             cache_updated = False
             try:
-                if rc == 0:
-                    _write_atomic_text(DRYRUN_OUTPUT_FILE, out_zypper)
+                if effective_rc == 0:
+                    _write_atomic_text(DRYRUN_OUTPUT_FILE, out_pm)
                     cache_updated = True
             except Exception as e:
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Could not persist dry-run cache: {e}")
                 except Exception:
                     pass
-
-            # IMPORTANT: Always return HTTP 200 so the WebUI can display the full zypper output,
-            # even when zypper returns a non-zero rc (lock/conflict/manual decision/etc.).
+            # IMPORTANT: Always return HTTP 200 so the WebUI can display full package-manager output,
+            # even when command execution returns non-zero rc (lock/conflict/manual decision/etc.).
             return _json_response(self, 200, {
-                "ok": (rc == 0),
-                "rc": rc,
+                "ok": (effective_rc == 0),
+                "rc": effective_rc,
+                "raw_rc": raw_rc,
                 "output": out_full,
                 "cmd": " ".join(cmd),
+                "package_manager": pm_name,
                 "used_systemd_run": used_systemd_run,
+                "pm_lock_waited_seconds": waited_s,
+                "pm_lock_file": lock_file,
+                "pm_lock_pid": lock_pid,
+                "pm_lock_timed_out": False,
                 "zypp_lock_waited_seconds": waited_s,
                 "zypp_lock_file": lock_file,
                 "zypp_lock_pid": lock_pid,
@@ -57196,10 +57742,12 @@ class Handler(BaseHTTPRequestHandler):
 
                         out = str(job.get("output", ""))
                         tail_raw = out
-                        tail = _zypper_xml_pretty(tail_raw)
+                        pm_job = _normalize_pm(str(job.get("package_manager", "zypper") or "zypper"))
+                        tail = _zypper_xml_pretty(tail_raw) if pm_job == "zypper" else tail_raw
                         return _json_response(self, 200, {
                             "job_id": job_id,
                             "type": job.get("type"),
+                            "package_manager": pm_job,
                             "simulate": bool(job.get("simulate")),
                             "running": bool(job.get("running")),
                             "done": bool(job.get("done")),
@@ -57232,10 +57780,12 @@ class Handler(BaseHTTPRequestHandler):
 
                     out = str(job.get("output", ""))
                     tail_raw = out
-                    tail = _zypper_xml_pretty(tail_raw)
+                    pm_job = _normalize_pm(str(job.get("package_manager", "zypper") or "zypper"))
+                    tail = _zypper_xml_pretty(tail_raw) if pm_job == "zypper" else tail_raw
                     return _json_response(self, 200, {
                         "job_id": job_id,
                         "type": job.get("type"),
+                        "package_manager": pm_job,
                         "simulate": bool(job.get("simulate")),
                         "running": bool(job.get("running")),
                         "done": bool(job.get("done")),
@@ -59465,7 +60015,7 @@ class Handler(BaseHTTPRequestHandler):
                 "confirm_token": token,
                 "expires_in_seconds": 120,
                 "phrase": "INSTALL",
-                "hint": "Type INSTALL to confirm installing system updates (runs zypper dup).",
+                "hint": "Type INSTALL to confirm installing system updates with your detected package manager.",
             }, origin)
 
         if path == "/api/system/dup/start":
@@ -59496,6 +60046,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # Compute dup flags from config at start time so the job is deterministic.
             eff, _warnings, _invalid = _read_conf(self.server.conf_path)
+            pm_name = _detect_system_package_manager()
             extra_flags = _parse_extra_flags(str(eff.get("DUP_EXTRA_FLAGS", "") or ""))
 
             # Rocket defaults (UI pre-selected / allowed values)
@@ -59521,7 +60072,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 force_resolution = False
 
-            if force_resolution and "--force-resolution" not in extra_flags:
+            if pm_name == "zypper" and force_resolution and "--force-resolution" not in extra_flags:
                 extra_flags = ["--force-resolution"] + list(extra_flags)
 
             # Rocket-specific vendor policy (does not affect background downloader/notifier).
@@ -59530,7 +60081,7 @@ class Handler(BaseHTTPRequestHandler):
                 allow_vendor_change = str(eff.get("ROCKET_WIZARD_ALLOW_VENDOR_CHANGE", "false") or "false").strip().lower() == "true"
             except Exception:
                 allow_vendor_change = False
-            if allow_vendor_change and "--allow-vendor-change" not in extra_flags:
+            if pm_name == "zypper" and allow_vendor_change and "--allow-vendor-change" not in extra_flags:
                 extra_flags = ["--allow-vendor-change"] + list(extra_flags)
 
             job_id = secrets.token_urlsafe(18)
@@ -59550,6 +60101,7 @@ class Handler(BaseHTTPRequestHandler):
                     f.write("rc=0\n")
                     f.write("stage=starting\n")
                     f.write(f"simulate={1 if simulate else 0}\n")
+                    f.write(f"package_manager={pm_name}\n")
                     f.write("action=dup\n")
                     f.write(f"title={title2}\n")
             except Exception:
@@ -59562,6 +60114,7 @@ class Handler(BaseHTTPRequestHandler):
                 "title": title2,
                 "simulate": simulate,
                 "dry_run": bool(simulate),
+                "package_manager": pm_name,
                 "running": True,
                 "done": False,
                 "rc": None,
@@ -59606,12 +60159,20 @@ class Handler(BaseHTTPRequestHandler):
                 # via argv) to avoid systemd-run / D-Bus message-size / argv-length issues on
                 # some systems.
                 # Output is written into /var/log/zypper-auto where the dashboard already reads.
-                extra = " ".join(shlex.quote(x) for x in extra_flags)
-                xml_flag = "--xmlout" if use_xmlout else ""
-                if simulate:
-                    zcmd = f"{ZYPPER_BIN} --non-interactive {xml_flag} dup --dry-run --details {extra}".strip()
+                cmd_argv = _rocket_update_command_argv(pm_name, simulate=simulate, use_xmlout=use_xmlout, extra_flags=extra_flags)
+                zcmd = " ".join(shlex.quote(x) for x in cmd_argv)
+                if pm_name == "zypper":
+                    restart_marker = "=== RESTART CHECK (zypper ps -s) ==="
+                    restart_cmd = f'{ZYPPER_BIN} ps -s >>"$LOG" 2>&1 || true'
+                elif pm_name == "dnf":
+                    restart_marker = "=== RESTART CHECK (needs-restarting -s) ==="
+                    restart_cmd = 'if command -v needs-restarting >/dev/null 2>&1; then needs-restarting -s >>"$LOG" 2>&1 || true; else echo "[INFO] needs-restarting not available; skipping restart check" >>"$LOG"; fi'
+                elif pm_name == "apt":
+                    restart_marker = "=== RESTART CHECK (reboot-required markers) ==="
+                    restart_cmd = 'if [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then echo "Reboot required marker detected." >>"$LOG"; elif command -v needrestart >/dev/null 2>&1; then needrestart -b >>"$LOG" 2>&1 || true; else echo "[INFO] apt restart-check helper not available; skipping detailed restart check" >>"$LOG"; fi'
                 else:
-                    zcmd = f"{ZYPPER_BIN} --non-interactive {xml_flag} dup -y --details {extra}".strip()
+                    restart_marker = "=== RESTART CHECK (pacman marker scan) ==="
+                    restart_cmd = 'if [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then echo "Reboot required marker detected." >>"$LOG"; else echo "[INFO] No pacman-specific restart checker found; consider reboot when core packages were updated." >>"$LOG"; fi'
 
                 script_text = "\n".join([
                     'set -euo pipefail',
@@ -59620,6 +60181,7 @@ class Handler(BaseHTTPRequestHandler):
                     'mkdir -p /var/log/zypper-auto/service-logs || true',
                     'mkdir -p /var/lib/zypper-auto || true',
                     f'SIMULATE={"1" if simulate else "0"}',
+                    f'PM_NAME={shlex.quote(pm_name)}',
                     'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
                     'write_status() {',
                     '  local done="$1"; local rc="$2"; local stage="$3"',
@@ -59629,6 +60191,7 @@ class Handler(BaseHTTPRequestHandler):
                     '    echo "rc=${rc}"',
                     '    echo "stage=${stage}"',
                     '    echo "simulate=${SIMULATE:-0}"',
+                    '    echo "package_manager=${PM_NAME:-zypper}"',
                     '    echo "started_at_utc=${STARTED_AT}"',
                     '    echo "updated_at_utc=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
                     '  } >"${tmp}" 2>/dev/null || true',
@@ -59661,47 +60224,38 @@ class Handler(BaseHTTPRequestHandler):
                     '  env PATH="${USER_PATH}" "$@"',
                     '}',
 
-                    # Better lock handling (match CLI): wait for zypp lock instead of failing instantly.
-                    'zypp_lock_file() {',
-                    '  if [ -f /run/zypp.pid ]; then echo /run/zypp.pid; return 0; fi',
-                    '  if [ -f /var/run/zypp.pid ]; then echo /var/run/zypp.pid; return 0; fi',
-                    '  echo ""',
-                    '  return 1',
-                    '}',
-                    'zypp_lock_active() {',
-                    '  local lf pid',
-                    '  lf="$(zypp_lock_file 2>/dev/null || true)"',
-                    '  [ -z "${lf}" ] && return 1',
-                    '  pid="$(cat "${lf}" 2>/dev/null || true)"',
-                    '  if echo "${pid}" | grep -qE "^[0-9]+$" && kill -0 "${pid}" 2>/dev/null; then return 0; fi',
-                    '  if command -v pgrep >/dev/null 2>&1 && pgrep -x zypper >/dev/null 2>&1; then return 0; fi',
-                    '  return 1',
-                    '}',
+                    # Better lock handling (match CLI): wait on shared PM helper lock probes.
+                    'PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"',
+                    'if [ ! -r "${PM_RUNTIME_HELPER}" ]; then',
+                    '  echo "[webui] WARN: Shared package-manager helper missing; lock pre-wait disabled." >>"$LOG" || true',
+                    'else',
+                    '  # shellcheck disable=SC1091',
+                    '  . "${PM_RUNTIME_HELPER}" || true',
+                    'fi',
+                    'if command -v znh_pm_ensure_detected >/dev/null 2>&1; then',
+                    '  znh_pm_ensure_detected || true',
+                    '  if [ -n "${SYSTEM_PKG_MANAGER:-}" ]; then PM_NAME="${SYSTEM_PKG_MANAGER}"; fi',
+                    'fi',
                     '# Smart lock waiting with exponential backoff and process identity',
-                    'wait_for_zypp_lock_smart() {',
+                    'wait_for_pm_lock_smart() {',
                     f'  local max_wait_seconds={lock_wait_install_s}',
                     '  if [ "${max_wait_seconds}" -le 0 ] 2>/dev/null; then return 0; fi',
-                    '  local start_time current_time elapsed backoff attempt',
+                    '  if ! command -v znh_pm_lock_is_active >/dev/null 2>&1; then return 0; fi',
+                    '  local start_time current_time elapsed backoff attempt pid',
                     '  start_time="$(date +%s 2>/dev/null || echo 0)"',
                     '  attempt=1',
                     '  backoff=2',
                     '  while true; do',
-                    '    if ! zypp_lock_active; then return 0; fi',
-                    '    local lf pid owner',
-                    '    lf="$(zypp_lock_file 2>/dev/null || true)"',
-                    '    pid="$(cat "${lf}" 2>/dev/null || true)"',
-                    '    owner=""',
-                    '    if echo "${pid}" | grep -qE "^[0-9]+$"; then',
-                    '      owner="$(ps -p "${pid}" -o comm= 2>/dev/null || echo "")"',
-                    '    fi',
+                    '    if ! znh_pm_lock_is_active; then return 0; fi',
+                    '    pid="$(znh_pm_lock_active_pid 2>/dev/null || true)"',
                     '    current_time="$(date +%s 2>/dev/null || echo 0)"',
                     '    elapsed=$((current_time - start_time))',
                     '    if [ "${elapsed}" -ge "${max_wait_seconds}" ] 2>/dev/null; then',
-                    '      echo "[webui] ERROR: Timeout: Zypp lock held by PID ${pid:-unknown} (${owner:-Unknown}) for over ${max_wait_seconds}s." >>"$LOG" || true',
+                    '      echo "[webui] ERROR: Timeout: ${PM_NAME} lock held by PID ${pid:-unknown} for over ${max_wait_seconds}s." >>"$LOG" || true',
                     '      write_status 1 1 lock-timeout',
                     '      return 1',
                     '    fi',
-                    '    echo "[webui] Zypp lock held by PID ${pid:-unknown} (${owner:-Unknown}). Attempt ${attempt}. Retrying in ${backoff}s..." >>"$LOG" || true',
+                    '    echo "[webui] ${PM_NAME} lock held by PID ${pid:-unknown}. Attempt ${attempt}. Retrying in ${backoff}s..." >>"$LOG" || true',
                     '    write_status 0 0 waiting-for-lock',
                     '    sleep "${backoff}"',
                     '    backoff=$((backoff * 2))',
@@ -59709,19 +60263,19 @@ class Handler(BaseHTTPRequestHandler):
                     '    attempt=$((attempt + 1))',
                     '  done',
                     '}',
-                    'wait_for_zypp_lock_smart || exit 1',
+                    'wait_for_pm_lock_smart || exit 1',
 
                     'echo "==========================================" >>"$LOG"',
-                    'echo " Rocket Update Wizard: zypper dup " >>"$LOG"',
+                    'echo " Rocket Update Wizard: ${PM_NAME} update " >>"$LOG"',
                     'echo "==========================================" >>"$LOG"',
                     'date >>"$LOG" || true',
                     'echo "" >>"$LOG"',
                     f'echo "CMD: {zcmd}" >>"$LOG"',
                     'echo "" >>"$LOG"',
-                    'echo "[webui] stage: running-zypper" >>"$LOG" || true',
-                    'write_status 0 0 running-zypper',
+                    'echo "[webui] stage: running-package-manager" >>"$LOG" || true',
+                    'write_status 0 0 running-package-manager',
 
-                    # Run zypper and stream output live into $LOG.
+                    # Run package-manager update command and stream output live into $LOG.
                     # We also keep a temporary copy so we can detect "Nothing to do." reliably.
                     'TMP_OUT="$(mktemp /tmp/znh-webui-dup.XXXXXX 2>/dev/null || echo /tmp/znh-webui-dup.$$)"',
                     'set +e',
@@ -59729,14 +60283,18 @@ class Handler(BaseHTTPRequestHandler):
                     'rc=$?',
                     'set -e',
                     'did_updates=1',
+                    'if [ "${SIMULATE:-0}" = "1" ]; then',
+                    '  if [ "${PM_NAME}" = "dnf" ] && [ "${rc}" -eq 100 ] 2>/dev/null; then rc=0; fi',
+                    '  if [ "${PM_NAME}" = "pacman" ] && [ "${rc}" -eq 1 ] 2>/dev/null; then rc=0; did_updates=0; fi',
+                    'fi',
                     # With --xmlout, the phrase may appear inside XML message tags; be case-insensitive.
                     'if grep -qi "nothing to do" "$TMP_OUT" 2>/dev/null; then did_updates=0; fi',
                     'rm -f "$TMP_OUT" 2>/dev/null || true',
                     'echo "" >>"$LOG"',
-                    'echo "[webui] zypper dup rc=$rc" >>"$LOG"',
-                    'if [ ${rc} -eq 0 ]; then write_status 0 ${rc} running-zypper-done; else write_status 0 ${rc} failed; fi',
+                    'echo "[webui] ${PM_NAME} update rc=$rc" >>"$LOG"',
+                    'if [ ${rc} -eq 0 ]; then write_status 0 ${rc} running-package-manager-done; else write_status 0 ${rc} failed; fi',
                     'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional updates." >>"$LOG"; fi',
-                    'if [ ${rc} -ne 0 ]; then echo "[webui] zypper dup failed; skipping optional updates." >>"$LOG"; fi',
+                    'if [ ${rc} -ne 0 ]; then echo "[webui] ${PM_NAME} update failed; skipping optional updates." >>"$LOG"; fi',
 
                     # Optional app updates only run on real installs (not simulation) and only when
                     # updates occurred, unless OPTIONAL_UPDATES_ALWAYS_REFRESH=true.
@@ -59838,8 +60396,8 @@ class Handler(BaseHTTPRequestHandler):
                     '  echo "[webui] stage: restart-check" >>"$LOG" || true',
                     '  write_status 0 ${rc} restart-check',
                     '  echo "" >>"$LOG"',
-                    '  echo "=== ZYPPER PS -s (restart check) ===" >>"$LOG"',
-                    f'  {ZYPPER_BIN} ps -s >>"$LOG" 2>&1 || true',
+                    f'  echo "{restart_marker}" >>"$LOG"',
+                    f'  {restart_cmd}',
                     'fi',
                     'if [ ${rc} -eq 0 ] && [ "${SIMULATE:-0}" != "1" ]; then',
                     '  echo "[webui] stage: refreshing-dashboard" >>"$LOG" || true',
@@ -59887,6 +60445,7 @@ class Handler(BaseHTTPRequestHandler):
                             f.write("rc=1\n")
                             f.write("stage=failed\n")
                             f.write(f"simulate={1 if simulate else 0}\n")
+                            f.write(f"package_manager={pm_name}\n")
                             f.write("action=dup\n")
                             f.write(f"title={title2}\n")
                     except Exception:
@@ -59936,7 +60495,7 @@ class Handler(BaseHTTPRequestHandler):
                         if j:
                             _job_output_append(j, f"[dashboard-api] Starting system update unit: {unit}\n")
                             _job_output_append(j, f"[dashboard-api] Unit script: {script_file}\n")
-                            _job_update_progress_dup(j, "starting")
+                            _job_update_progress_dup(j, "starting", pm=pm_name)
 
                     p = subprocess.run(
                         sys_cmd,
@@ -59981,6 +60540,7 @@ class Handler(BaseHTTPRequestHandler):
                             f.write("rc=1\n")
                             f.write("stage=failed\n")
                             f.write(f"simulate={1 if simulate else 0}\n")
+                            f.write(f"package_manager={pm_name}\n")
                             f.write("action=dup\n")
                             f.write(f"title={title2}\n")
                     except Exception:
@@ -60018,7 +60578,7 @@ class Handler(BaseHTTPRequestHandler):
                                     j = jobs.get(job_id)
                                     if j:
                                         _job_output_append(j, ln)
-                                        _job_update_progress_dup(j, ln)
+                                        _job_update_progress_dup(j, ln, pm=str(j.get("package_manager", pm_name) or pm_name))
                     except Exception:
                         pass
 
@@ -60098,7 +60658,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
                         full = f.read()
-                    marker = "=== ZYPPER PS -s (restart check) ==="
+                    marker = str(restart_marker or "=== RESTART CHECK ===")
                     if marker in full:
                         restart_out = full.split(marker, 1)[1].strip()
                         if len(restart_out) > 60_000:
@@ -60118,7 +60678,11 @@ class Handler(BaseHTTPRequestHandler):
                         # Best-effort: surface solver conflicts in the job payload so the WebUI
                         # can show actionable guidance.
                         try:
-                            cd, cs = _detect_solver_conflict(str(j.get("output", "")), int(j["rc"]))
+                            cd, cs = _detect_solver_conflict(
+                                str(j.get("output", "")),
+                                int(j["rc"]),
+                                pm=str(j.get("package_manager", pm_name) or pm_name),
+                            )
                             j["conflict_detected"] = bool(cd)
                             j["conflict_summary"] = str(cs or "")
                         except Exception:
