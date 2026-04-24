@@ -1566,6 +1566,14 @@ VERIFY_LOW_IMPACT_ENABLED="true"
 VERIFY_LOW_IMPACT_FAIL_STREAK=2
 VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES=45
 VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES=30
+VERIFY_FAILED_UNITS_CRITICAL_GLOBS_DEFAULT="zypper-autodownload.service zypper-autodownload.timer zypper-cache-cleanup.service zypper-auto-verify.service zypper-auto-verify.timer zypper-auto-dashboard-api.service zypper-notify-user.service zypper-notify-user.timer"
+VERIFY_FAILED_UNITS_CRITICAL_REGEX_DEFAULT="(zypper|zypp|apt|dpkg|unattended|dnf|yum|pacman|networkmanager|systemd-networkd|wicked|wpa_supplicant|systemd-resolved|iwd|connman|netconfig)"
+VERIFY_FAILED_UNITS_NOISE_GLOBS_DEFAULT="znh-webui-* run-*.service session-*.scope user@*.service user-runtime-dir@*.service app-*.scope *.mount *.automount *.slice *.scope *.path *.device packagekit.service packagekit-offline-update.service flatpak-system-helper.service man-db.service plocate-updatedb.service updatedb.service bluetooth.service cups.service cups-browsed.service avahi-daemon.service modemmanager.service fwupd.service fwupd-refresh.service abrt*.service kdump.service akmods.service"
+VERIFY_FAILED_UNITS_NOISE_REGEX_DEFAULT="(^systemd-coredump@|^dracut-.*|^tmp\\.mount$)"
+VERIFY_FAILED_UNITS_CRITICAL_GLOBS="${VERIFY_FAILED_UNITS_CRITICAL_GLOBS_DEFAULT}"
+VERIFY_FAILED_UNITS_CRITICAL_REGEX="${VERIFY_FAILED_UNITS_CRITICAL_REGEX_DEFAULT}"
+VERIFY_FAILED_UNITS_NOISE_GLOBS="${VERIFY_FAILED_UNITS_NOISE_GLOBS_DEFAULT}"
+VERIFY_FAILED_UNITS_NOISE_REGEX="${VERIFY_FAILED_UNITS_NOISE_REGEX_DEFAULT}"
 
 # Global config file (optional but recommended for advanced users)
 CONFIG_FILE="/etc/zypper-auto.conf"
@@ -2419,6 +2427,10 @@ __znh_write_dashboard_schema_json() {
     "VERIFY_LOW_IMPACT_FAIL_STREAK": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
     "VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES": {"type": "int", "min": 5, "max": 720, "step": 5, "default": "45"},
     "VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES": {"type": "int", "min": 5, "max": 720, "step": 5, "default": "30"},
+    "VERIFY_FAILED_UNITS_CRITICAL_GLOBS": {"type": "string", "max_len": 2000, "default": "zypper-autodownload.service zypper-autodownload.timer zypper-cache-cleanup.service zypper-auto-verify.service zypper-auto-verify.timer zypper-auto-dashboard-api.service zypper-notify-user.service zypper-notify-user.timer"},
+    "VERIFY_FAILED_UNITS_CRITICAL_REGEX": {"type": "string", "max_len": 1000, "default": "(zypper|zypp|apt|dpkg|unattended|dnf|yum|pacman|networkmanager|systemd-networkd|wicked|wpa_supplicant|systemd-resolved|iwd|connman|netconfig)"},
+    "VERIFY_FAILED_UNITS_NOISE_GLOBS": {"type": "string", "max_len": 4000, "default": "znh-webui-* run-*.service session-*.scope user@*.service user-runtime-dir@*.service app-*.scope *.mount *.automount *.slice *.scope *.path *.device packagekit.service packagekit-offline-update.service flatpak-system-helper.service man-db.service plocate-updatedb.service updatedb.service bluetooth.service cups.service cups-browsed.service avahi-daemon.service modemmanager.service fwupd.service fwupd-refresh.service abrt*.service kdump.service akmods.service"},
+    "VERIFY_FAILED_UNITS_NOISE_REGEX": {"type": "string", "max_len": 600, "default": "(^systemd-coredump@|^dracut-.*|^tmp\\.mount$)"},
 
     "DOWNLOADER_DOWNLOAD_MODE": {"type": "enum", "allowed": ["full","detect-only"], "default": "full"},
     "AUTO_DUPLICATE_RPM_MODE": {"type": "enum", "allowed": ["whitelist","thirdparty","both"], "default": "whitelist"},
@@ -8721,6 +8733,26 @@ VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES=45
 # Default: 30
 VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES=30
 
+# VERIFY_FAILED_UNITS_CRITICAL_GLOBS
+# Space/comma-separated shell-glob patterns treated as critical failed units
+# during verification checks 18 and 46.
+# Default: zypper-auto helper core service/timer units.
+VERIFY_FAILED_UNITS_CRITICAL_GLOBS="zypper-autodownload.service zypper-autodownload.timer zypper-cache-cleanup.service zypper-auto-verify.service zypper-auto-verify.timer zypper-auto-dashboard-api.service zypper-notify-user.service zypper-notify-user.timer"
+
+# VERIFY_FAILED_UNITS_CRITICAL_REGEX
+# Case-insensitive ERE regex for additional critical failed-unit matches.
+# Default keeps update/network/package-manager related units actionable.
+VERIFY_FAILED_UNITS_CRITICAL_REGEX="(zypper|zypp|apt|dpkg|unattended|dnf|yum|pacman|networkmanager|systemd-networkd|wicked|wpa_supplicant|systemd-resolved|iwd|connman|netconfig)"
+
+# VERIFY_FAILED_UNITS_NOISE_GLOBS
+# Space/comma-separated shell-glob patterns treated as low-priority/noise
+# failed units during verification checks 18 and 46.
+VERIFY_FAILED_UNITS_NOISE_GLOBS="znh-webui-* run-*.service session-*.scope user@*.service user-runtime-dir@*.service app-*.scope *.mount *.automount *.slice *.scope *.path *.device packagekit.service packagekit-offline-update.service flatpak-system-helper.service man-db.service plocate-updatedb.service updatedb.service bluetooth.service cups.service cups-browsed.service avahi-daemon.service modemmanager.service fwupd.service fwupd-refresh.service abrt*.service kdump.service akmods.service"
+
+# VERIFY_FAILED_UNITS_NOISE_REGEX
+# Case-insensitive ERE regex for additional low-priority/noise failed units.
+VERIFY_FAILED_UNITS_NOISE_REGEX="(^systemd-coredump@|^dracut-.*|^tmp\\.mount$)"
+
 # ---------------------------------------------------------------------
 # Snapper safety: retention optimizer caps (prevent disk filling)
 # ---------------------------------------------------------------------
@@ -9480,6 +9512,10 @@ EOF
     validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_FAIL_STREAK 2 1 20
     validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES 45 5 720
     validate_nonneg_int_bounded_optional VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES 30 5 720
+    validate_string_max_len_optional VERIFY_FAILED_UNITS_CRITICAL_GLOBS "${VERIFY_FAILED_UNITS_CRITICAL_GLOBS_DEFAULT}" 2000
+    validate_string_max_len_optional VERIFY_FAILED_UNITS_CRITICAL_REGEX "${VERIFY_FAILED_UNITS_CRITICAL_REGEX_DEFAULT}" 1000
+    validate_string_max_len_optional VERIFY_FAILED_UNITS_NOISE_GLOBS "${VERIFY_FAILED_UNITS_NOISE_GLOBS_DEFAULT}" 4000
+    validate_string_max_len_optional VERIFY_FAILED_UNITS_NOISE_REGEX "${VERIFY_FAILED_UNITS_NOISE_REGEX_DEFAULT}" 600
 
     # Timers: exact allowed list
     validate_allowed_set DL_TIMER_INTERVAL_MINUTES 60 "1,5,10,15,30,60"
@@ -9707,6 +9743,10 @@ EOF
     log_debug "  VERIFY_LOW_IMPACT_FAIL_STREAK=${VERIFY_LOW_IMPACT_FAIL_STREAK:-2}"
     log_debug "  VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES=${VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES:-45}"
     log_debug "  VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES=${VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES:-30}"
+    log_debug "  VERIFY_FAILED_UNITS_CRITICAL_GLOBS=${VERIFY_FAILED_UNITS_CRITICAL_GLOBS:-${VERIFY_FAILED_UNITS_CRITICAL_GLOBS_DEFAULT}}"
+    log_debug "  VERIFY_FAILED_UNITS_CRITICAL_REGEX=${VERIFY_FAILED_UNITS_CRITICAL_REGEX:-${VERIFY_FAILED_UNITS_CRITICAL_REGEX_DEFAULT}}"
+    log_debug "  VERIFY_FAILED_UNITS_NOISE_GLOBS=${VERIFY_FAILED_UNITS_NOISE_GLOBS:-${VERIFY_FAILED_UNITS_NOISE_GLOBS_DEFAULT}}"
+    log_debug "  VERIFY_FAILED_UNITS_NOISE_REGEX=${VERIFY_FAILED_UNITS_NOISE_REGEX:-${VERIFY_FAILED_UNITS_NOISE_REGEX_DEFAULT}}"
     log_debug "  CACHE_EXPIRY_MINUTES=${CACHE_EXPIRY_MINUTES}"
     log_debug "  SNOOZE_SHORT_HOURS=${SNOOZE_SHORT_HOURS}"
     log_debug "  SNOOZE_MEDIUM_HOURS=${SNOOZE_MEDIUM_HOURS}"
@@ -9864,6 +9904,10 @@ EOF
     _mark_missing_key "VERIFY_LOW_IMPACT_FAIL_STREAK"
     _mark_missing_key "VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES"
     _mark_missing_key "VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES"
+    _mark_missing_key "VERIFY_FAILED_UNITS_CRITICAL_GLOBS"
+    _mark_missing_key "VERIFY_FAILED_UNITS_CRITICAL_REGEX"
+    _mark_missing_key "VERIFY_FAILED_UNITS_NOISE_GLOBS"
+    _mark_missing_key "VERIFY_FAILED_UNITS_NOISE_REGEX"
     _mark_missing_key "AUTO_REPAIR_TRY_REMOUNT_RW"
 
     # Snapper retention optimizer knobs
@@ -10044,6 +10088,18 @@ EOF
                     ;;
                 VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES)
                     log_info "  - VERIFY_LOW_IMPACT_FOLLOWUP_DELAY_MINUTES: follow-up verification delay used while low-impact mode is active."
+                    ;;
+                VERIFY_FAILED_UNITS_CRITICAL_GLOBS)
+                    log_info "  - VERIFY_FAILED_UNITS_CRITICAL_GLOBS: shell-glob patterns treated as critical failed systemd units in verify checks 18/46."
+                    ;;
+                VERIFY_FAILED_UNITS_CRITICAL_REGEX)
+                    log_info "  - VERIFY_FAILED_UNITS_CRITICAL_REGEX: case-insensitive regex for additional critical failed-unit matches in verify checks 18/46."
+                    ;;
+                VERIFY_FAILED_UNITS_NOISE_GLOBS)
+                    log_info "  - VERIFY_FAILED_UNITS_NOISE_GLOBS: shell-glob patterns treated as low-priority/noise failed units in verify checks 18/46."
+                    ;;
+                VERIFY_FAILED_UNITS_NOISE_REGEX)
+                    log_info "  - VERIFY_FAILED_UNITS_NOISE_REGEX: case-insensitive regex for additional low-priority/noise failed-unit matches."
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
@@ -33342,20 +33398,53 @@ run_verification_only() {
             printf -v "${var_name}" "%s" "${unit}"
         fi
     }
+    verify_failed_unit_pattern_tokens() {
+        local raw="${1:-}"
+        printf '%s' "${raw}" \
+            | tr ',;\r\n\t' '      ' \
+            | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+    }
+
+    verify_failed_unit_matches_glob_patterns() {
+        local unit="${1:-}"
+        local patterns_raw="${2:-}"
+        local token
+        [ -n "${unit}" ] || return 1
+        patterns_raw="$(verify_failed_unit_pattern_tokens "${patterns_raw}")"
+        [ -n "${patterns_raw}" ] || return 1
+        for token in ${patterns_raw}; do
+            [ -n "${token}" ] || continue
+            # shellcheck disable=SC2254
+            case "${unit}" in
+                ${token})
+                    return 0
+                    ;;
+            esac
+        done
+        return 1
+    }
+
+    verify_failed_unit_matches_regex() {
+        local unit="${1:-}"
+        local regex="${2:-}"
+        [ -n "${unit}" ] || return 1
+        [ -n "${regex}" ] || return 1
+        printf '%s\n' "${unit}" | grep -qiE -- "${regex}" 2>/dev/null
+    }
 
     verify_failed_unit_is_critical() {
-        local unit low
+        local unit low critical_globs critical_regex
         unit="${1:-}"
         low="$(printf '%s' "${unit}" | tr '[:upper:]' '[:lower:]')"
         [ -n "${low}" ] || return 1
 
-        case "${low}" in
-            zypper-autodownload.service|zypper-autodownload.timer|zypper-cache-cleanup.service|zypper-auto-verify.service|zypper-auto-verify.timer|zypper-auto-dashboard-api.service|zypper-notify-user.service|zypper-notify-user.timer)
-                return 0
-                ;;
-        esac
+        critical_globs="${VERIFY_FAILED_UNITS_CRITICAL_GLOBS:-${VERIFY_FAILED_UNITS_CRITICAL_GLOBS_DEFAULT}}"
+        critical_regex="${VERIFY_FAILED_UNITS_CRITICAL_REGEX:-${VERIFY_FAILED_UNITS_CRITICAL_REGEX_DEFAULT}}"
 
-        if printf '%s\n' "${low}" | grep -qiE '(zypper|zypp|apt|dpkg|unattended|dnf|yum|pacman|networkmanager|systemd-networkd|wicked|wpa_supplicant|systemd-resolved|iwd|connman|netconfig)'; then
+        if verify_failed_unit_matches_glob_patterns "${low}" "${critical_globs}"; then
+            return 0
+        fi
+        if verify_failed_unit_matches_regex "${low}" "${critical_regex}"; then
             return 0
         fi
 
@@ -33363,24 +33452,17 @@ run_verification_only() {
     }
 
     verify_failed_unit_is_noise() {
-        local unit low
+        local unit low noise_globs noise_regex
         unit="${1:-}"
         low="$(printf '%s' "${unit}" | tr '[:upper:]' '[:lower:]')"
         [ -n "${low}" ] || return 0
+        noise_globs="${VERIFY_FAILED_UNITS_NOISE_GLOBS:-${VERIFY_FAILED_UNITS_NOISE_GLOBS_DEFAULT}}"
+        noise_regex="${VERIFY_FAILED_UNITS_NOISE_REGEX:-${VERIFY_FAILED_UNITS_NOISE_REGEX_DEFAULT}}"
 
-        case "${low}" in
-            znh-webui-*|run-*.service|session-*.scope|user@*.service|user-runtime-dir@*.service|app-*.scope|*.mount|*.automount|*.slice|*.scope|*.path|*.device)
-                return 0
-                ;;
-        esac
-
-        case "${low}" in
-            packagekit.service|packagekit-offline-update.service|flatpak-system-helper.service|man-db.service|plocate-updatedb.service|updatedb.service|bluetooth.service|cups.service|cups-browsed.service|avahi-daemon.service|modemmanager.service|fwupd.service|fwupd-refresh.service|abrt*.service|kdump.service|akmods.service)
-                return 0
-                ;;
-        esac
-
-        if printf '%s\n' "${low}" | grep -qiE '(^systemd-coredump@|^dracut-.*|^tmp\.mount$)'; then
+        if verify_failed_unit_matches_glob_patterns "${low}" "${noise_globs}"; then
+            return 0
+        fi
+        if verify_failed_unit_matches_regex "${low}" "${noise_regex}"; then
             return 0
         fi
 
