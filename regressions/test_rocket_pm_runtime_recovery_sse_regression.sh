@@ -18,6 +18,7 @@ Runtime regression for Rocket package-manager-aware recovery/SSE paths:
   - validates zypper-only output prettification gating in recovery payload
   - validates _job_update_progress_dup PM-aware stage/progress behavior used by SSE stream updates
   - validates /api/events/job SSE stream reset/append/done transitions with PM-aware payload behavior
+  - validates /api/events/job self-update SSE stream reset/append/done transitions
 EOF
 }
 
@@ -151,10 +152,13 @@ if py_src:
     needed_functions = {
         "_normalize_pm",
         "_dup_paths",
+        "_su_paths",
         "_tail_file",
+        "_read_file_effective_full",
         "_read_kv_status",
         "_detect_solver_conflict",
         "_zypper_xml_pretty",
+        "_job_update_progress",
         "_job_update_progress_dup",
         "_recover_system_dup_job",
     }
@@ -182,6 +186,8 @@ if funcs_src and classes_src:
             "SUPPORTED_PACKAGE_MANAGERS = {'zypper', 'apt', 'dnf', 'pacman'}",
             "DUP_LOG_DIR = ''",
             "DUP_STATUS_DIR = ''",
+            "SU_LOG_DIR = ''",
+            "SU_STATUS_DIR = ''",
             "JOB_OUTPUT_TAIL_CHARS = 120000",
             "SELF_UPDATE_API_MAX_CHARS = 80000",
             "class BaseHTTPRequestHandler:",
@@ -225,6 +231,8 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
 
     env["DUP_LOG_DIR"] = dup_log_dir
     env["DUP_STATUS_DIR"] = dup_status_dir
+    env["SU_LOG_DIR"] = dup_log_dir
+    env["SU_STATUS_DIR"] = dup_status_dir
     env["JOB_OUTPUT_TAIL_CHARS"] = 200000
 
     def fake_run_cmd(cmd, timeout_s, log=None, extra_env=None):  # noqa: ANN001
@@ -586,6 +594,145 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 done_stage = str(done_payload.get("stage", ""))
                 if done_stage != "Done":
                     fail(f"SSE done payload stage mismatch for pm={pm_name} (got={done_stage!r})")
+        def run_self_update_sse_case(job_id: str, done_rc: int, done_stage_raw: str, expected_done_stage: str) -> None:
+            _unit, log_path2, status_path2, _script_path2 = env["_su_paths"](job_id)
+            write_text(
+                status_path2,
+                "\n".join(
+                    [
+                        "done=0",
+                        "stage=starting",
+                        "dry_run=0",
+                        "channel=stable",
+                        "",
+                    ]
+                ),
+            )
+            write_text(log_path2, "")
+
+            h = handler_cls()
+            h.server = _FakeServer()
+            h.headers = {"X-ZNH-Token": h.server.token}
+            h.client_address = ("127.0.0.1", 12346)
+            h.path = f"/api/events/job?job_type=self-update&job_id={job_id}"
+            h.wfile = _CaptureWFile()
+            h._sent_headers = []
+            h._sent_status = None
+            run_err: list[str] = []
+
+            def _runner() -> None:
+                try:
+                    h.do_GET()
+                except Exception as exc2:
+                    run_err.append(str(exc2))
+
+            t = threading.Thread(target=_runner, daemon=True)
+            t.start()
+            pytime.sleep(0.20)
+            with open(log_path2, "a", encoding="utf-8") as f:
+                f.write("downloading update\n")
+            append_seen = False
+            append_deadline = pytime.time() + 4.0
+            while pytime.time() < append_deadline:
+                raw_now = h.wfile.getvalue().decode("utf-8", errors="replace")
+                if "event: append\n" in raw_now:
+                    append_seen = True
+                    break
+                pytime.sleep(0.05)
+            if not append_seen:
+                fail("SSE stream did not emit append event before self-update completion gating")
+            write_text(
+                status_path2,
+                "\n".join(
+                    [
+                        f"rc={int(done_rc)}",
+                        f"stage={str(done_stage_raw)}",
+                        "dry_run=0",
+                        "channel=stable",
+                        "done=1",
+                        "",
+                    ]
+                ),
+            )
+            t.join(timeout=8.0)
+            if t.is_alive():
+                fail("SSE stream did not terminate for self-update case")
+                return
+            if run_err:
+                fail(f"SSE stream handler raised runtime error for self-update: {run_err[0]}")
+                return
+            if int(getattr(h, "_sent_status", 0) or 0) != 200:
+                fail(f"SSE stream expected HTTP 200 for self-update (got={getattr(h, '_sent_status', None)!r})")
+                return
+
+            raw = h.wfile.getvalue().decode("utf-8", errors="replace")
+            events = parse_sse_events(raw)
+            if not events:
+                fail("SSE stream emitted no parseable events for self-update")
+                return
+
+            names = [ev for ev, _payload in events]
+            if names[0] != "reset":
+                fail(f"SSE stream first event should be reset for self-update (got={names[0]!r})")
+            if "append" not in names:
+                fail("SSE stream did not emit append event for self-update")
+                return
+            if names[-1] != "done":
+                fail(f"SSE stream final event should be done for self-update (got={names[-1]!r})")
+
+            append_payload = None
+            done_payload = None
+            for ev, payload in events:
+                if ev == "append" and append_payload is None:
+                    append_payload = payload
+                if ev == "done":
+                    done_payload = payload
+
+            if not isinstance(append_payload, dict):
+                fail("SSE stream append payload missing for self-update")
+            else:
+                got_job_type = str(append_payload.get("job_type", ""))
+                if got_job_type != "self-update":
+                    fail(f"SSE append job_type mismatch for self-update (got={got_job_type!r})")
+                got_pm = str(append_payload.get("package_manager", ""))
+                if got_pm != "":
+                    fail(f"SSE append package_manager should be empty for self-update (got={got_pm!r})")
+                got_stage = str(append_payload.get("stage", ""))
+                if got_stage not in ("Starting", "Downloading"):
+                    fail(f"SSE append stage mismatch for self-update (got={got_stage!r})")
+                got_progress = int(append_payload.get("progress", 0) or 0)
+                if got_progress < 5:
+                    fail(f"SSE append progress too low for self-update (expected>=5, got={got_progress})")
+                txt = str(append_payload.get("text", ""))
+                if txt.startswith("PRETTY::"):
+                    fail("SSE append should not be zypper-prettified for self-update")
+
+            if not isinstance(done_payload, dict):
+                fail("SSE stream done payload missing for self-update")
+            else:
+                if not bool(done_payload.get("done", False)):
+                    fail("SSE done payload should set done=true for self-update")
+                if int(done_payload.get("progress", 0) or 0) != 100:
+                    fail("SSE done payload should set progress=100 for self-update")
+                got_rc_raw = done_payload.get("rc", None)
+                try:
+                    got_rc_int = int(got_rc_raw)
+                except Exception:
+                    got_rc_int = -999999
+                if got_rc_int != int(done_rc):
+                    fail(
+                        f"SSE done payload should set rc={int(done_rc)} for self-update "
+                        f"(got={got_rc_raw!r})"
+                    )
+                done_stage = str(done_payload.get("stage", ""))
+                if done_stage != str(expected_done_stage):
+                    fail(
+                        f"SSE done payload stage mismatch for self-update "
+                        f"(expected={str(expected_done_stage)!r}, got={done_stage!r})"
+                    )
+                done_pm = str(done_payload.get("package_manager", ""))
+                if done_pm != "":
+                    fail(f"SSE done payload package_manager should be empty for self-update (got={done_pm!r})")
 
         run_sse_case(
             pm_name="apt",
@@ -603,8 +750,10 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
             min_append_progress=42,
             expect_pretty_append=True,
         )
+        run_self_update_sse_case(job_id="selfupd001", done_rc=0, done_stage_raw="done", expected_done_stage="Done")
+        run_self_update_sse_case(job_id="selfupdfail", done_rc=17, done_stage_raw="failed", expected_done_stage="Failed")
 else:
-    fail("extracted runtime helpers are unavailable (_recover_system_dup_job/_job_update_progress_dup/Handler)")
+    fail("extracted runtime helpers are unavailable (_recover_system_dup_job/_su_paths/_read_file_effective_full/_job_update_progress/_job_update_progress_dup/Handler)")
 
 Path(report_path).write_text("\n".join(failures), encoding="utf-8")
 PY
