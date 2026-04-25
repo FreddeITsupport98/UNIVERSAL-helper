@@ -32412,7 +32412,6 @@ PY
 }
 JSON_EOF
     fi
-JSON_EOF
 
     chmod 644 "${out_json_root}" 2>/dev/null || true
 
