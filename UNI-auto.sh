@@ -10023,6 +10023,15 @@ EOF
                 LOCK_RETRY_INITIAL_DELAY_SECONDS)
                     log_info "  - LOCK_RETRY_INITIAL_DELAY_SECONDS: base delay (in seconds) between lock retries for the Ready-to-Install helper."
                     ;;
+                LOCK_REMINDER_ENABLED)
+                    log_info "  - LOCK_REMINDER_ENABLED: controls whether desktop lock reminder notifications are shown while a package-manager lock is active."
+                    ;;
+                NO_UPDATES_REMINDER_REPEAT_ENABLED)
+                    log_info "  - NO_UPDATES_REMINDER_REPEAT_ENABLED: controls whether identical \"No updates found\" notifications can repeat while the system remains up to date."
+                    ;;
+                UPDATES_READY_REMINDER_REPEAT_ENABLED)
+                    log_info "  - UPDATES_READY_REMINDER_REPEAT_ENABLED: controls whether identical \"Updates ready\" notifications can repeat while the same update set remains pending."
+                    ;;
                 DOWNLOADER_DOWNLOAD_MODE)
                     log_info "  - DOWNLOADER_DOWNLOAD_MODE: controls whether the background helper only detects updates (detect-only) or also pre-downloads them (full)."
                     ;;
@@ -10040,6 +10049,9 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
+                    ;;
+                LOG_FOLDER_OPENER)
+                    log_info "  - LOG_FOLDER_OPENER: optional preferred folder opener command (e.g. dolphin/nautilus) used before xdg-open fallback in debug/log views."
                     ;;
                 ZNH_DIAG_MAX_SERVICE_LOGS)
                     log_info "  - ZNH_DIAG_MAX_SERVICE_LOGS: cap for how many most-recent service logs the persistent diagnostics follower tracks (lower = less background churn)."
@@ -32226,8 +32238,132 @@ JSON_EOF
     fi
     if [ "${json_disk_percent}" -lt 0 ] 2>/dev/null; then json_disk_percent=0; fi
     if [ "${json_disk_percent}" -gt 100 ] 2>/dev/null; then json_disk_percent=100; fi
+    local json_feat_flatpak json_feat_snap json_feat_soar json_feat_brew json_feat_pipx
+    json_feat_flatpak=false
+    json_feat_snap=false
+    json_feat_soar=false
+    json_feat_brew=false
+    json_feat_pipx=false
+    if [[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]]; then json_feat_flatpak=true; fi
+    if [[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]]; then json_feat_snap=true; fi
+    if [[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]]; then json_feat_soar=true; fi
+    if [[ "${ENABLE_BREW_UPDATES,,}" == "true" ]]; then json_feat_brew=true; fi
+    if [[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]]; then json_feat_pipx=true; fi
 
-    write_atomic "${out_json_root}" <<JSON_EOF
+    # Harden status-data generation:
+    # - Prefer Python JSON serialization to avoid edge-case escaping drift from
+    #   noisy log payloads (quotes/control bytes/progress output).
+    # - Keep shell JSON fallback for environments without python3.
+    local wrote_status_data_json
+    wrote_status_data_json=0
+    if command -v python3 >/dev/null 2>&1; then
+        if JSON_STATUS_DATA_PATH="${out_json_root}" \
+            JSON_GENERATED_ISO="${now_iso}" \
+            JSON_GENERATED_HUMAN="${now}" \
+            JSON_RUN_ID="${RUN_ID}" \
+            JSON_LAST_STATUS="${last_status}" \
+            JSON_STATUS_COLOR="${status_color}" \
+            JSON_REBOOT_REQUIRED="${reboot_required_json}" \
+            JSON_ZYPP_LOCK_STATE="${zypp_lock_state}" \
+            JSON_ZYPP_LOCK_PID="${zypp_lock_pid}" \
+            JSON_ZYPP_LOCK_FILE="${zypp_lock_file}" \
+            JSON_PENDING_COUNT="${json_pending_count}" \
+            JSON_FEAT_FLATPAK="${json_feat_flatpak}" \
+            JSON_FEAT_SNAP="${json_feat_snap}" \
+            JSON_FEAT_SOAR="${json_feat_soar}" \
+            JSON_FEAT_BREW="${json_feat_brew}" \
+            JSON_FEAT_PIPX="${json_feat_pipx}" \
+            JSON_DL_TIMER="${dl_timer}" \
+            JSON_VERIFY_TIMER="${verify_timer}" \
+            JSON_NT_TIMER="${nt_timer}" \
+            JSON_VERIFY_LAST_FIXED="${json_verify_last_fixed}" \
+            JSON_VERIFY_LAST_DETECTED="${json_verify_last_detected}" \
+            JSON_VERIFY_LAST_REMAINING="${json_verify_last_remaining}" \
+            JSON_VERIFY_LAST_TS="${verify_last_ts}" \
+            JSON_SNAPPER_TIMELINE_TIMER="${snapper_timeline_timer}" \
+            JSON_SNAPPER_CLEANUP_TIMER="${snapper_cleanup_timer}" \
+            JSON_SNAPPER_BOOT_TIMER="${snapper_boot_timer}" \
+            JSON_KERNEL_VER="${kernel_ver}" \
+            JSON_UPTIME_INFO="${uptime_info}" \
+            JSON_MEM_USAGE="${mem_usage}" \
+            JSON_DISK_USAGE_DISPLAY="${disk_usage_display}" \
+            JSON_DISK_PERCENT="${json_disk_percent}" \
+            JSON_LAST_INSTALL_LOG="${last_install_log}" \
+            JSON_LAST_INSTALL_TAIL="${last_install_tail}" \
+            JSON_FLIGHT_REPORT_LOG="${flight_report_log}" \
+            JSON_FLIGHT_REPORT_RAW="${flight_report_raw}" \
+            python3 - <<'PY' >/dev/null 2>&1
+import json
+import os
+
+path = os.environ.get("JSON_STATUS_DATA_PATH", "").strip()
+if not path:
+    raise SystemExit(2)
+
+def _env_int(name, default=0):
+    try:
+        return int(str(os.environ.get(name, default)).strip())
+    except Exception:
+        return int(default)
+
+def _env_bool(name, default=False):
+    raw = str(os.environ.get(name, "")).strip().lower()
+    if raw in ("1", "true", "yes", "on", "enabled"):
+        return True
+    if raw in ("0", "false", "no", "off", "disabled"):
+        return False
+    return bool(default)
+
+data = {
+    "generated_iso": os.environ.get("JSON_GENERATED_ISO", ""),
+    "generated_human": os.environ.get("JSON_GENERATED_HUMAN", ""),
+    "run_id": os.environ.get("JSON_RUN_ID", ""),
+    "last_status": os.environ.get("JSON_LAST_STATUS", ""),
+    "status_color": os.environ.get("JSON_STATUS_COLOR", ""),
+    "reboot_required": _env_bool("JSON_REBOOT_REQUIRED", False),
+    "zypp_lock_state": os.environ.get("JSON_ZYPP_LOCK_STATE", ""),
+    "zypp_lock_pid": os.environ.get("JSON_ZYPP_LOCK_PID", ""),
+    "zypp_lock_file": os.environ.get("JSON_ZYPP_LOCK_FILE", ""),
+    "pending_count": _env_int("JSON_PENDING_COUNT", 0),
+    "feat_flatpak": _env_bool("JSON_FEAT_FLATPAK", False),
+    "feat_snap": _env_bool("JSON_FEAT_SNAP", False),
+    "feat_soar": _env_bool("JSON_FEAT_SOAR", False),
+    "feat_brew": _env_bool("JSON_FEAT_BREW", False),
+    "feat_pipx": _env_bool("JSON_FEAT_PIPX", False),
+    "dl_timer": os.environ.get("JSON_DL_TIMER", ""),
+    "verify_timer": os.environ.get("JSON_VERIFY_TIMER", ""),
+    "nt_timer": os.environ.get("JSON_NT_TIMER", ""),
+    "verify_last_fixed": _env_int("JSON_VERIFY_LAST_FIXED", 0),
+    "verify_last_detected": _env_int("JSON_VERIFY_LAST_DETECTED", 0),
+    "verify_last_remaining": _env_int("JSON_VERIFY_LAST_REMAINING", 0),
+    "verify_last_ts": os.environ.get("JSON_VERIFY_LAST_TS", ""),
+    "snapper_timeline_timer": os.environ.get("JSON_SNAPPER_TIMELINE_TIMER", ""),
+    "snapper_cleanup_timer": os.environ.get("JSON_SNAPPER_CLEANUP_TIMER", ""),
+    "snapper_boot_timer": os.environ.get("JSON_SNAPPER_BOOT_TIMER", ""),
+    "kernel_ver": os.environ.get("JSON_KERNEL_VER", ""),
+    "uptime_info": os.environ.get("JSON_UPTIME_INFO", ""),
+    "mem_usage": os.environ.get("JSON_MEM_USAGE", ""),
+    "disk_usage_display": os.environ.get("JSON_DISK_USAGE_DISPLAY", ""),
+    "disk_percent": _env_int("JSON_DISK_PERCENT", 0),
+    "last_install_log": os.environ.get("JSON_LAST_INSTALL_LOG", ""),
+    "last_install_tail": os.environ.get("JSON_LAST_INSTALL_TAIL", ""),
+    "flight_report_log": os.environ.get("JSON_FLIGHT_REPORT_LOG", ""),
+    "flight_report_raw": os.environ.get("JSON_FLIGHT_REPORT_RAW", ""),
+}
+
+tmp_path = f"{path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=True, indent=2)
+    fh.write("\n")
+os.replace(tmp_path, path)
+PY
+        then
+            wrote_status_data_json=1
+        fi
+    fi
+
+    if [ "${wrote_status_data_json}" -ne 1 ] 2>/dev/null; then
+        write_atomic "${out_json_root}" <<JSON_EOF
 {
   "generated_iso": "${json_generated_iso}",
   "generated_human": "${json_generated_human}",
@@ -32243,11 +32379,11 @@ JSON_EOF
 
   "pending_count": ${json_pending_count},
 
-  "feat_flatpak": $([[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]] && echo true || echo false),
-  "feat_snap": $([[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]] && echo true || echo false),
-  "feat_soar": $([[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]] && echo true || echo false),
-  "feat_brew": $([[ "${ENABLE_BREW_UPDATES,,}" == "true" ]] && echo true || echo false),
-  "feat_pipx": $([[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]] && echo true || echo false),
+  "feat_flatpak": ${json_feat_flatpak},
+  "feat_snap": ${json_feat_snap},
+  "feat_soar": ${json_feat_soar},
+  "feat_brew": ${json_feat_brew},
+  "feat_pipx": ${json_feat_pipx},
 
   "dl_timer": "$(_json_escape "$dl_timer")",
   "verify_timer": "$(_json_escape "$verify_timer")",
@@ -32274,6 +32410,8 @@ JSON_EOF
   "flight_report_log": "${json_flight_report_log}",
   "flight_report_raw": "${json_flight_report_raw}"
 }
+JSON_EOF
+    fi
 JSON_EOF
 
     chmod 644 "${out_json_root}" 2>/dev/null || true
@@ -45594,8 +45732,13 @@ fi
 
 # Clear Python bytecode cache
 log_debug "Clearing Python bytecode cache..."
-execute_guarded "Clear legacy .pyc files" find "$SUDO_USER_HOME/.local/bin" -name "*.pyc" -delete || true
-execute_guarded "Clear legacy __pycache__ directories" find "$SUDO_USER_HOME/.local/bin" -type d -name "__pycache__" -exec rm -rf {} + || true
+legacy_user_bin_dir="${SUDO_USER_HOME}/.local/bin"
+if [ -d "${legacy_user_bin_dir}" ]; then
+    execute_guarded "Clear legacy .pyc files" find "${legacy_user_bin_dir}" -name "*.pyc" -delete || true
+    execute_guarded "Clear legacy __pycache__ directories" find "${legacy_user_bin_dir}" -type d -name "__pycache__" -exec rm -rf {} + || true
+else
+    log_debug "Legacy user bin directory not present (skipping pycache cleanup): ${legacy_user_bin_dir}"
+fi
 
 log_debug "Removing old user binaries and configs..."
 execute_guarded "Remove legacy user scripts and units" rm -f \

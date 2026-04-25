@@ -86,6 +86,16 @@ assert_contains "${source_text}" "if (parseLike || src === 'pollLive' || url.ind
 assert_contains "${source_text}" "Live status refresh failed to read status-data.json (invalid or partial JSON). This is usually temporary during file refresh." "missing parse-specific status-data notification copy"
 assert_not_contains "${source_text}" "A WebUI request failed. This is usually temporary (API restart, token mismatch, network hiccup)." "stale token-mismatch generic copy should not be present"
 
+# Writer-side hardening: status-data.json should prefer Python json.dump + os.replace
+# and keep a shell fallback path if python3 is unavailable.
+assert_contains "${source_text}" "local wrote_status_data_json" "missing status-data writer success guard variable"
+assert_contains "${source_text}" "JSON_STATUS_DATA_PATH=\"\${out_json_root}\"" "missing status-data writer python serialization env setup"
+assert_contains "${source_text}" "python3 - <<'PY' >/dev/null 2>&1" "missing status-data writer python heredoc serializer"
+assert_contains "${source_text}" "\"last_install_tail\": os.environ.get(\"JSON_LAST_INSTALL_TAIL\", \"\")," "missing status-data writer long tail payload mapping"
+assert_contains "${source_text}" "json.dump(data, fh, ensure_ascii=True, indent=2)" "missing status-data writer deterministic json dump"
+assert_contains "${source_text}" "os.replace(tmp_path, path)" "missing status-data writer atomic replace call"
+assert_contains "${source_text}" "if [ \"\${wrote_status_data_json}\" -ne 1 ] 2>/dev/null; then" "missing status-data writer shell fallback guard"
+
 if [ "${#FAILURES[@]}" -gt 0 ]; then
     echo "FAIL SUMMARY (${#FAILURES[@]})" >&2
     for f in "${FAILURES[@]}"; do
