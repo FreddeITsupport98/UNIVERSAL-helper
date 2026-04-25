@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- [2026-04-25 18:51 UTC] Further refactored `regressions/test_rocket_pm_runtime_recovery_sse_regression.sh` by extracting shared append payload checks into `assert_sse_append_payload_contract` and converting both `system-dup`/`self-update` runtime invocations to table-driven case loops, reducing duplicate assertion/case wiring while preserving SSE coverage.
+- [2026-04-25 18:47 UTC] Further refactored `regressions/test_rocket_pm_runtime_recovery_sse_regression.sh` by centralizing self-update append-event gating into shared helper `wait_for_sse_event_in_stream`, making append wait/poll timeout behavior reusable across SSE runtime cases.
 - [2026-04-25 18:43 UTC] Further refactored `regressions/test_rocket_pm_runtime_recovery_sse_regression.sh` by centralizing duplicated `/api/events/job` handler setup and thread lifecycle logic into shared helpers (`launch_sse_handler`, `wait_for_sse_thread_termination`) reused by both `system-dup` and `self-update` runtime cases.
 - [2026-04-24 19:58 UTC] Refactored `regressions/test_rocket_pm_runtime_recovery_sse_regression.sh` to use shared SSE assertion helpers (`collect_sse_events`, `validate_sse_sequence_and_extract_payloads`, `assert_sse_done_payload_contract`) for both `system-dup` and `self-update` `/api/events/job` runtime cases, reducing duplicated event-sequence/done-contract validation logic while preserving coverage.
 - [2026-04-24 19:52 UTC] Extended `regressions/test_rocket_pm_runtime_recovery_sse_regression.sh` `self-update` `/api/events/job` handler-level runtime coverage with an explicit failure-path done-event assertion (`rc != 0`), validating non-zero done payload propagation and `Failed` stage mapping for non-`system-dup` streams.

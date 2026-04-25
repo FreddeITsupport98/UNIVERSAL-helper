@@ -554,6 +554,58 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 fail(f"SSE stream did not terminate for {context_label}")
                 return False
             return True
+        def wait_for_sse_event_in_stream(h, event_name: str, timeout_s: float = 4.0, poll_s: float = 0.05) -> bool:  # noqa: ANN001
+            marker = f"event: {str(event_name)}\n"
+            deadline = pytime.time() + float(timeout_s)
+            while pytime.time() < deadline:
+                raw_now = h.wfile.getvalue().decode("utf-8", errors="replace")
+                if marker in raw_now:
+                    return True
+                pytime.sleep(float(poll_s))
+            return False
+        def assert_sse_append_payload_contract(
+            append_payload,  # noqa: ANN001
+            context_label: str,
+            expected_package_manager: str,
+            expected_stage_values: tuple[str, ...],
+            min_progress: int,
+            expect_pretty_text: bool,
+            expected_job_type=None,  # noqa: ANN001
+        ) -> None:
+            if not isinstance(append_payload, dict):
+                fail(f"SSE stream append payload missing for {context_label}")
+                return
+            if expected_job_type is not None:
+                got_job_type = str(append_payload.get("job_type", ""))
+                if got_job_type != str(expected_job_type):
+                    fail(f"SSE append job_type mismatch for {context_label} (got={got_job_type!r})")
+            got_pm = str(append_payload.get("package_manager", ""))
+            if got_pm != str(expected_package_manager):
+                fail(f"SSE append package_manager mismatch for {context_label} (got={got_pm!r})")
+            allowed_stages = tuple(str(s) for s in tuple(expected_stage_values))
+            got_stage = str(append_payload.get("stage", ""))
+            if got_stage not in allowed_stages:
+                if len(allowed_stages) == 1:
+                    fail(
+                        f"SSE append stage mismatch for {context_label} "
+                        f"(expected={allowed_stages[0]!r}, got={got_stage!r})"
+                    )
+                else:
+                    fail(
+                        f"SSE append stage mismatch for {context_label} "
+                        f"(expected one of {allowed_stages!r}, got={got_stage!r})"
+                    )
+            got_progress = int(append_payload.get("progress", 0) or 0)
+            if got_progress < int(min_progress):
+                fail(
+                    f"SSE append progress too low for {context_label} "
+                    f"(expected>={int(min_progress)}, got={got_progress})"
+                )
+            txt = str(append_payload.get("text", ""))
+            if bool(expect_pretty_text) and (not txt.startswith("PRETTY::")):
+                fail(f"SSE append should be zypper-prettified for {context_label}")
+            if (not bool(expect_pretty_text)) and txt.startswith("PRETTY::"):
+                fail(f"SSE append should not be prettified for {context_label}")
 
         def run_sse_case(
             pm_name: str,
@@ -602,29 +654,14 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
             if events is None:
                 return
             append_payload, done_payload = validate_sse_sequence_and_extract_payloads(events, context_label)
-            if append_payload is None:
-                fail(f"SSE stream append payload missing for {context_label}")
-            else:
-                got_pm = str(append_payload.get("package_manager", ""))
-                if got_pm != pm_name:
-                    fail(f"SSE append package_manager mismatch for {context_label} (got={got_pm!r})")
-                got_stage = str(append_payload.get("stage", ""))
-                if got_stage != expected_append_stage:
-                    fail(
-                        f"SSE append stage mismatch for {context_label} "
-                        f"(expected={expected_append_stage!r}, got={got_stage!r})"
-                    )
-                got_progress = int(append_payload.get("progress", 0) or 0)
-                if got_progress < int(min_append_progress):
-                    fail(
-                        f"SSE append progress too low for {context_label} "
-                        f"(expected>={min_append_progress}, got={got_progress})"
-                    )
-                txt = str(append_payload.get("text", ""))
-                if expect_pretty_append and not txt.startswith("PRETTY::"):
-                    fail(f"SSE append should be zypper-prettified for {context_label}")
-                if (not expect_pretty_append) and txt.startswith("PRETTY::"):
-                    fail(f"SSE append should not be prettified for {context_label}")
+            assert_sse_append_payload_contract(
+                append_payload,
+                context_label,
+                expected_package_manager=str(pm_name),
+                expected_stage_values=(str(expected_append_stage),),
+                min_progress=int(min_append_progress),
+                expect_pretty_text=bool(expect_pretty_append),
+            )
             assert_sse_done_payload_contract(done_payload, context_label, expected_rc=0, expected_stage="Done")
         def run_self_update_sse_case(job_id: str, done_rc: int, done_stage_raw: str, expected_done_stage: str) -> None:
             _unit, log_path2, status_path2, _script_path2 = env["_su_paths"](job_id)
@@ -644,14 +681,7 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
             h, t, run_err = launch_sse_handler("self-update", job_id, 12346)
             with open(log_path2, "a", encoding="utf-8") as f:
                 f.write("downloading update\n")
-            append_seen = False
-            append_deadline = pytime.time() + 4.0
-            while pytime.time() < append_deadline:
-                raw_now = h.wfile.getvalue().decode("utf-8", errors="replace")
-                if "event: append\n" in raw_now:
-                    append_seen = True
-                    break
-                pytime.sleep(0.05)
+            append_seen = wait_for_sse_event_in_stream(h, "append", timeout_s=4.0, poll_s=0.05)
             if not append_seen:
                 fail("SSE stream did not emit append event before self-update completion gating")
             write_text(
@@ -674,24 +704,15 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
             if events is None:
                 return
             append_payload, done_payload = validate_sse_sequence_and_extract_payloads(events, context_label)
-            if append_payload is None:
-                fail("SSE stream append payload missing for self-update")
-            else:
-                got_job_type = str(append_payload.get("job_type", ""))
-                if got_job_type != "self-update":
-                    fail(f"SSE append job_type mismatch for self-update (got={got_job_type!r})")
-                got_pm = str(append_payload.get("package_manager", ""))
-                if got_pm != "":
-                    fail(f"SSE append package_manager should be empty for self-update (got={got_pm!r})")
-                got_stage = str(append_payload.get("stage", ""))
-                if got_stage not in ("Starting", "Downloading"):
-                    fail(f"SSE append stage mismatch for self-update (got={got_stage!r})")
-                got_progress = int(append_payload.get("progress", 0) or 0)
-                if got_progress < 5:
-                    fail(f"SSE append progress too low for self-update (expected>=5, got={got_progress})")
-                txt = str(append_payload.get("text", ""))
-                if txt.startswith("PRETTY::"):
-                    fail("SSE append should not be zypper-prettified for self-update")
+            assert_sse_append_payload_contract(
+                append_payload,
+                context_label,
+                expected_package_manager="",
+                expected_stage_values=("Starting", "Downloading"),
+                min_progress=5,
+                expect_pretty_text=False,
+                expected_job_type="self-update",
+            )
             assert_sse_done_payload_contract(
                 done_payload,
                 context_label,
@@ -699,25 +720,43 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 expected_stage=str(expected_done_stage),
                 expected_package_manager="",
             )
+        system_dup_sse_cases = [
+            {
+                "pm_name": "apt",
+                "job_id": "aptstream001",
+                "append_chunk": "[webui] stage: running-package-manager\nReading package lists... Done\n",
+                "expected_append_stage": "Computing",
+                "min_append_progress": 18,
+                "expect_pretty_append": False,
+            },
+            {
+                "pm_name": "zypper",
+                "job_id": "zypstream01",
+                "append_chunk": '<progress percent="42" name="Resolving package dependencies"/>\n',
+                "expected_append_stage": "Resolving package dependencies",
+                "min_append_progress": 42,
+                "expect_pretty_append": True,
+            },
+        ]
+        for case in system_dup_sse_cases:
+            run_sse_case(**case)
 
-        run_sse_case(
-            pm_name="apt",
-            job_id="aptstream001",
-            append_chunk="[webui] stage: running-package-manager\nReading package lists... Done\n",
-            expected_append_stage="Computing",
-            min_append_progress=18,
-            expect_pretty_append=False,
-        )
-        run_sse_case(
-            pm_name="zypper",
-            job_id="zypstream01",
-            append_chunk='<progress percent="42" name="Resolving package dependencies"/>\n',
-            expected_append_stage="Resolving package dependencies",
-            min_append_progress=42,
-            expect_pretty_append=True,
-        )
-        run_self_update_sse_case(job_id="selfupd001", done_rc=0, done_stage_raw="done", expected_done_stage="Done")
-        run_self_update_sse_case(job_id="selfupdfail", done_rc=17, done_stage_raw="failed", expected_done_stage="Failed")
+        self_update_sse_cases = [
+            {
+                "job_id": "selfupd001",
+                "done_rc": 0,
+                "done_stage_raw": "done",
+                "expected_done_stage": "Done",
+            },
+            {
+                "job_id": "selfupdfail",
+                "done_rc": 17,
+                "done_stage_raw": "failed",
+                "expected_done_stage": "Failed",
+            },
+        ]
+        for case in self_update_sse_cases:
+            run_self_update_sse_case(**case)
 else:
     fail("extracted runtime helpers are unavailable (_recover_system_dup_job/_su_paths/_read_file_effective_full/_job_update_progress/_job_update_progress_dup/Handler)")
 
