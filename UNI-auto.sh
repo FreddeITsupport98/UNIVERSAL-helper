@@ -31411,13 +31411,76 @@ generate_dashboard() {
             if (kind === 'network') detail = 'Network error while checking repos';
             else if (kind === 'repo') detail = 'Repository refresh error';
             else if (kind === 'solver') detail = 'Solver/download error' + (rc ? (' (rc=' + rc + ')') : '');
-            return { state: 'error', pct: 100, detail: detail };
+            return { state: 'error', pct: 100, detail: detail, error_kind: kind, error_code: rc, raw_status: s };
         }
 
         if (s === 'idle') return { state: 'idle', pct: 0, detail: '' };
         if (s === 'refreshing') return { state: 'refreshing', pct: 10, detail: 'Refreshing repositories…' };
 
         return { state: s, pct: 0, detail: '' };
+    }
+    var _downloaderNotifyLastState = '';
+    var _downloaderNotifyLastErrorSig = '';
+    function _downloaderErrorSeverity(kind) {
+        kind = String(kind || '').toLowerCase();
+        if (kind === 'solver') return 'high';
+        if (kind === 'repo' || kind === 'network') return 'medium';
+        return 'medium';
+    }
+
+    function _downloaderIncidentId(kind, rc) {
+        var k = String(kind || 'unknown').toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+        var c = String(rc || '').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+        if (k === 'solver' && c) return 'inc-downloader-' + k + '-' + c;
+        return 'inc-downloader-' + k;
+    }
+
+    function _downloaderMaybeNotifyError(rawStatus, obj) {
+        var state = String((obj && obj.state) ? obj.state : '').toLowerCase();
+        if (state !== 'error') {
+            if (_downloaderNotifyLastState === 'error') _downloaderNotifyLastErrorSig = '';
+            _downloaderNotifyLastState = state;
+            return;
+        }
+
+        var kind = String((obj && obj.error_kind) ? obj.error_kind : 'unknown').toLowerCase();
+        var rc = String((obj && obj.error_code) ? obj.error_code : '').trim();
+        var incidentId = _downloaderIncidentId(kind, rc);
+        var severity = _downloaderErrorSeverity(kind);
+        var raw = String(rawStatus || '').trim();
+        var sig = incidentId + '|' + raw;
+
+        if (sig === _downloaderNotifyLastErrorSig) {
+            _downloaderNotifyLastState = state;
+            return;
+        }
+        _downloaderNotifyLastErrorSig = sig;
+        _downloaderNotifyLastState = state;
+
+        var detail = String((obj && obj.detail) ? obj.detail : 'Downloader prefetch error');
+        var body = ''
+            + 'Downloader prefetch reported an error.\\n\\n'
+            + 'Status: ' + (raw || 'error:unknown') + '\\n'
+            + 'Detail: ' + detail + '\\n'
+            + 'Incident: ' + incidentId + '\\n'
+            + 'Severity: ' + severity + '\\n\\n'
+            + 'If this keeps happening, open Managers and attach diagnostics + logs to a GitHub issue.';
+
+        try {
+            if (typeof window.znhNotifyAdd === 'function') {
+                window.znhNotifyAdd({
+                    id: 'znh_' + incidentId,
+                    title: 'Downloader prefetch error',
+                    body: body,
+                    level: 'error',
+                    actions: [
+                        { type: 'open-managers', label: 'Managers' },
+                        { type: 'export-ui-diagnostics', label: 'Download diagnostics' },
+                        { type: 'open-github-issues', label: 'Post issue' }
+                    ]
+                });
+            }
+        } catch (e0) {}
     }
 
     // Rocket (header) animation state driven by downloader status.
@@ -31499,6 +31562,7 @@ generate_dashboard() {
             .then(function(txt) {
                 var obj = parseDownloadStatus(txt);
                 updateDownloadUI(obj);
+                try { _downloaderMaybeNotifyError(txt, obj); } catch (e0) {}
                 return obj;
             })
             .catch(function(err) {
@@ -46411,6 +46475,7 @@ LOG_DIR="/var/log/zypper-auto"
 STATUS_FILE="$LOG_DIR/download-status.txt"
 START_TIME_FILE="$LOG_DIR/download-start-time.txt"
 CACHE_DIR="/var/cache/zypp/packages"
+DOWNLOADER_EVENT_LOG="$LOG_DIR/downloader-events.log"
 SYSTEM_PKG_MANAGER=""
 
 # Per-run correlation ID for the downloader (separate from the install helper
@@ -46455,9 +46520,14 @@ write_status() {
 # tweak solver behaviour (e.g. --allow-vendor-change) without editing
 # this script directly.
 CONFIG_FILE="/etc/zypper-auto.conf"
-if [ -f "$CONFIG_FILE" ]; then
+# Gate on readability (not just existence): the downloader runs as root in
+# production but is also exercised by regressions where the file may exist
+# under root-only permissions (mode 0600). Sourcing under `set -e` would
+# abort the whole run before we ever reach the missing-helper guard, hiding
+# the graceful error:repo path. Tolerate source-time failures explicitly.
+if [ -r "$CONFIG_FILE" ]; then
     # shellcheck source=/etc/zypper-auto.conf
-    . "$CONFIG_FILE"
+    . "$CONFIG_FILE" || dlog "Optional config $CONFIG_FILE could not be sourced (continuing with defaults)"
 fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
 CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-60}"
@@ -46598,112 +46668,211 @@ handle_lock_or_fail() {
         exit 0
     fi
 }
+znh_downloader_incident_id_for_status() {
+    local level="${1:-debug}" event="${2:-status}" status="${3:-unknown}" code="${4:-none}"
+    local key
+    key="${status}"
+    if [ -z "${key}" ] || [ "${key}" = "unknown" ]; then
+        key="${event}:${code}"
+    fi
+    key="$(printf '%s' "${key}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9:-' '-')"
+    key="${key//:/-}"
+    if [ "${level}" = "error" ] || [[ "${status}" == error:* ]]; then
+        printf 'inc-downloader-%s-%s' "${SYSTEM_PKG_MANAGER}" "${key}"
+    else
+        printf 'evt-downloader-%s-%s' "${SYSTEM_PKG_MANAGER}" "${event}"
+    fi
+}
+znh_downloader_emit_event() {
+    local level="${1:-debug}" event="${2:-status}" status="${3:-unknown}" message="${4:-}" code="${5:-none}"
+    local ts safe_message incident_id line
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    safe_message="${message//$'\n'/ }"
+    safe_message="${safe_message//$'\r'/ }"
+    safe_message="${safe_message//\"/\'}"
+    incident_id="$(znh_downloader_incident_id_for_status "${level}" "${event}" "${status}" "${code}")"
+    line="DOWNLOADER_EVENT ts=${ts} level=${level} pm=${SYSTEM_PKG_MANAGER} event=${event} status=${status} code=${code} incident_id=${incident_id} message=\"${safe_message}\""
+
+    printf '%s\n' "$line" >> "$DOWNLOADER_EVENT_LOG" 2>/dev/null || true
+    chmod 644 "$DOWNLOADER_EVENT_LOG" 2>/dev/null || true
+    printf '%s\n' "$line" >> "$LOG_DIR/dashboard-live.log" 2>/dev/null || true
+
+    if [ "${level}" = "error" ]; then
+        derr "$line"
+    else
+        dlog "$line"
+    fi
+}
+
+znh_downloader_write_status() {
+    local status="$1" message="${2:-}"
+    local level="debug" event="status"
+    write_status "${status}"
+
+    case "${status}" in
+        error:*)
+            level="error"
+            event="error"
+            ;;
+        complete:*)
+            level="info"
+            event="complete"
+            ;;
+        downloading:*)
+            level="debug"
+            event="downloading"
+            ;;
+        refreshing)
+            level="debug"
+            event="refreshing"
+            ;;
+        idle)
+            level="debug"
+            event="idle"
+            ;;
+    esac
+
+    znh_downloader_emit_event "${level}" "${event}" "${status}" "${message}" "${status#*:}"
+}
+
+znh_downloader_handle_stage_failure() {
+    local stage="$1" exit_code="$2" err_file="$3"
+    local status_now="unknown"
+    handle_lock_or_fail "${exit_code}" "${err_file}"
+
+    if znh_pm_is_network_output_file "${err_file}"; then
+        if is_metered_cached 1; then
+            znh_downloader_write_status "idle" "${stage} failed due to network but connection is metered; treating as idle"
+        else
+            znh_downloader_write_status "error:network" "${stage} failed due to network"
+        fi
+    else
+        znh_downloader_write_status "error:repo" "${stage} failed due to repository/refresh error"
+    fi
+
+    if [ -f "${STATUS_FILE}" ]; then
+        status_now="$(cat "${STATUS_FILE}" 2>/dev/null || echo unknown)"
+    fi
+    cat "${err_file}" >&2 || true
+    derr "${stage} failed (pm=${SYSTEM_PKG_MANAGER}, rc=${exit_code}); status=${status_now}"
+    return 1
+}
+
+znh_downloader_refresh_step() {
+    local refresh_err
+    refresh_err="$(mktemp)"
+    set +e
+    znh_pm_downloader_refresh_run >/dev/null 2>"${refresh_err}"
+    local refresh_rc=$?
+    set -e
+    if [ "${refresh_rc}" -ne 0 ]; then
+        znh_downloader_handle_stage_failure "refresh" "${refresh_rc}" "${refresh_err}" || true
+        rm -f "${refresh_err}"
+        return 1
+    fi
+    rm -f "${refresh_err}"
+    return 0
+}
+
+znh_downloader_preview_step() {
+    local out_file="$1"
+    local preview_err preview_rc
+    preview_err="$(mktemp)"
+    set +e
+    znh_pm_downloader_preview_run "${out_file}" "${preview_err}"
+    preview_rc=$?
+    set -e
+    if [ "${preview_rc}" -ne 0 ]; then
+        znh_downloader_handle_stage_failure "preview" "${preview_rc}" "${preview_err}" || true
+        rm -f "${preview_err}"
+        return 1
+    fi
+    rm -f "${preview_err}"
+    return 0
+}
+
+znh_downloader_record_preview_output() {
+    local dry_output_file="$1" package_count="$2"
+    local dryrun_output_file dryrun_tmp
+    dryrun_output_file="$LOG_DIR/dry-run-last.txt"
+    dryrun_tmp="$(mktemp)"
+    {
+        printf '%s\n' "${package_count} packages to upgrade"
+        printf '%s\n' "package-manager: ${SYSTEM_PKG_MANAGER}"
+        cat "${dry_output_file}"
+    } > "${dryrun_tmp}"
+    chmod 644 "${dryrun_tmp}"
+    mv "${dryrun_tmp}" "${dryrun_output_file}"
+}
+
+znh_downloader_detect_only_complete() {
+    znh_downloader_write_status "complete:0:0" "detection-only mode active; skipping prefetch download"
+    trigger_notifier
+}
+
+znh_downloader_run_prefetch_download() {
+    local out_var_name="$1"
+    local dl_err zyp_ret=0
+    dl_err="$(mktemp)"
+    set +e
+    znh_pm_downloader_download_run "${dl_err}" "${DUP_EXTRA_FLAGS:-}"
+    zyp_ret=$?
+    set -e
+    if [ "${zyp_ret}" -ne 0 ]; then
+        handle_lock_or_fail "${zyp_ret}" "${dl_err}"
+    fi
+    if [ -n "${out_var_name}" ]; then
+        printf -v "${out_var_name}" '%s' "${zyp_ret}"
+    fi
+    rm -f "${dl_err}"
+    return 0
+}
 # Cross-distro backend path (apt/dnf/pacman). Keep zypper flow below for
 # full progress-parity behaviour.
 if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
-    write_status "refreshing"
+    znh_downloader_write_status "refreshing" "starting prefetch refresh stage"
     date +%s > "$START_TIME_FILE"
-
-    REFRESH_ERR=$(mktemp)
-    set +e
-    znh_pm_downloader_refresh_run >/dev/null 2>"$REFRESH_ERR"
-    ZYP_EXIT=$?
-    set -e
-    if [ "$ZYP_EXIT" -ne 0 ]; then
-        handle_lock_or_fail "$ZYP_EXIT" "$REFRESH_ERR"
-        if znh_pm_is_network_output_file "$REFRESH_ERR"; then
-            if is_metered_cached 1; then
-                write_status "idle"
-                dlog "Network error during refresh but connection is now metered; treating as idle"
-            else
-                write_status "error:network"
-            fi
-        else
-            write_status "error:repo"
-        fi
-        cat "$REFRESH_ERR" >&2 || true
-        STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
-        derr "Refresh failed (pm=${SYSTEM_PKG_MANAGER}, rc=${ZYP_EXIT}); status=${STATUS_NOW}"
-        rm -f "$REFRESH_ERR"
+    if ! znh_downloader_refresh_step; then
         exit 0
     fi
-    rm -f "$REFRESH_ERR"
 
     DRY_OUTPUT=$(mktemp)
-    DRY_ERR=$(mktemp)
-    set +e
-    znh_pm_downloader_preview_run "$DRY_OUTPUT" "$DRY_ERR"
-    ZYP_EXIT=$?
-    set -e
-    if [ "$ZYP_EXIT" -ne 0 ]; then
-        handle_lock_or_fail "$ZYP_EXIT" "$DRY_ERR"
-        if znh_pm_is_network_output_file "$DRY_ERR"; then
-            if is_metered_cached 1; then
-                write_status "idle"
-                dlog "Network error during preview but connection is now metered; treating as idle"
-            else
-                write_status "error:network"
-            fi
-        else
-            write_status "error:repo"
-        fi
-        cat "$DRY_ERR" >&2 || true
-        STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
-        derr "Preview failed (pm=${SYSTEM_PKG_MANAGER}, rc=${ZYP_EXIT}); status=${STATUS_NOW}"
-        rm -f "$DRY_ERR" "$DRY_OUTPUT"
+    if ! znh_downloader_preview_step "$DRY_OUTPUT"; then
+        rm -f "$DRY_OUTPUT"
         exit 0
     fi
-    rm -f "$DRY_ERR"
 
     PKG_COUNT="$(znh_pm_extract_package_count_from_preview "$DRY_OUTPUT")"
     DOWNLOAD_SIZE="$(znh_pm_extract_download_size_from_preview "$DRY_OUTPUT")"
 
-    DRYRUN_OUTPUT_FILE="$LOG_DIR/dry-run-last.txt"
-    DRYRUN_TMP=$(mktemp)
-    {
-        printf '%s\n' "${PKG_COUNT} packages to upgrade"
-        printf '%s\n' "package-manager: ${SYSTEM_PKG_MANAGER}"
-        cat "$DRY_OUTPUT"
-    } > "$DRYRUN_TMP"
-    chmod 644 "$DRYRUN_TMP"
-    mv "$DRYRUN_TMP" "$DRYRUN_OUTPUT_FILE"
+    znh_downloader_record_preview_output "$DRY_OUTPUT" "$PKG_COUNT"
 
     if [ "${PKG_COUNT}" -le 0 ] 2>/dev/null; then
-        write_status "idle"
+        znh_downloader_write_status "idle" "no packages to upgrade during prefetch preview"
         dlog "No packages to upgrade (pm=${SYSTEM_PKG_MANAGER}, idle)"
         rm -f "$DRY_OUTPUT"
         exit 0
     fi
-
-    write_status "downloading:${PKG_COUNT}:${DOWNLOAD_SIZE}:0:0"
+    znh_downloader_write_status "downloading:${PKG_COUNT}:${DOWNLOAD_SIZE}:0:0" "prefetch download stage queued"
     if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
-        write_status "complete:0:0"
+        znh_downloader_detect_only_complete
         dlog "Detection-only mode; skipping download pass (pm=${SYSTEM_PKG_MANAGER})"
-        trigger_notifier
         rm -f "$DRY_OUTPUT"
         exit 0
     fi
-
-    set +e
-    DL_ERR=$(mktemp)
-    znh_pm_downloader_download_run "$DL_ERR" "${DUP_EXTRA_FLAGS:-}"
-    ZYP_RET=$?
-    if [ "$ZYP_RET" -ne 0 ]; then
-        handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
-    fi
-    rm -f "$DL_ERR"
-    set -e
+    ZYP_RET=0
+    znh_downloader_run_prefetch_download ZYP_RET
 
     START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
 
     if [ "$ZYP_RET" -eq 0 ]; then
-        write_status "complete:${DURATION}:${PKG_COUNT}"
+        znh_downloader_write_status "complete:${DURATION}:${PKG_COUNT}" "prefetch download finished"
         dlog "Download complete (pm=${SYSTEM_PKG_MANAGER}): queued=${PKG_COUNT} duration=${DURATION}s"
         trigger_notifier
     else
-        write_status "error:solver:$ZYP_RET"
+        znh_downloader_write_status "error:solver:$ZYP_RET" "prefetch download returned solver/error code"
         derr "Download pass returned rc=${ZYP_RET} (pm=${SYSTEM_PKG_MANAGER})"
     fi
 
@@ -46711,96 +46880,18 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
     exit 0
 fi
 
-# Write status: refreshing
-write_status "refreshing"
+# zypper path keeps cache-based progress tracking, but now uses the same
+# shared refresh/preview/error helper flow as other package managers.
+znh_downloader_write_status "refreshing" "starting prefetch refresh stage"
 date +%s > "$START_TIME_FILE"
 
-# Refresh repos
-REFRESH_ERR=$(mktemp)
-set +e
-znh_pm_downloader_refresh_run >/dev/null 2>"$REFRESH_ERR"
-ZYP_EXIT=$?
-set -e
-set -e
-if [ "$ZYP_EXIT" -ne 0 ]; then
-    # If another zypper instance holds the lock, handle_lock_or_fail will
-    # mark the status as idle and exit 0 so we do not treat it as an
-    # error here.
-    handle_lock_or_fail "$ZYP_EXIT" "$REFRESH_ERR"
-
-    # At this point we know the error was not a simple lock. Classify it
-    # as a network/repository problem so the notifier can surface a clear
-    # error message instead of silently doing nothing.
-    if znh_pm_is_network_output_file "$REFRESH_ERR"; then
-        # If network state changed mid-run and is now metered, treat this as a
-        # skip instead of an error to avoid noisy notifications.
-        if is_metered_cached 1; then
-            write_status "idle"
-            dlog "Network error during refresh but connection is now metered; treating as idle"
-        else
-            write_status "error:network"
-        fi
-    else
-        write_status "error:repo"
-    fi
-
-    cat "$REFRESH_ERR" >&2 || true
-    STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
-    derr "Refresh failed (rc=${ZYP_EXIT}); status=${STATUS_NOW}"
-    rm -f "$REFRESH_ERR"
-    # Exit 0 so systemd does not mark the service failed; the notifier
-    # will pick up the error:* status on the next run.
-    exit 0
-fi
-rm -f "$REFRESH_ERR"
-
-# Get update info
 DRY_OUTPUT=$(mktemp)
-DRY_ERR=$(mktemp)
-set +e
-znh_pm_downloader_preview_run "$DRY_OUTPUT" "$DRY_ERR"
-ZYP_EXIT=$?
-if [ "$ZYP_EXIT" -ne 0 ]; then
-    # Handle lock first; if it is just a lock, this will mark status idle
-    # and exit 0 so we do not need to set an additional error state.
-    handle_lock_or_fail "$ZYP_EXIT" "$DRY_ERR"
-
-    # Non-lock failure at the dry-run stage – mirror the refresh handling
-    # so the notifier can display a meaningful error notification.
-    if znh_pm_is_network_output_file "$DRY_ERR"; then
-        if is_metered_cached 1; then
-            write_status "idle"
-            dlog "Network error during dry-run but connection is now metered; treating as idle"
-        else
-            write_status "error:network"
-        fi
-    else
-        write_status "error:repo"
-    fi
-
-    cat "$DRY_ERR" >&2 || true
-    STATUS_NOW=$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)
-    derr "Dry-run failed (rc=${ZYP_EXIT}); status=${STATUS_NOW}"
-    rm -f "$DRY_ERR" "$DRY_OUTPUT"
+if ! znh_downloader_refresh_step; then
+    rm -f "$DRY_OUTPUT"
     exit 0
 fi
-rm -f "$DRY_ERR"
 
-# Persist full dry-run output so the user-space notifier can parse it
-# without running zypper itself. Use an atomic rename so readers never
-# see a partially-written file.
-DRYRUN_OUTPUT_FILE="$LOG_DIR/dry-run-last.txt"
-DRYRUN_TMP=$(mktemp)
-cp "$DRY_OUTPUT" "$DRYRUN_TMP"
-chmod 644 "$DRYRUN_TMP"
-mv "$DRYRUN_TMP" "$DRYRUN_OUTPUT_FILE"
-
-if ! grep -q "packages to upgrade" "$DRY_OUTPUT"; then
-    # No packages to upgrade; mark idle so the notifier shows a
-    # "no updates" state on the next run. DRYRUN_OUTPUT_FILE already
-    # contains the latest "Nothing to do" output for reference.
-    write_status "idle"
-    dlog "No packages to upgrade (idle)"
+if ! znh_downloader_preview_step "$DRY_OUTPUT"; then
     rm -f "$DRY_OUTPUT"
     exit 0
 fi
@@ -46809,17 +46900,30 @@ fi
 PKG_COUNT="$(znh_pm_extract_package_count_from_preview "$DRY_OUTPUT")"
 DOWNLOAD_SIZE="$(znh_pm_extract_download_size_from_preview "$DRY_OUTPUT")"
 
+znh_downloader_record_preview_output "$DRY_OUTPUT" "$PKG_COUNT"
+
+if [ "${PKG_COUNT}" -le 0 ] 2>/dev/null; then
+    znh_downloader_write_status "idle" "no packages to upgrade during prefetch preview"
+    dlog "No packages to upgrade (pm=${SYSTEM_PKG_MANAGER}, idle)"
+    rm -f "$DRY_OUTPUT"
+    exit 0
+fi
+
 # Detect case where everything is already cached so we don't show a fake
-# download progress bar. In that situation zypper's summary contains a
-    # line similar to:
+# download progress bar. In that situation zypper's summary contains a line like:
 #   0 B  |  -   88.3 MiB  already in cache
 if grep -q "already in cache" "$DRY_OUTPUT" && \
    grep -qE "^[[:space:]]*0 B[[:space:]]*\\|" "$DRY_OUTPUT"; then
-    # All data is already in the local cache; mark as a completed
-    # download with 0 newly-downloaded packages and skip the
-    # --download-only pass entirely.
-    write_status "complete:0:0"
+    znh_downloader_write_status "complete:0:0" "all candidate packages already cached"
     trigger_notifier
+    rm -f "$DRY_OUTPUT"
+    exit 0
+fi
+
+# If detect-only mode is enabled, do not run the actual download phase.
+if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
+    znh_downloader_detect_only_complete
+    dlog "Detection-only mode; skipping download pass (pm=${SYSTEM_PKG_MANAGER})"
     rm -f "$DRY_OUTPUT"
     exit 0
 fi
@@ -46832,7 +46936,7 @@ rm -f "$DRY_OUTPUT"
 BEFORE_COUNT=$(find "$CACHE_DIR" -maxdepth 4 -type f -name "*.rpm" 2>/dev/null | wc -l)
 
 # Write initial downloading status so the tracker loop sees it immediately
-write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0"
+znh_downloader_write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" "prefetch download stage started"
 
 # Start background progress tracker (coarse; avoids aggressive disk scans)
 # Optimization: only rescan the cache when the cache directory tree mtime changes.
@@ -46900,38 +47004,13 @@ wait_for_cache_event_or_timeout() {
             PERCENT=0
         fi
 
-        write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:$DOWNLOADED:$PERCENT"
+        znh_downloader_write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:$DOWNLOADED:$PERCENT" "cache progress update"
     done
 ) &
 TRACKER_PID=$!
 
-# If the downloader is running in detect-only mode, skip the heavy
-# "dup --download-only" pass and just trigger the notifier so it can
-# inform the user that updates are available. This avoids extra
-# bandwidth and disk usage when the user only cares about detection.
-if [ "$DOWNLOADER_DOWNLOAD_MODE" = "detect-only" ]; then
-    # Mark as a completed detection-only cycle; no new packages were
-    # downloaded by this helper, but the notifier will see that updates
-    # exist from its own dry-run.
-    write_status "complete:0:0"
-    dlog "Detection-only mode; skipping download-only pass"
-    trigger_notifier
-    exit 0
-fi
-
-# Do the actual download. We intentionally ignore most non-zero exit codes so
-# that partial downloads remain in the cache even if zypper encounters solver
-# problems that require manual intervention later. We still special-case the
-# lock error to avoid noisy logs when another zypper instance is running.
-set +e
-DL_ERR=$(mktemp)
-znh_pm_downloader_download_run "$DL_ERR" "${DUP_EXTRA_FLAGS:-}"
-ZYP_RET=$?
-if [ "$ZYP_RET" -ne 0 ]; then
-    handle_lock_or_fail "$ZYP_RET" "$DL_ERR"
-fi
-rm -f "$DL_ERR"
-set -e
+ZYP_RET=0
+znh_downloader_run_prefetch_download ZYP_RET
 
 # Kill the progress tracker
 kill $TRACKER_PID 2>/dev/null || true
@@ -46958,13 +47037,19 @@ if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
     if command -v systemctl >/dev/null 2>&1; then
         systemctl start zypper-cache-cleanup.service >/dev/null 2>&1 || true
     fi
+fi
 
-    write_status "complete:$DURATION:$ACTUAL_DOWNLOADED"
+if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
+    znh_downloader_write_status "complete:$DURATION:$ACTUAL_DOWNLOADED" "prefetch download completed with newly cached packages"
     dlog "Download complete: downloaded=${ACTUAL_DOWNLOADED} duration=${DURATION}s"
     trigger_notifier
 elif [ $ZYP_RET -ne 0 ]; then
-    write_status "error:solver:$ZYP_RET"
+    znh_downloader_write_status "error:solver:$ZYP_RET" "prefetch download returned solver/error code"
     derr "Download-only returned rc=${ZYP_RET} (solver/manual intervention may be required)"
+else
+    znh_downloader_write_status "complete:$DURATION:0" "prefetch download completed with no newly cached packages"
+    dlog "Download complete: downloaded=0 duration=${DURATION}s"
+    trigger_notifier
 fi
 
 # Keep the live dashboard data fresh (best-effort): regenerate status.html + status-data.json
@@ -58885,6 +58970,12 @@ class Handler(BaseHTTPRequestHandler):
                 l = str(line or "").strip().lower()
                 if not l:
                     return "generic"
+                if ("downloader_event" in l) or ("inc-downloader-" in l) or ("downloader prefetch" in l):
+                    if ("status=error:solver" in l) or ("error:solver" in l):
+                        return "downloader-solver"
+                    if ("status=error:network" in l) or ("status=error:repo" in l) or ("error:network" in l) or ("error:repo" in l):
+                        return "downloader-network"
+                    return "downloader-event"
                 if ("dashboard api" in l) or ("unauthorized" in l) or ("token" in l) or ("failed to fetch" in l):
                     return "network-api"
                 if ("javascript error" in l) or ("referenceerror" in l) or ("typeerror" in l) or ("syntaxerror" in l):
@@ -58993,6 +59084,9 @@ class Handler(BaseHTTPRequestHandler):
                     "repo-rpm-integrity": 84,
                     "disk-pressure": 88,
                     "update-conflict": 74,
+                    "downloader-solver": 80,
+                    "downloader-network": 72,
+                    "downloader-event": 62,
                     "notifier-syntax": 64,
                     "history-db": 62,
                     "generic": 48,
@@ -59145,6 +59239,21 @@ class Handler(BaseHTTPRequestHandler):
                         ],
                     },
                     {
+                        "id": "downloader-network-repo",
+                        "action": "reset-downloads",
+                        "reason": "Downloader prefetch network/repository errors detected.",
+                        "priority": 101,
+                        "incident_kinds": ["downloader-network", "downloader-event"],
+                        "patterns": [
+                            "downloader_event",
+                            "status=error:network",
+                            "status=error:repo",
+                            "inc-downloader-network",
+                            "inc-downloader-repo",
+                            "downloader prefetch reported an error",
+                        ],
+                    },
+                    {
                         "id": "repo-or-rpm-integrity",
                         "action": "verify",
                         "reason": "Repository/rpm integrity errors detected; run full verify & auto-repair.",
@@ -59164,13 +59273,15 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "rm-conflict",
                         "reason": "Duplicate/conflicting RPM patterns detected.",
                         "priority": 105,
-                        "incident_kinds": ["update-conflict"],
+                        "incident_kinds": ["update-conflict", "downloader-solver"],
                         "patterns": [
                             "conflicting requests",
                             "duplicate rpm",
                             "has inferior architecture",
                             "problem:",
                             "conflicts with",
+                            "status=error:solver",
+                            "inc-downloader-solver",
                         ],
                     },
                     {
@@ -59178,7 +59289,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "reset-downloads",
                         "reason": "Downloader/notifier cache-state inconsistency patterns detected.",
                         "priority": 95,
-                        "incident_kinds": ["network-api", "js-crash"],
+                        "incident_kinds": ["network-api", "js-crash", "downloader-event"],
                         "patterns": [
                             "download-status",
                             "cached state",

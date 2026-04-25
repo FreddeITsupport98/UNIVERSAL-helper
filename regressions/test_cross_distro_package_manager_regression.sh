@@ -16,6 +16,9 @@ Static regression smoke test for cross-distro package-manager wiring:
   - package name resolution and install-hint helpers exist
   - dependency installer path uses the package-manager abstraction
   - phase-2 runtime helpers wire downloader/install/notifier/view paths
+  - downloader telemetry emits stable incident ids and structured events
+  - WebUI downloader bell notifications include dedupe + incident metadata
+  - AI smart-report classifier recognizes downloader telemetry signals
   - hardcoded "sudo zypper install" guidance is no longer present
 EOF
 }
@@ -81,9 +84,20 @@ require_contains "${source_text}" "PM_RUNTIME_HELPER=\"/usr/local/lib/zypper-aut
 require_contains "${source_text}" ". \"\${PM_RUNTIME_HELPER}\"" "Runtime consumers are not sourcing shared helper"
 require_contains "${source_text}" "znh_pm_is_lock_failure" "Missing downloader lock classifier wiring to shared PM helper"
 require_contains "${source_text}" "znh_pm_is_network_output_file" "Missing downloader network classifier wiring to shared PM helper"
-require_contains "${source_text}" "znh_pm_downloader_refresh_run >/dev/null 2>\"\$REFRESH_ERR\"" "Missing downloader refresh invocation via shared PM helper"
-require_contains "${source_text}" "znh_pm_downloader_preview_run \"\$DRY_OUTPUT\" \"\$DRY_ERR\"" "Missing downloader preview invocation via shared PM helper"
-require_contains "${source_text}" "znh_pm_downloader_download_run \"\$DL_ERR\" \"\${DUP_EXTRA_FLAGS:-}\"" "Missing downloader download invocation via shared PM helper"
+require_contains "${source_text}" "znh_pm_downloader_refresh_run >/dev/null 2>\"\${refresh_err}\"" "Missing downloader refresh invocation via shared PM helper"
+require_contains "${source_text}" "znh_pm_downloader_preview_run \"\${out_file}\" \"\${preview_err}\"" "Missing downloader preview invocation via shared PM helper"
+require_contains "${source_text}" "znh_pm_downloader_download_run \"\${dl_err}\" \"\${DUP_EXTRA_FLAGS:-}\"" "Missing downloader download invocation via shared PM helper"
+require_contains "${source_text}" "znh_downloader_refresh_step() {" "Missing shared downloader refresh helper wrapper"
+require_contains "${source_text}" "znh_downloader_preview_step() {" "Missing shared downloader preview helper wrapper"
+require_contains "${source_text}" "znh_downloader_run_prefetch_download() {" "Missing shared downloader prefetch helper wrapper"
+require_contains "${source_text}" "if ! znh_downloader_refresh_step; then" "Cross-distro path is not invoking shared refresh helper"
+require_contains "${source_text}" "if ! znh_downloader_preview_step \"\$DRY_OUTPUT\"; then" "Cross-distro path is not invoking shared preview helper"
+require_contains "${source_text}" "znh_downloader_run_prefetch_download ZYP_RET" "Cross-distro path is not invoking shared prefetch download helper"
+require_contains "${source_text}" "znh_downloader_incident_id_for_status() {" "Missing downloader stable-incident-id helper"
+require_contains "${source_text}" "incident_id=\"\$(znh_downloader_incident_id_for_status \"" "Downloader event emitter is not using stable incident-id helper"
+require_contains "${source_text}" "line=\"DOWNLOADER_EVENT ts=\${ts} level=\${level} pm=\${SYSTEM_PKG_MANAGER} event=\${event} status=\${status} code=\${code} incident_id=\${incident_id} message=" "Downloader event log line missing structured incident metadata"
+require_contains "${source_text}" "znh_downloader_write_status \"complete:\$DURATION:0\" \"prefetch download completed with no newly cached packages\"" "Missing zero-download complete status for shared downloader semantics"
+require_contains "${source_text}" "znh_downloader_write_status \"error:solver:\$ZYP_RET\" \"prefetch download returned solver/error code\"" "Missing solver error status propagation for downloader telemetry"
 
 require_contains "${source_text}" "znh_pm_install_upgrade_streaming \"\${LOG_FILE}\" \"\${tmp_out}\"" "Missing install helper runtime upgrade dispatch call"
 require_contains "${source_text}" "znh_pm_capture_package_snapshot \"\${PKG_PRE_FILE}\"" "Missing install helper pre-update package snapshot dispatch call"
@@ -123,6 +137,26 @@ require_contains "${source_text}" "if [ \"\${PM_NAME}\" = \"pacman\" ] && [ \"\$
 require_contains "${source_text}" "=== RESTART CHECK (needs-restarting -s) ===" "Rocket start worker missing dnf restart-check marker"
 require_contains "${source_text}" "=== RESTART CHECK (reboot-required markers) ===" "Rocket start worker missing apt restart-check marker"
 require_contains "${source_text}" "=== RESTART CHECK (pacman marker scan) ===" "Rocket start worker missing pacman restart-check marker"
+# WebUI downloader notification + parse contract for bell telemetry.
+require_contains "${source_text}" "return { state: 'error', pct: 100, detail: detail, error_kind: kind, error_code: rc, raw_status: s };" "Downloader status parser missing structured error metadata fields"
+require_contains "${source_text}" "var _downloaderNotifyLastState = '';" "WebUI downloader notification dedupe state is missing"
+require_contains "${source_text}" "var _downloaderNotifyLastErrorSig = '';" "WebUI downloader error signature dedupe state is missing"
+require_contains "${source_text}" "function _downloaderIncidentId(kind, rc) {" "WebUI downloader incident-id helper is missing"
+require_contains "${source_text}" "if (sig === _downloaderNotifyLastErrorSig) {" "WebUI downloader notification dedupe guard is missing"
+require_contains "${source_text}" "window.znhNotifyAdd({" "WebUI downloader bell notification emitter is missing"
+require_contains "${source_text}" "Incident: ' + incidentId + '\\\\n'" "WebUI downloader notification body missing incident metadata"
+require_contains "${source_text}" "Severity: ' + severity + '\\\\n\\\\n'" "WebUI downloader notification body missing severity metadata"
+require_contains "${source_text}" "try { _downloaderMaybeNotifyError(txt, obj); } catch (e0) {}" "Downloader poll loop missing bell notification hook"
+
+# AI smart-report downloader telemetry classification/mapping contract.
+require_contains "${source_text}" "if (\"downloader_event\" in l) or (\"inc-downloader-\" in l) or (\"downloader prefetch\" in l):" "AI signal classifier missing downloader event recognition entrypoint"
+require_contains "${source_text}" "return \"downloader-solver\"" "AI signal classifier missing downloader-solver mapping"
+require_contains "${source_text}" "return \"downloader-network\"" "AI signal classifier missing downloader-network mapping"
+require_contains "${source_text}" "\"downloader-solver\": 80," "AI incident impact table missing downloader-solver weight"
+require_contains "${source_text}" "\"downloader-network\": 72," "AI incident impact table missing downloader-network weight"
+require_contains "${source_text}" "\"downloader-event\": 62," "AI incident impact table missing downloader-event weight"
+require_contains "${source_text}" "\"id\": \"downloader-network-repo\"," "AI repair-plan catalog missing downloader network/repo action mapping"
+require_contains "${source_text}" "\"incident_kinds\": [\"update-conflict\", \"downloader-solver\"]," "AI repair-plan catalog missing downloader solver conflict mapping"
 
 require_not_contains "${source_text}" "sudo zypper install" "Hardcoded zypper install guidance still present"
 require_not_contains "${source_text}" "The background updater could not reach the openSUSE repositories." "Notifier network error message is still openSUSE-only"
