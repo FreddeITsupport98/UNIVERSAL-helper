@@ -459,6 +459,101 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 if isinstance(payload, dict):
                     out.append((ev_name, payload))
             return out
+        def collect_sse_events(h, run_err: list[str], context_label: str):  # noqa: ANN001
+            if run_err:
+                fail(f"SSE stream handler raised runtime error for {context_label}: {run_err[0]}")
+                return None
+            if int(getattr(h, "_sent_status", 0) or 0) != 200:
+                fail(
+                    f"SSE stream expected HTTP 200 for {context_label} "
+                    f"(got={getattr(h, '_sent_status', None)!r})"
+                )
+                return None
+            raw = h.wfile.getvalue().decode("utf-8", errors="replace")
+            events = parse_sse_events(raw)
+            if not events:
+                fail(f"SSE stream emitted no parseable events for {context_label}")
+                return None
+            return events
+        def validate_sse_sequence_and_extract_payloads(events: list[tuple[str, dict]], context_label: str):
+            names = [ev for ev, _payload in events]
+            if names[0] != "reset":
+                fail(f"SSE stream first event should be reset for {context_label} (got={names[0]!r})")
+            if "append" not in names:
+                fail(f"SSE stream did not emit append event for {context_label}")
+                return None, None
+            if names[-1] != "done":
+                fail(f"SSE stream final event should be done for {context_label} (got={names[-1]!r})")
+            append_payload = None
+            done_payload = None
+            for ev, payload in events:
+                if ev == "append" and append_payload is None:
+                    append_payload = payload
+                if ev == "done":
+                    done_payload = payload
+            return append_payload, done_payload
+        def assert_sse_done_payload_contract(
+            done_payload,  # noqa: ANN001
+            context_label: str,
+            expected_rc: int,
+            expected_stage: str,
+            expected_package_manager=None,  # noqa: ANN001
+        ) -> None:
+            if not isinstance(done_payload, dict):
+                fail(f"SSE stream done payload missing for {context_label}")
+                return
+            if not bool(done_payload.get("done", False)):
+                fail(f"SSE done payload should set done=true for {context_label}")
+            if int(done_payload.get("progress", 0) or 0) != 100:
+                fail(f"SSE done payload should set progress=100 for {context_label}")
+            got_rc_raw = done_payload.get("rc", None)
+            try:
+                got_rc_int = int(got_rc_raw)
+            except Exception:
+                got_rc_int = -999999
+            if got_rc_int != int(expected_rc):
+                fail(
+                    f"SSE done payload should set rc={int(expected_rc)} for {context_label} "
+                    f"(got={got_rc_raw!r})"
+                )
+            done_stage = str(done_payload.get("stage", ""))
+            if done_stage != str(expected_stage):
+                fail(
+                    f"SSE done payload stage mismatch for {context_label} "
+                    f"(expected={str(expected_stage)!r}, got={done_stage!r})"
+                )
+            if expected_package_manager is not None:
+                done_pm = str(done_payload.get("package_manager", ""))
+                if done_pm != str(expected_package_manager):
+                    fail(
+                        f"SSE done payload package_manager mismatch for {context_label} "
+                        f"(expected={str(expected_package_manager)!r}, got={done_pm!r})"
+                    )
+        def launch_sse_handler(job_type: str, job_id: str, client_port: int):
+            h = handler_cls()
+            h.server = _FakeServer()
+            h.headers = {"X-ZNH-Token": h.server.token}
+            h.client_address = ("127.0.0.1", int(client_port))
+            h.path = f"/api/events/job?job_type={job_type}&job_id={job_id}"
+            h.wfile = _CaptureWFile()
+            h._sent_headers = []
+            h._sent_status = None
+            run_err: list[str] = []
+            def _runner() -> None:
+                try:
+                    h.do_GET()
+                except Exception as exc2:
+                    run_err.append(str(exc2))
+            t = threading.Thread(target=_runner, daemon=True)
+            t.start()
+            pytime.sleep(0.20)
+            return h, t, run_err
+        def wait_for_sse_thread_termination(t, context_label: str, timeout_s: float = 8.0):  # noqa: ANN001
+            t.join(timeout=float(timeout_s))
+            if t.is_alive():
+                fail(f"SSE stream did not terminate for {context_label}")
+                return False
+            return True
 
         def run_sse_case(
             pm_name: str,
@@ -482,26 +577,7 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 ),
             )
             write_text(log_path2, "")
-
-            h = handler_cls()
-            h.server = _FakeServer()
-            h.headers = {"X-ZNH-Token": h.server.token}
-            h.client_address = ("127.0.0.1", 12345)
-            h.path = f"/api/events/job?job_type=system-dup&job_id={job_id}"
-            h.wfile = _CaptureWFile()
-            h._sent_headers = []
-            h._sent_status = None
-            run_err: list[str] = []
-
-            def _runner() -> None:
-                try:
-                    h.do_GET()
-                except Exception as exc2:
-                    run_err.append(str(exc2))
-
-            t = threading.Thread(target=_runner, daemon=True)
-            t.start()
-            pytime.sleep(0.20)
+            h, t, run_err = launch_sse_handler("system-dup", job_id, 12345)
             with open(log_path2, "a", encoding="utf-8") as f:
                 f.write(append_chunk)
             pytime.sleep(0.45)
@@ -519,81 +595,37 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                     ]
                 ),
             )
-            t.join(timeout=8.0)
-            if t.is_alive():
-                fail(f"SSE stream did not terminate for pm={pm_name} case")
+            if not wait_for_sse_thread_termination(t, f"pm={pm_name} case"):
                 return
-            if run_err:
-                fail(f"SSE stream handler raised runtime error for pm={pm_name}: {run_err[0]}")
+            context_label = f"pm={pm_name}"
+            events = collect_sse_events(h, run_err, context_label)
+            if events is None:
                 return
-            if int(getattr(h, "_sent_status", 0) or 0) != 200:
-                fail(f"SSE stream expected HTTP 200 for pm={pm_name} (got={getattr(h, '_sent_status', None)!r})")
-                return
-
-            raw = h.wfile.getvalue().decode("utf-8", errors="replace")
-            events = parse_sse_events(raw)
-            if not events:
-                fail(f"SSE stream emitted no parseable events for pm={pm_name}")
-                return
-
-            names = [ev for ev, _payload in events]
-            if names[0] != "reset":
-                fail(f"SSE stream first event should be reset for pm={pm_name} (got={names[0]!r})")
-            if "append" not in names:
-                fail(f"SSE stream did not emit append event for pm={pm_name}")
-                return
-            if names[-1] != "done":
-                fail(f"SSE stream final event should be done for pm={pm_name} (got={names[-1]!r})")
-
-            append_payload = None
-            done_payload = None
-            for ev, payload in events:
-                if ev == "append" and append_payload is None:
-                    append_payload = payload
-                if ev == "done":
-                    done_payload = payload
-
-            if not isinstance(append_payload, dict):
-                fail(f"SSE stream append payload missing for pm={pm_name}")
+            append_payload, done_payload = validate_sse_sequence_and_extract_payloads(events, context_label)
+            if append_payload is None:
+                fail(f"SSE stream append payload missing for {context_label}")
             else:
                 got_pm = str(append_payload.get("package_manager", ""))
                 if got_pm != pm_name:
-                    fail(f"SSE append package_manager mismatch for pm={pm_name} (got={got_pm!r})")
+                    fail(f"SSE append package_manager mismatch for {context_label} (got={got_pm!r})")
                 got_stage = str(append_payload.get("stage", ""))
                 if got_stage != expected_append_stage:
                     fail(
-                        f"SSE append stage mismatch for pm={pm_name} "
+                        f"SSE append stage mismatch for {context_label} "
                         f"(expected={expected_append_stage!r}, got={got_stage!r})"
                     )
                 got_progress = int(append_payload.get("progress", 0) or 0)
                 if got_progress < int(min_append_progress):
                     fail(
-                        f"SSE append progress too low for pm={pm_name} "
+                        f"SSE append progress too low for {context_label} "
                         f"(expected>={min_append_progress}, got={got_progress})"
                     )
                 txt = str(append_payload.get("text", ""))
                 if expect_pretty_append and not txt.startswith("PRETTY::"):
-                    fail(f"SSE append should be zypper-prettified for pm={pm_name}")
+                    fail(f"SSE append should be zypper-prettified for {context_label}")
                 if (not expect_pretty_append) and txt.startswith("PRETTY::"):
-                    fail(f"SSE append should not be prettified for pm={pm_name}")
-
-            if not isinstance(done_payload, dict):
-                fail(f"SSE stream done payload missing for pm={pm_name}")
-            else:
-                if not bool(done_payload.get("done", False)):
-                    fail(f"SSE done payload should set done=true for pm={pm_name}")
-                if int(done_payload.get("progress", 0) or 0) != 100:
-                    fail(f"SSE done payload should set progress=100 for pm={pm_name}")
-                got_rc_raw = done_payload.get("rc", None)
-                try:
-                    got_rc_int = int(got_rc_raw)
-                except Exception:
-                    got_rc_int = -999999
-                if got_rc_int != 0:
-                    fail(f"SSE done payload should set rc=0 for pm={pm_name} (got={got_rc_raw!r})")
-                done_stage = str(done_payload.get("stage", ""))
-                if done_stage != "Done":
-                    fail(f"SSE done payload stage mismatch for pm={pm_name} (got={done_stage!r})")
+                    fail(f"SSE append should not be prettified for {context_label}")
+            assert_sse_done_payload_contract(done_payload, context_label, expected_rc=0, expected_stage="Done")
         def run_self_update_sse_case(job_id: str, done_rc: int, done_stage_raw: str, expected_done_stage: str) -> None:
             _unit, log_path2, status_path2, _script_path2 = env["_su_paths"](job_id)
             write_text(
@@ -609,26 +641,7 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 ),
             )
             write_text(log_path2, "")
-
-            h = handler_cls()
-            h.server = _FakeServer()
-            h.headers = {"X-ZNH-Token": h.server.token}
-            h.client_address = ("127.0.0.1", 12346)
-            h.path = f"/api/events/job?job_type=self-update&job_id={job_id}"
-            h.wfile = _CaptureWFile()
-            h._sent_headers = []
-            h._sent_status = None
-            run_err: list[str] = []
-
-            def _runner() -> None:
-                try:
-                    h.do_GET()
-                except Exception as exc2:
-                    run_err.append(str(exc2))
-
-            t = threading.Thread(target=_runner, daemon=True)
-            t.start()
-            pytime.sleep(0.20)
+            h, t, run_err = launch_sse_handler("self-update", job_id, 12346)
             with open(log_path2, "a", encoding="utf-8") as f:
                 f.write("downloading update\n")
             append_seen = False
@@ -654,41 +667,14 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                     ]
                 ),
             )
-            t.join(timeout=8.0)
-            if t.is_alive():
-                fail("SSE stream did not terminate for self-update case")
+            if not wait_for_sse_thread_termination(t, "self-update case"):
                 return
-            if run_err:
-                fail(f"SSE stream handler raised runtime error for self-update: {run_err[0]}")
+            context_label = "self-update"
+            events = collect_sse_events(h, run_err, context_label)
+            if events is None:
                 return
-            if int(getattr(h, "_sent_status", 0) or 0) != 200:
-                fail(f"SSE stream expected HTTP 200 for self-update (got={getattr(h, '_sent_status', None)!r})")
-                return
-
-            raw = h.wfile.getvalue().decode("utf-8", errors="replace")
-            events = parse_sse_events(raw)
-            if not events:
-                fail("SSE stream emitted no parseable events for self-update")
-                return
-
-            names = [ev for ev, _payload in events]
-            if names[0] != "reset":
-                fail(f"SSE stream first event should be reset for self-update (got={names[0]!r})")
-            if "append" not in names:
-                fail("SSE stream did not emit append event for self-update")
-                return
-            if names[-1] != "done":
-                fail(f"SSE stream final event should be done for self-update (got={names[-1]!r})")
-
-            append_payload = None
-            done_payload = None
-            for ev, payload in events:
-                if ev == "append" and append_payload is None:
-                    append_payload = payload
-                if ev == "done":
-                    done_payload = payload
-
-            if not isinstance(append_payload, dict):
+            append_payload, done_payload = validate_sse_sequence_and_extract_payloads(events, context_label)
+            if append_payload is None:
                 fail("SSE stream append payload missing for self-update")
             else:
                 got_job_type = str(append_payload.get("job_type", ""))
@@ -706,33 +692,13 @@ if "_recover_system_dup_job" in env and "_job_update_progress_dup" in env and "H
                 txt = str(append_payload.get("text", ""))
                 if txt.startswith("PRETTY::"):
                     fail("SSE append should not be zypper-prettified for self-update")
-
-            if not isinstance(done_payload, dict):
-                fail("SSE stream done payload missing for self-update")
-            else:
-                if not bool(done_payload.get("done", False)):
-                    fail("SSE done payload should set done=true for self-update")
-                if int(done_payload.get("progress", 0) or 0) != 100:
-                    fail("SSE done payload should set progress=100 for self-update")
-                got_rc_raw = done_payload.get("rc", None)
-                try:
-                    got_rc_int = int(got_rc_raw)
-                except Exception:
-                    got_rc_int = -999999
-                if got_rc_int != int(done_rc):
-                    fail(
-                        f"SSE done payload should set rc={int(done_rc)} for self-update "
-                        f"(got={got_rc_raw!r})"
-                    )
-                done_stage = str(done_payload.get("stage", ""))
-                if done_stage != str(expected_done_stage):
-                    fail(
-                        f"SSE done payload stage mismatch for self-update "
-                        f"(expected={str(expected_done_stage)!r}, got={done_stage!r})"
-                    )
-                done_pm = str(done_payload.get("package_manager", ""))
-                if done_pm != "":
-                    fail(f"SSE done payload package_manager should be empty for self-update (got={done_pm!r})")
+            assert_sse_done_payload_contract(
+                done_payload,
+                context_label,
+                expected_rc=int(done_rc),
+                expected_stage=str(expected_done_stage),
+                expected_package_manager="",
+            )
 
         run_sse_case(
             pm_name="apt",
