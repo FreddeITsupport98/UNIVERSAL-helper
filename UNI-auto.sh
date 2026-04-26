@@ -2413,11 +2413,11 @@ __znh_write_dashboard_schema_json() {
     "ROCKET_WIZARD_DEFAULT_SIMULATE": {"type": "bool", "default": "true"},
     "ROCKET_WIZARD_PREVIEW_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 600, "step": 30, "default": "180"},
     "ROCKET_WIZARD_INSTALL_LOCK_WAIT_SECONDS": {"type": "int", "min": 0, "max": 7200, "step": 60, "default": "1800"},
-    "ROCKET_WIZARD_USE_XMLOUT": {"type": "bool", "default": "true"},
-    "ROCKET_WIZARD_ALLOW_VENDOR_CHANGE": {"type": "bool", "default": "false"},
-    "ROCKET_WIZARD_FORCE_RESOLUTION": {"type": "bool", "default": "false"},
+    "ROCKET_WIZARD_USE_XMLOUT": {"type": "bool", "default": "true", "requires": {"pm": ["zypper"]}},
+    "ROCKET_WIZARD_ALLOW_VENDOR_CHANGE": {"type": "bool", "default": "false", "requires": {"pm": ["zypper"]}},
+    "ROCKET_WIZARD_FORCE_RESOLUTION": {"type": "bool", "default": "false", "requires": {"pm": ["zypper"]}},
 
-    "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false"},
+    "ZYPPER_TURBO_TUNER_ENABLED": {"type": "bool", "default": "false", "requires": {"pm": ["zypper"]}},
     "VERIFY_JOURNAL_AUTO_VACUUM_ENABLED": {"type": "bool", "default": "true"},
 
     "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
@@ -2433,55 +2433,55 @@ __znh_write_dashboard_schema_json() {
     "VERIFY_FAILED_UNITS_NOISE_REGEX": {"type": "string", "max_len": 600, "default": "(^systemd-coredump@|^dracut-.*|^tmp\\.mount$)"},
 
     "DOWNLOADER_DOWNLOAD_MODE": {"type": "enum", "allowed": ["full","detect-only"], "default": "full"},
-    "AUTO_DUPLICATE_RPM_MODE": {"type": "enum", "allowed": ["whitelist","thirdparty","both"], "default": "whitelist"},
+    "AUTO_DUPLICATE_RPM_MODE": {"type": "enum", "allowed": ["whitelist","thirdparty","both"], "default": "whitelist", "requires": {"rpm_based": true}},
     "CLEANUP_REPORT_FORMAT": {"type": "enum", "allowed": ["text","json","both"], "default": "both"},
-    "BOOT_ENTRY_CLEANUP_MODE": {"type": "enum", "allowed": ["backup","delete"], "default": "backup"},
+    "BOOT_ENTRY_CLEANUP_MODE": {"type": "enum", "allowed": ["backup","delete"], "default": "backup", "requires": {"ghost_scrub": true}},
 
-    "SNAP_RETENTION_OPTIMIZER_ENABLED": {"type": "bool", "default": "true"},
-    "SNAP_RETENTION_MAX_NUMBER_LIMIT": {"type": "int", "min": 0, "max": 200, "step": 1, "default": "15"},
-    "SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT": {"type": "int", "min": 0, "max": 100, "step": 1, "default": "5"},
-    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY": {"type": "int", "min": 0, "max": 200, "step": 1, "default": "10"},
-    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY": {"type": "int", "min": 0, "max": 120, "step": 1, "default": "7"},
-    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY": {"type": "int", "min": 0, "max": 104, "step": 1, "default": "2"},
-    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY": {"type": "int", "min": 0, "max": 60, "step": 1, "default": "2"},
-    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY": {"type": "int", "min": 0, "max": 20, "step": 1, "default": "0"},
+    "SNAP_RETENTION_OPTIMIZER_ENABLED": {"type": "bool", "default": "true", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_NUMBER_LIMIT": {"type": "int", "min": 0, "max": 200, "step": 1, "default": "15", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_NUMBER_LIMIT_IMPORTANT": {"type": "int", "min": 0, "max": 100, "step": 1, "default": "5", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_HOURLY": {"type": "int", "min": 0, "max": 200, "step": 1, "default": "10", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_DAILY": {"type": "int", "min": 0, "max": 120, "step": 1, "default": "7", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_WEEKLY": {"type": "int", "min": 0, "max": 104, "step": 1, "default": "2", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_MONTHLY": {"type": "int", "min": 0, "max": 60, "step": 1, "default": "2", "requires": {"snapper": true}},
+    "SNAP_RETENTION_MAX_TIMELINE_LIMIT_YEARLY": {"type": "int", "min": 0, "max": 20, "step": 1, "default": "0", "requires": {"snapper": true}},
 
-    "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED": {"type": "bool", "default": "true"},
-    "SNAP_CLEANUP_BUSY_WAIT_SECONDS": {"type": "int", "min": 0, "max": 1800, "step": 10, "default": "180"},
-    "SNAP_CLEANUP_BUSY_POLL_SECONDS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "2"},
-    "SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE": {"type": "bool", "default": "false"},
-    "SNAP_CLEANUP_CRITICAL_FREE_MB": {"type": "int", "min": 0, "max": 5000, "step": 50, "default": "300"},
-    "SNAP_CLEANUP_HYSTERESIS_ENABLED": {"type": "bool", "default": "true"},
-    "SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB": {"type": "int", "min": 0, "max": 20000, "step": 50, "default": "700"},
-    "SNAP_CLEANUP_PHASE_PACING_SECONDS": {"type": "int", "min": 0, "max": 15, "step": 1, "default": "1"},
-    "SNAP_CLEANUP_CPU_QUOTA_PERCENT": {"type": "int", "min": 0, "max": 100, "step": 1, "default": "35"},
-    "SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST": {"type": "int", "min": 1, "max": 50, "step": 1, "default": "3"},
+    "SNAP_CLEANUP_CONCURRENCY_GUARD_ENABLED": {"type": "bool", "default": "true", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_BUSY_WAIT_SECONDS": {"type": "int", "min": 0, "max": 1800, "step": 10, "default": "180", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_BUSY_POLL_SECONDS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "2", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_BUSY_FORCE_ANYWAY_NON_INTERACTIVE": {"type": "bool", "default": "false", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_CRITICAL_FREE_MB": {"type": "int", "min": 0, "max": 5000, "step": 50, "default": "300", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_HYSTERESIS_ENABLED": {"type": "bool", "default": "true", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_HYSTERESIS_HIGH_FREE_MB": {"type": "int", "min": 0, "max": 20000, "step": 50, "default": "700", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_PHASE_PACING_SECONDS": {"type": "int", "min": 0, "max": 15, "step": 1, "default": "1", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_CPU_QUOTA_PERCENT": {"type": "int", "min": 0, "max": 100, "step": 1, "default": "35", "requires": {"snapper": true}},
+    "SNAP_CLEANUP_FORCE_PRUNE_KEEP_NEWEST": {"type": "int", "min": 1, "max": 50, "step": 1, "default": "3", "requires": {"snapper": true}},
 
-    "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED": {"type": "bool", "default": "false"},
-    "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX": {"type": "string", "max_len": 200, "default": "aborted|failed", "presets": ["aborted|failed", "aborted", "failed", "error", "aborted|failed|error"]},
-    "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM": {"type": "bool", "default": "true"},
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_ENABLED": {"type": "bool", "default": "false", "requires": {"snapper": true}},
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_REGEX": {"type": "string", "max_len": 200, "default": "aborted|failed", "presets": ["aborted|failed", "aborted", "failed", "error", "aborted|failed|error"], "requires": {"snapper": true}},
+    "SNAP_BROKEN_SNAPSHOT_HUNTER_CONFIRM": {"type": "bool", "default": "true", "requires": {"snapper": true}},
 
-    "BOOT_ENTRY_CLEANUP_ENABLED": {"type": "bool", "default": "true"},
-    "BOOT_ENTRY_CLEANUP_KEEP_LATEST": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
-    "BOOT_ENTRY_CLEANUP_ENTRIES_DIR": {"type": "string", "max_len": 200, "default": ""},
-    "BOOT_ENTRY_CLEANUP_CONFIRM": {"type": "bool", "default": "true"},
-    "SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED": {"type": "bool", "default": "true"},
-    "SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB": {"type": "bool", "default": "true"},
+    "BOOT_ENTRY_CLEANUP_ENABLED": {"type": "bool", "default": "true", "requires": {"ghost_scrub": true}},
+    "BOOT_ENTRY_CLEANUP_KEEP_LATEST": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2", "requires": {"ghost_scrub": true}},
+    "BOOT_ENTRY_CLEANUP_ENTRIES_DIR": {"type": "string", "max_len": 200, "default": "", "requires": {"ghost_scrub": true}},
+    "BOOT_ENTRY_CLEANUP_CONFIRM": {"type": "bool", "default": "true", "requires": {"ghost_scrub": true}},
+    "SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED": {"type": "bool", "default": "true", "requires": {"ghost_scrub": true}},
+    "SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB": {"type": "bool", "default": "true", "requires": {"ghost_scrub": true}},
 
-    "KERNEL_PURGE_ENABLED": {"type": "bool", "default": "false"},
-    "KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE": {"type": "bool", "default": "true"},
-    "KERNEL_PURGE_MODE": {"type": "enum", "allowed": ["auto","zypper","systemd"], "default": "auto"},
-    "KERNEL_PURGE_CONFIRM": {"type": "bool", "default": "true"},
-    "KERNEL_PURGE_DRY_RUN": {"type": "bool", "default": "false"},
-    "KERNEL_PURGE_DETAILS": {"type": "bool", "default": "false"},
-    "KERNEL_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900"},
+    "KERNEL_PURGE_ENABLED": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
+    "KERNEL_PURGE_IMPLICIT_ON_FORCE_PRUNE": {"type": "bool", "default": "true", "requires": {"kernel_purge": true}},
+    "KERNEL_PURGE_MODE": {"type": "enum", "allowed": ["auto","zypper","systemd"], "default": "auto", "requires": {"kernel_purge": true}},
+    "KERNEL_PURGE_CONFIRM": {"type": "bool", "default": "true", "requires": {"kernel_purge": true}},
+    "KERNEL_PURGE_DRY_RUN": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
+    "KERNEL_PURGE_DETAILS": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
+    "KERNEL_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900", "requires": {"kernel_purge": true}},
 
-    "KERNEL_FAMILY_PURGE_ENABLED": {"type": "bool", "default": "false"},
-    "KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY": {"type": "bool", "default": "true"},
-    "KERNEL_FAMILY_PURGE_TARGETS": {"type": "string", "max_len": 400, "default": ""},
-    "KERNEL_FAMILY_PURGE_CONFIRM": {"type": "bool", "default": "true"},
-    "KERNEL_FAMILY_PURGE_DRY_RUN": {"type": "bool", "default": "false"},
-    "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900"}
+    "KERNEL_FAMILY_PURGE_ENABLED": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
+    "KERNEL_FAMILY_PURGE_FORCE_PRUNE_ONLY": {"type": "bool", "default": "true", "requires": {"kernel_purge": true}},
+    "KERNEL_FAMILY_PURGE_TARGETS": {"type": "string", "max_len": 400, "default": "", "requires": {"kernel_purge": true}},
+    "KERNEL_FAMILY_PURGE_CONFIRM": {"type": "bool", "default": "true", "requires": {"kernel_purge": true}},
+    "KERNEL_FAMILY_PURGE_DRY_RUN": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
+    "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900", "requires": {"kernel_purge": true}}
   }
 }
 EOF
@@ -18727,6 +18727,7 @@ generate_dashboard() {
     var _settingsToken = null;
     var _settingsSchema = null;
     var _settingsConfig = null;
+    var _settingsCapabilities = null;
     var _settingsDirty = false;
     var _settingsLastConfig = null;
     var _settingsDirtyToastShown = false;
@@ -29296,6 +29297,59 @@ generate_dashboard() {
         };
     }
 
+    // Capability-aware gating helper: returns a short human reason string when
+    // this schema entry's 'requires' block is not satisfied by the supplied
+    // capabilities map (so the renderer can grey out and explain), or returns
+    // an empty string when the entry is unrestricted or capability info is
+    // not yet available (permissive default).
+    function _capabilityLockReason(meta, caps) {
+        try {
+            var req = (meta && meta.requires) ? meta.requires : null;
+            if (!req || typeof req !== 'object') return '';
+            if (!caps || typeof caps !== 'object') return '';
+            // Package manager gate: meta.requires.pm = ["zypper"]
+            if (req.pm) {
+                var pmActual = String(caps.package_manager || '').trim().toLowerCase();
+                var allowed = Array.isArray(req.pm) ? req.pm : [req.pm];
+                allowed = allowed.map(function(x) { return String(x || '').trim().toLowerCase(); });
+                if (pmActual && allowed.indexOf(pmActual) < 0) {
+                    return 'requires package manager ' + allowed.join('/') +
+                           ' (host uses ' + pmActual + ')';
+                }
+            }
+            // Generic boolean capability flags.
+            var flagReasons = {
+                rpm_based: 'requires an RPM-based package manager (zypper or dnf)',
+                snapper: 'requires Btrfs root + Snapper (openSUSE-style)',
+                ghost_scrub: 'requires Btrfs+Snapper + BLS bootloader (systemd-boot or GRUB)',
+                kernel_purge: 'requires zypper purge-kernels or systemd-boot kernel hooks',
+                opensuse_like: 'is openSUSE-only'
+            };
+            for (var k in req) {
+                if (k === 'pm') continue;
+                if (!Object.prototype.hasOwnProperty.call(req, k)) continue;
+                var want = req[k];
+                if (want === null || typeof want === 'undefined') continue;
+                var actual = caps[k];
+                if (typeof actual === 'undefined') continue;
+                if (Boolean(want) && !Boolean(actual)) {
+                    var why = flagReasons[k] || ('requires capability "' + k + '"');
+                    var detailReasons = caps[k + '_missing_reasons'];
+                    if (Array.isArray(detailReasons) && detailReasons.length > 0) {
+                        why += ' \u2014 ' + detailReasons.join('; ');
+                    }
+                    return why;
+                }
+                if (want === false && Boolean(actual)) {
+                    return 'not applicable when ' + k + ' is enabled';
+                }
+            }
+        } catch (eCR) {
+            return '';
+        }
+        return '';
+    }
+
     function _renderSettingsForm(schema, cfg) {
         var form = document.getElementById('settings-form');
         if (!form) return;
@@ -29303,6 +29357,11 @@ generate_dashboard() {
         _settingsSetDirty(false);
         // Keep a copy so we can log diffs on save/autosave.
         try { _settingsLastConfig = JSON.parse(JSON.stringify(cfg || {})); } catch (e) { _settingsLastConfig = cfg || {}; }
+
+        // Track keys that the renderer greyed out due to unmet platform
+        // capabilities. Used to emit a single explanatory banner near the top
+        // of the drawer once row rendering finishes.
+        var capabilityLockedKeys = [];
 
         // Safety UX:
         // - Advanced settings are hidden by default.
@@ -29746,10 +29805,66 @@ generate_dashboard() {
                 }
             }
 
+            // Capability-aware gating: when this setting requires platform
+            // capabilities the host does not have (apt/dnf/pacman, non-Btrfs
+            // root, snapper missing, etc.), grey out the row and disable the
+            // controls. Existing values stay visible (read-only) and a short
+            // reason line is appended so the user understands why.
+            try {
+                var caps = _settingsCapabilities || null;
+                var lockReason = _capabilityLockReason(meta, caps);
+                if (lockReason) {
+                    capabilityLockedKeys.push(f.key);
+                    try { row.classList.add('znh-capability-locked'); } catch (eCL0) {}
+                    try { row.style.opacity = '0.55'; } catch (eCL1) {}
+                    try {
+                        ctrlWrap.querySelectorAll('input, select, textarea').forEach(function(el2) {
+                            try { el2.disabled = true; } catch (eCL2) {}
+                            try { el2.title = lockReason; } catch (eCL3) {}
+                        });
+                    } catch (eCL4) {}
+                    var reasonEl = document.createElement('div');
+                    reasonEl.className = 'znh-capability-lock-reason';
+                    reasonEl.style.color = 'var(--muted)';
+                    reasonEl.style.fontSize = '0.78rem';
+                    reasonEl.style.marginTop = '6px';
+                    reasonEl.style.fontStyle = 'italic';
+                    reasonEl.textContent = '\u2139 Not available on this system: ' + lockReason;
+                    ctrlWrap.appendChild(reasonEl);
+                }
+            } catch (eCLX) {}
+
             row.appendChild(lab);
             row.appendChild(ctrlWrap);
             form.appendChild(row);
         });
+
+        // Surface a single banner near the top of the drawer when any rows
+        // were greyed out so users see the platform-aware behavior at a glance.
+        try {
+            if (capabilityLockedKeys.length > 0 && form.firstChild) {
+                var capBanner = document.createElement('div');
+                capBanner.className = 'znh-capability-lock-banner';
+                capBanner.style.border = '1px solid rgba(245,158,11,0.35)';
+                capBanner.style.background = 'rgba(245,158,11,0.08)';
+                capBanner.style.color = 'var(--text)';
+                capBanner.style.padding = '10px 12px';
+                capBanner.style.borderRadius = '12px';
+                capBanner.style.marginBottom = '12px';
+                capBanner.style.fontSize = '0.86rem';
+                var pmLabel = (_settingsCapabilities && _settingsCapabilities.package_manager) ? String(_settingsCapabilities.package_manager) : 'detected platform';
+                var fsLabel = (_settingsCapabilities && _settingsCapabilities.root_fstype) ? String(_settingsCapabilities.root_fstype) : '';
+                var fsSuffix = fsLabel ? (' (root fs=' + fsLabel + ')') : '';
+                capBanner.innerHTML = '<strong>\u26A0 Some settings are greyed out</strong>' +
+                    '<div style="margin-top:4px;color:var(--muted);">' +
+                    String(capabilityLockedKeys.length) + ' option(s) are unavailable on this system: ' +
+                    'package manager <code>' + pmLabel + '</code>' + fsSuffix + '. ' +
+                    'These are zypper-only / Btrfs+Snapper-only / openSUSE Tumbleweed-only features and stay disabled here so they cannot be saved by accident. ' +
+                    'Existing values are preserved verbatim in <code>/etc/zypper-auto.conf</code>.' +
+                    '</div>';
+                form.insertBefore(capBanner, form.firstChild);
+            }
+        } catch (eCBN) {}
 
         // Apply initial gate state
         _applyAdvancedVisibility();
@@ -29775,6 +29890,13 @@ generate_dashboard() {
                     if (!window.__znh_settings_danger_unlocked) {
                         return;
                     }
+                }
+                // Capability-aware safety: never rewrite settings whose
+                // platform requirements aren't met on this host. This keeps
+                // shared/manual /etc/zypper-auto.conf values intact when a
+                // non-openSUSE desktop opens the Settings drawer.
+                if (row && row.classList && row.classList.contains('znh-capability-locked')) {
+                    return;
                 }
             } catch (e) {}
 
@@ -29802,7 +29924,16 @@ generate_dashboard() {
         _settingsBanner('', false);
         return _api('/api/schema', { method: 'GET' }).then(function(s) {
             _settingsSchema = s.schema;
-            return _api('/api/config', { method: 'GET' });
+            // Best-effort: load platform capabilities so the renderer can
+            // grey out rows whose 'requires' block is not satisfied. Failure
+            // is non-fatal (renderer falls back to permissive behavior).
+            return _api('/api/system/capabilities', { method: 'GET' }).then(function(caps) {
+                _settingsCapabilities = caps || null;
+            }).catch(function() {
+                _settingsCapabilities = null;
+            }).then(function() {
+                return _api('/api/config', { method: 'GET' });
+            });
         }).then(function(c) {
             _settingsConfig = c.config
             try { _znhMgrServerApplyPollingConfig(_settingsConfig); } catch (eM) {}
@@ -52627,11 +52758,50 @@ def _parse_conf_text(text: str) -> dict:
     return out
 
 
-def _validate(cfg: dict) -> tuple[dict, list[str], list[str]]:
+def _capability_satisfied(meta: dict, caps: dict) -> bool:
+    # Returns True when this schema entry's optional `requires` block is
+    # satisfied by the supplied capabilities map, OR when the metadata has
+    # no `requires` block at all (universal entries always satisfy).
+    try:
+        req = meta.get("requires") if isinstance(meta, dict) else None
+    except Exception:
+        req = None
+    if not req or not isinstance(req, dict):
+        return True
+    if not isinstance(caps, dict) or not caps:
+        # No capability info available -> be permissive (don't false-disable
+        # rows just because detection has not run yet on this server).
+        return True
+    try:
+        pm_required = req.get("pm")
+        if pm_required:
+            pm_actual = str(caps.get("package_manager", "") or "").strip().lower()
+            allowed = [str(x or "").strip().lower() for x in (pm_required if isinstance(pm_required, list) else [pm_required])]
+            if pm_actual and pm_actual not in allowed:
+                return False
+        for flag in ("rpm_based", "snapper", "ghost_scrub", "kernel_purge", "opensuse_like"):
+            want = req.get(flag)
+            if want is None:
+                continue
+            actual = caps.get(flag)
+            # Treat missing capability data as permissive.
+            if actual is None:
+                continue
+            if bool(want) and not bool(actual):
+                return False
+            if (want is False) and bool(actual):
+                return False
+    except Exception:
+        return True
+    return True
+
+
+def _validate(cfg: dict, caps: dict | None = None) -> tuple[dict, list[str], list[str]]:
     warnings = []
     invalid = []
     eff = dict(DEFAULTS)
     eff.update({k: str(v) for k, v in cfg.items() if k in SCHEMA})
+    caps_map = caps if isinstance(caps, dict) else {}
 
     def set_default(k: str, why: str):
         invalid.append(k)
@@ -52641,6 +52811,14 @@ def _validate(cfg: dict) -> tuple[dict, list[str], list[str]]:
     for k, meta in SCHEMA.items():
         v = eff.get(k, meta.get("default"))
         t = meta["type"]
+        # Capability-aware tolerance: when this key requires a platform
+        # capability the host does not have (apt/dnf/pacman, non-Btrfs root,
+        # snapper missing, etc.), preserve the existing value verbatim and
+        # do not coerce it back to default. This keeps shared/manual configs
+        # portable across openSUSE Tumbleweed and other desktops.
+        if not _capability_satisfied(meta, caps_map):
+            eff[k] = str(v) if v is not None else str(meta.get("default", ""))
+            continue
         if t == "bool":
             vl = str(v).lower()
             if vl not in ("true", "false"):
@@ -52684,6 +52862,243 @@ def _validate(cfg: dict) -> tuple[dict, list[str], list[str]]:
     return eff, warnings, invalid
 
 
+_CAPABILITIES_CACHE = {"ts": 0.0, "data": {}}
+
+
+def _compute_system_capabilities() -> dict:
+    # Computes a compact map of platform capabilities used by the Settings
+    # drawer to grey out options that don't apply on the current host.
+    # Cached for a short window so /api/system/capabilities + every config
+    # validate/save call don't re-probe the system on each request.
+    try:
+        now = time.time()
+        cached = _CAPABILITIES_CACHE.get("data") or {}
+        cached_ts = float(_CAPABILITIES_CACHE.get("ts") or 0.0)
+        if cached and (now - cached_ts) < 30.0:
+            return cached
+    except Exception:
+        pass
+
+    out = {
+        "package_manager": "",
+        "rpm_based": False,
+        "opensuse_like": False,
+        "root_fstype": "unknown",
+        "btrfs_root": False,
+        "snapper_installed": False,
+        "snapper_root_config_present": False,
+        "snapper": False,
+        "snapper_missing_reasons": [],
+        "bls_entries_present": False,
+        "bls_entries_dir": "",
+        "systemd_boot_detected": False,
+        "grub_detected": False,
+        "grub_bls_mode": False,
+        "ghost_scrub": False,
+        "ghost_missing_reasons": [],
+        "kernel_purge": False,
+        "kernel_purge_missing_reasons": [],
+        "boot_entry_cleanup": False,
+        "os_id": "",
+        "os_id_like": "",
+    }
+
+    # Package manager (best-effort: ID + ID_LIKE + which-binary fallback).
+    try:
+        os_id = ""
+        os_id_like = ""
+        try:
+            with open("/etc/os-release", "r", encoding="utf-8", errors="replace") as f:
+                for ln in f:
+                    line = str(ln or "").strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = str(k or "").strip()
+                    v = str(v or "").strip().strip("'").strip('"')
+                    if k == "ID":
+                        os_id = v.lower()
+                    elif k == "ID_LIKE":
+                        os_id_like = v.lower()
+        except Exception:
+            pass
+        out["os_id"] = os_id
+        out["os_id_like"] = os_id_like
+        out["opensuse_like"] = bool(("opensuse" in os_id) or ("opensuse" in os_id_like) or ("suse" in os_id_like))
+
+        pm = ""
+        if os_id.startswith("opensuse") or os_id in ("sles", "sled"):
+            pm = "zypper"
+        elif os_id in ("ubuntu", "debian", "linuxmint", "pop", "elementary", "neon", "kali", "raspbian"):
+            pm = "apt"
+        elif os_id in ("fedora", "rhel", "centos", "rocky", "almalinux", "ol", "nobara"):
+            pm = "dnf"
+        elif os_id in ("arch", "manjaro", "endeavouros", "garuda"):
+            pm = "pacman"
+        if not pm:
+            if "suse" in os_id_like:
+                pm = "zypper"
+            elif "debian" in os_id_like:
+                pm = "apt"
+            elif ("rhel" in os_id_like) or ("fedora" in os_id_like):
+                pm = "dnf"
+            elif "arch" in os_id_like:
+                pm = "pacman"
+        if not pm:
+            for cand in ("zypper", "dnf", "apt-get", "pacman"):
+                if shutil.which(cand):
+                    pm = "apt" if cand == "apt-get" else cand
+                    break
+        out["package_manager"] = pm
+        out["rpm_based"] = pm in ("zypper", "dnf")
+    except Exception:
+        pass
+
+    # Root filesystem.
+    try:
+        rfs = "unknown"
+        try:
+            p = subprocess.run(
+                ["findmnt", "-n", "-o", "FSTYPE", "/"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=4,
+            )
+            s = str(p.stdout or "").strip().lower()
+            if s:
+                rfs = s
+        except Exception:
+            pass
+        if rfs == "unknown":
+            try:
+                with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as f:
+                    for ln in f:
+                        parts = str(ln or "").split()
+                        if len(parts) >= 3 and parts[1] == "/":
+                            s2 = str(parts[2] or "").strip().lower()
+                            if s2:
+                                rfs = s2
+                            break
+            except Exception:
+                pass
+        out["root_fstype"] = rfs
+        out["btrfs_root"] = (rfs == "btrfs")
+    except Exception:
+        pass
+
+    # Snapper support.
+    try:
+        out["snapper_installed"] = bool(shutil.which("snapper"))
+        out["snapper_root_config_present"] = bool(os.path.isfile("/etc/snapper/configs/root"))
+        snapper_supported = bool(out["btrfs_root"] and out["snapper_installed"] and out["snapper_root_config_present"])
+        out["snapper"] = snapper_supported
+        reasons = []
+        if not out["btrfs_root"]:
+            reasons.append(f"Root filesystem is '{out['root_fstype']}' (requires btrfs)")
+        if not out["snapper_installed"]:
+            reasons.append("snapper command is not installed")
+        if not out["snapper_root_config_present"]:
+            reasons.append("Missing /etc/snapper/configs/root")
+        out["snapper_missing_reasons"] = reasons
+    except Exception:
+        pass
+
+    # BLS entries + bootloader probe.
+    try:
+        bls_dir = ""
+        for cand in ("/boot/loader/entries", "/boot/efi/loader/entries", "/efi/loader/entries"):
+            if os.path.isdir(cand):
+                bls_dir = cand
+                break
+        out["bls_entries_dir"] = bls_dir
+        out["bls_entries_present"] = bool(bls_dir)
+
+        sd_boot = False
+        for p0 in ("/boot/loader/loader.conf", "/efi/loader/loader.conf"):
+            try:
+                if os.path.isfile(p0):
+                    sd_boot = True
+                    break
+            except Exception:
+                pass
+        out["systemd_boot_detected"] = sd_boot
+
+        grub_detected = False
+        grub_bls_mode = False
+        for cfg in ("/boot/grub2/grub.cfg", "/boot/grub/grub.cfg"):
+            try:
+                if os.path.isfile(cfg):
+                    grub_detected = True
+                    try:
+                        with open(cfg, "r", encoding="utf-8", errors="replace") as gf:
+                            head = gf.read(8192) or ""
+                        if ("blscfg" in head) or ("GRUB_ENABLE_BLSCFG" in head):
+                            grub_bls_mode = True
+                    except Exception:
+                        pass
+                    break
+            except Exception:
+                pass
+        out["grub_detected"] = grub_detected
+        out["grub_bls_mode"] = grub_bls_mode
+    except Exception:
+        pass
+
+    # Ghost-scrub / boot-entry cleanup capability (BLS layout + a supported bootloader + Snapper).
+    try:
+        ghost_supported = bool(
+            out["snapper"] and out["bls_entries_present"] and (out["systemd_boot_detected"] or out["grub_detected"])
+        )
+        out["ghost_scrub"] = ghost_supported
+        out["boot_entry_cleanup"] = ghost_supported
+        ghost_reasons = list(out.get("snapper_missing_reasons") or [])
+        if not out["bls_entries_present"]:
+            ghost_reasons.append("BLS entries directory was not detected")
+        if not (out["systemd_boot_detected"] or out["grub_detected"]):
+            ghost_reasons.append("No supported bootloader profile detected (systemd-boot or GRUB)")
+        # de-dup while preserving order
+        seen = set()
+        deduped = []
+        for r in ghost_reasons:
+            s = str(r or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            deduped.append(s)
+        out["ghost_missing_reasons"] = deduped
+    except Exception:
+        pass
+
+    # Kernel-purge capability: zypper purge-kernels OR systemd-boot kernel hooks.
+    try:
+        kp_reasons = []
+        kp_capable = False
+        if out["package_manager"] == "zypper" and shutil.which("zypper"):
+            kp_capable = True
+        elif out["systemd_boot_detected"] and shutil.which("sdbootutil"):
+            kp_capable = True
+        if not kp_capable:
+            if out["package_manager"] != "zypper":
+                kp_reasons.append("Kernel-purge currently requires zypper purge-kernels or systemd-boot + sdbootutil")
+            if not out["systemd_boot_detected"]:
+                kp_reasons.append("systemd-boot was not detected")
+        out["kernel_purge"] = kp_capable
+        out["kernel_purge_missing_reasons"] = kp_reasons
+    except Exception:
+        pass
+
+    try:
+        _CAPABILITIES_CACHE["ts"] = time.time()
+        _CAPABILITIES_CACHE["data"] = out
+    except Exception:
+        pass
+    return out
+
+
 def _read_conf(conf_path: str) -> tuple[dict, list[str], list[str]]:
     try:
         with open(conf_path, "r", encoding="utf-8") as f:
@@ -52691,7 +53106,11 @@ def _read_conf(conf_path: str) -> tuple[dict, list[str], list[str]]:
     except FileNotFoundError:
         txt = ""
     raw = _parse_conf_text(txt)
-    eff, warnings, invalid = _validate(raw)
+    try:
+        caps = _compute_system_capabilities()
+    except Exception:
+        caps = {}
+    eff, warnings, invalid = _validate(raw, caps)
     return eff, warnings, invalid
 
 
@@ -57025,6 +57444,20 @@ class Handler(BaseHTTPRequestHandler):
                 "os_id_like": os_id_like,
                 "opensuse_like": bool(opensuse_like),
             }, origin)
+        if path == "/api/system/capabilities":
+            # Unified capability map used by the Settings drawer to grey out
+            # platform-specific options on apt/dnf/pacman or non-Btrfs hosts
+            # while leaving every option active on openSUSE Tumbleweed (the
+            # original target). Reuses _compute_system_capabilities() so the
+            # validator and the WebUI agree on what's supported.
+            try:
+                caps = _compute_system_capabilities()
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"capabilities probe failed: {e}"}, origin)
+            payload = dict(caps or {})
+            payload["ok"] = True
+            payload["ts"] = time.time()
+            return _json_response(self, 200, payload, origin)
         if path == "/api/snapper/timers":
             def _systemd_time_to_utc(raw: str) -> str:
                 s = str(raw or "").strip()
@@ -62393,7 +62826,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            eff2, warnings2, invalid2 = _validate(eff)
+            try:
+                _caps = _compute_system_capabilities()
+            except Exception:
+                _caps = {}
+            eff2, warnings2, invalid2 = _validate(eff, _caps)
             if invalid2:
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Invalid keys auto-healed: {invalid2}")

@@ -58,6 +58,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
 - [Verification low-impact mode](#cfg-verify-low-impact)
+- [Adaptive Settings drawer (cross-distro)](#cfg-adaptive-settings-drawer)
 - [Duplicate RPM cleanup](#duplicate-rpm-cleanup)
 - [Usage](#usage)
 - [Diagnostics](#diagnostics)
@@ -606,6 +607,13 @@ Key options include:
   - It lowers verify CPU/IO priority and temporarily defers heavy deep-repair
     checks until cooldown expires.
   - Interactive/manual verify runs continue to use normal behavior.
+<a id="cfg-adaptive-settings-drawer"></a>
+#### Adaptive Settings drawer (cross-distro)
+The WebUI Settings drawer (`Settings (edit / apply /etc/zypper-auto.conf)`) is **capability-aware**. The same dashboard runs on openSUSE Tumbleweed (the original target) and on apt/dnf/pacman or non-Btrfs desktops without rewriting `/etc/zypper-auto.conf` values that don't apply locally.
+- Each schema entry can declare a `requires` block (package manager / `rpm_based` / `snapper` / `ghost_scrub` / `kernel_purge`). Zypper-only options like `ZYPPER_TURBO_TUNER_ENABLED`, `ROCKET_WIZARD_USE_XMLOUT`, `ROCKET_WIZARD_ALLOW_VENDOR_CHANGE`, `ROCKET_WIZARD_FORCE_RESOLUTION`; RPM-only `AUTO_DUPLICATE_RPM_MODE`; Snapper/Btrfs `SNAP_RETENTION_*`/`SNAP_CLEANUP_*`/`SNAP_BROKEN_SNAPSHOT_HUNTER_*`; BLS/ghost-scrub `BOOT_ENTRY_CLEANUP_*`/`SCRUB_GHOST_AFTER_FORCE_PRUNE_*`; kernel purge `KERNEL_PURGE_*`/`KERNEL_FAMILY_PURGE_*` are tagged.
+- On apt/dnf/pacman or non-Btrfs hosts, those rows are **greyed out** (read-only) with an inline reason like *"Not available on this system: requires package manager zypper (host uses apt)"*, and a single yellow banner near the top of the form summarizes how many options were locked. On openSUSE Tumbleweed, nothing is greyed.
+- The **autosave/save flow skips capability-locked rows** so the dashboard never rewrites unsupported settings. Existing values in `/etc/zypper-auto.conf` are preserved verbatim — useful for shared/manual configs that you also use on openSUSE.
+- New endpoint `GET /api/system/capabilities` exposes the detected capability map (`package_manager`, `rpm_based`, `opensuse_like`, `root_fstype`, `btrfs_root`, `snapper`, `ghost_scrub`, `kernel_purge`, `boot_entry_cleanup`, plus `*_missing_reasons` arrays). It's cached for 30s and reused by the validator so unsupported keys are never auto-healed away on cross-distro hosts.
 <a id="cfg-verify-safety-snapshots"></a>
 #### Verification snapshot policy
 
