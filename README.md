@@ -59,6 +59,8 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
 - [Verification low-impact mode](#cfg-verify-low-impact)
 - [Adaptive Settings drawer (cross-distro)](#cfg-adaptive-settings-drawer)
+- [Cross-distro conflict guidance (apt/dnf/pacman)](#cross-distro-conflict-guidance)
+- [Always-on background dashboard](#always-on-background-dashboard)
 - [Duplicate RPM cleanup](#duplicate-rpm-cleanup)
 - [Usage](#usage)
 - [Diagnostics](#diagnostics)
@@ -614,6 +616,31 @@ The WebUI Settings drawer (`Settings (edit / apply /etc/zypper-auto.conf)`) is *
 - On apt/dnf/pacman or non-Btrfs hosts, those rows are **greyed out** (read-only) with an inline reason like *"Not available on this system: requires package manager zypper (host uses apt)"*, and a single yellow banner near the top of the form summarizes how many options were locked. On openSUSE Tumbleweed, nothing is greyed.
 - The **autosave/save flow skips capability-locked rows** so the dashboard never rewrites unsupported settings. Existing values in `/etc/zypper-auto.conf` are preserved verbatim — useful for shared/manual configs that you also use on openSUSE.
 - New endpoint `GET /api/system/capabilities` exposes the detected capability map (`package_manager`, `rpm_based`, `opensuse_like`, `root_fstype`, `btrfs_root`, `snapper`, `ghost_scrub`, `kernel_purge`, `boot_entry_cleanup`, plus `*_missing_reasons` arrays). It's cached for 30s and reused by the validator so unsupported keys are never auto-healed away on cross-distro hosts.
+<a id="cross-distro-conflict-guidance"></a>
+#### Cross-distro conflict guidance (apt/dnf/pacman)
+The Rocket Update Wizard overlays and the desktop notifier now share a single source-of-truth helper for solver/conflict situations, so the same guidance text is shown across the WebUI and the desktop notification — even when the dashboard API is offline.
+- Backend: new Python helper `_conflict_guidance(pm, surface, conflict_summary=...)` returns a structured guidance dict (`headline`, `explanation`, `recommended_cmd`, `refresh_cmd`, `terminal_only`, `solver_choices`, `steps`, `manager_hint`). It is exposed as `GET /api/system/conflict-guidance?pm=<pm>&surface=<webui|notifier>` and embedded into existing `/api/system/dup/preview`, `/api/system/dup/job`, and the recovery payload alongside `conflict_detected`/`conflict_summary` (purely additive — older clients ignore the new field).
+- WebUI: `_ruRenderPreview` and `_ruRenderDone` consume `package_manager` + `conflict_guidance` from the payload. **Zypper** keeps the existing UX verbatim — solver buttons `1/2/3/4`, vendor-change toggle, `sudo zypper dup --allow-vendor-change` copy/paste. **apt/dnf/pacman** get a PM-aware block driven by `recommended_cmd` (no solver buttons, no vendor-change toggle), an explanation that solver prompts cannot be answered from the dashboard, an *Open terminal (copy command)* CTA + *Copy recommended command* button, and the manager-specific steps from the guidance dict.
+- Desktop notifier (`zypper-notify-updater.py`): carries a mirrored `_conflict_guidance` Python helper, plus `_open_terminal_with_command` which detaches a GUI terminal via `systemd-run --user --scope` so the notifier oneshot can exit cleanly. The `error:repo` and `error:solver:` notification branches now build their text from the shared guidance dict and switch the action set by `terminal_only`:
+    - **zypper:** keeps the existing `Install Now` (terminal-helper) flow and additionally exposes a parallel `Open Terminal` shortcut so users have both paths.
+    - **apt/dnf/pacman:** offers `Open Terminal` (running `recommended_cmd` directly) instead of `Install Now`, since interactive solver prompts cannot be driven from the helper script.
+- Behaviour summary: zypper UX is unchanged, while apt/dnf/pacman get clear PM-aware guidance + a one-click terminal path. Wording stays consistent between WebUI and notifier because both surfaces consume the same struct.
+<a id="always-on-background-dashboard"></a>
+#### Always-on background dashboard (opt-in)
+A new low-impact background mode keeps the WebUI HTTP API + sync/perf workers alive without leaving a browser tab open.
+- **CLI:** `zypper-auto-helper --dash-bg [start|stop|status]`
+    - `start` launches the local HTTP server + sync + perf workers and **does not open a browser**.
+    - `stop` cleanly terminates only the BG-tagged workers and HTTP server.
+    - `status` prints BG worker/server PIDs + listening port.
+- **Distinct from `--dash-open`:** BG mode tags processes (`znh-dashboard-{http,sync,perf}-bg`) and pid files (`dashboard-{http,sync,perf}-bg.pid`) so a foreground `--dash-open` session can run alongside without clashing. BG mode picks ports from a separate range (`8791-8800`) so it never collides with the foreground default.
+- **Cadence env knobs:** `ZNH_DASHBOARD_BG_INTERVAL_SECONDS` and `ZNH_DASHBOARD_BG_MAX_IDLE_SECONDS` let you fine-tune the BG loop independently of the foreground performance mode.
+- **User systemd unit (opt-in):** the helper writes `~/.config/systemd/user/zypper-auto-dashboard-bg.service` with low-impact resource limits — `Type=oneshot`, `RemainAfterExit=true`, `Nice=19`, `IOSchedulingClass=idle`, `CPUWeight=20`, `IOWeight=20`, `MemoryHigh=120M`, `MemoryMax=200M`, `Restart=on-failure`. To enable it explicitly:
+    - `zypper-auto-helper --dash-bg-enable`  → `systemctl --user daemon-reload` + `enable --now` + best-effort `loginctl enable-linger ${USER}` so the service survives logout.
+    - `zypper-auto-helper --dash-bg-disable` → `systemctl --user disable --now` + defensive `--dash-bg stop` cleanup.
+- **Config keys (off by default):**
+    - `WEBUI_BACKGROUND_DASH_ENABLED` (`bool`, default `false`) — descriptive flag visible in the Settings drawer (Advanced row in the Dashboard section).
+    - `WEBUI_BACKGROUND_DASH_PROFILE` (enum `powersaving|balanced|performance`, default `powersaving`) — independent from foreground `DASHBOARD_PERFORMANCE_MODE`, so the BG service can stay quiet (powersaving) while interactive sessions use a faster profile.
+- **Uninstall behaviour:** `sudo zypper-auto-helper --uninstall-zypper` now disables the BG service (`systemctl --user disable --now zypper-auto-dashboard-bg.service`, best-effort, succeeds silently if never enabled) and removes its unit file from `~/.config/systemd/user/` alongside the existing notifier unit cleanup. Nothing else changes for users who never enabled BG mode.
 <a id="cfg-verify-safety-snapshots"></a>
 #### Verification snapshot policy
 

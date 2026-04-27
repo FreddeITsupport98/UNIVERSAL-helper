@@ -175,7 +175,7 @@ if [[ $# -gt 0 ]]; then
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
         --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--stale-module-dirs|--stale-modules|--rm-conflict|\
-        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-api-on|--dash-api-off|--dash-api-status|\
+        --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-bg|--dash-bg-enable|--dash-bg-disable|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --analyze|--health|--debug)
@@ -253,16 +253,28 @@ __znh_port_listen_in_use() {
 }
 
 __znh_pid_is_dashboard_http_server() {
-    local pid="$1" dash_dir="$2" port="$3"
+    # Args: pid dash_dir port [tag]
+    # Optional tag (default "znh-dashboard-http") lets us validate alternate process
+    # tags like "znh-dashboard-http-bg" used by --dash-bg.
+    local pid="$1" dash_dir="$2" port="$3" tag="${4:-znh-dashboard-http}"
     [[ "${pid:-}" =~ ^[0-9]+$ ]] || return 1
     kill -0 "${pid}" 2>/dev/null || return 1
     if command -v ps >/dev/null 2>&1; then
         local args
         args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
 
-        # New-style dashboard server (ThreadingHTTPServer) started via --dash-open.
-        # We mark the process name via: exec -a znh-dashboard-http ...
-        if printf '%s' "${args}" | grep -q "znh-dashboard-http"; then
+        # New-style dashboard server (ThreadingHTTPServer) started via --dash-open / --dash-bg.
+        # We mark the process name via: exec -a <tag> ...
+        # When tag is the BG variant ("znh-dashboard-http-bg") we ONLY accept that exact
+        # tag; otherwise legacy/foreground tag "znh-dashboard-http" is matched (and may also
+        # match "znh-dashboard-http-bg" via substring, so we also exclude that explicitly).
+        if printf '%s' "${args}" | grep -q -- "${tag}"; then
+            if [ "${tag}" = "znh-dashboard-http" ]; then
+                # Make sure this is the foreground variant, not the BG one.
+                if printf '%s' "${args}" | grep -q -- "znh-dashboard-http-bg"; then
+                    return 1
+                fi
+            fi
             printf '%s' "${args}" | grep -q "${dash_dir}" || return 1
             # Match the port as a full argument (avoid substring matches like 876 -> 8765)
             printf '%s' "${args}" | grep -qE "(^|[[:space:]])${port}([[:space:]]|$)" || return 1
@@ -285,14 +297,23 @@ __znh_pid_is_dashboard_http_server() {
 }
 
 __znh_pid_is_dashboard_sync_worker() {
-    local pid="$1" dash_dir="$2"
+    # Args: pid dash_dir [tag]
+    # Optional tag (default "znh-dashboard-sync") allows validating BG variants like
+    # "znh-dashboard-sync-bg".
+    local pid="$1" dash_dir="$2" tag="${3:-znh-dashboard-sync}"
     [[ "${pid:-}" =~ ^[0-9]+$ ]] || return 1
     kill -0 "${pid}" 2>/dev/null || return 1
     if command -v ps >/dev/null 2>&1; then
         local args
         args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
-        # We mark the process name via: exec -a znh-dashboard-sync ...
-        printf '%s' "${args}" | grep -q "znh-dashboard-sync" || return 1
+        # We mark the process name via: exec -a <tag> ...
+        printf '%s' "${args}" | grep -q -- "${tag}" || return 1
+        if [ "${tag}" = "znh-dashboard-sync" ]; then
+            # Reject BG variant when foreground tag was requested.
+            if printf '%s' "${args}" | grep -q -- "znh-dashboard-sync-bg"; then
+                return 1
+            fi
+        fi
         printf '%s' "${args}" | grep -q "${dash_dir}" || return 1
         return 0
     fi
@@ -560,7 +581,9 @@ __znh_start_dashboard_http_server() {
     #  4 port_file
     #  5 err_file
     #  6 run_as_user (optional)
-    local dash_dir="$1" port="$2" pid_file="$3" port_file="$4" err_file="$5" run_as_user="${6:-}"
+    #  7 tag         (optional, default "znh-dashboard-http";
+    #                 BG variant uses "znh-dashboard-http-bg")
+    local dash_dir="$1" port="$2" pid_file="$3" port_file="$4" err_file="$5" run_as_user="${6:-}" tag="${7:-znh-dashboard-http}"
 
     [ -n "${dash_dir:-}" ] || return 1
     [[ "${port:-}" =~ ^[0-9]+$ ]] || return 1
@@ -571,16 +594,16 @@ __znh_start_dashboard_http_server() {
     # Start under the target desktop user if provided (root-only, so we never prompt).
     if [ -n "${run_as_user:-}" ] && [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null && command -v sudo >/dev/null 2>&1; then
         sudo -u "${run_as_user}" bash -c '
-            err="$1"; pidf="$2"; portf="$3"; d="$4"; p="$5"; py="$6";
+            err="$1"; pidf="$2"; portf="$3"; d="$4"; p="$5"; py="$6"; tag="$7";
             rm -f "$err" 2>/dev/null || true
-            nohup bash -c "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-http python3 -c \"\$1\" \"\$2\" \"\$3\"" _ "$py" "$d" "$p" >>"$err" 2>&1 &
+            nohup bash -c "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a \"\$0\" python3 -c \"\$1\" \"\$2\" \"\$3\"" "$tag" "$py" "$d" "$p" >>"$err" 2>&1 &
             echo $! >"$pidf" 2>/dev/null || true
             echo "$p" >"$portf" 2>/dev/null || true
             chmod 600 "$pidf" "$portf" 2>/dev/null || true
-        ' _ "${err_file}" "${pid_file}" "${port_file}" "${dash_dir}" "${port}" "${py_srv}" || true
+        ' _ "${err_file}" "${pid_file}" "${port_file}" "${dash_dir}" "${port}" "${py_srv}" "${tag}" || true
     else
         rm -f "${err_file}" 2>/dev/null || true
-        nohup bash -c "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-http python3 -c \"\$1\" \"\$2\" \"\$3\"" _ "${py_srv}" "${dash_dir}" "${port}" >>"${err_file}" 2>&1 &
+        nohup bash -c "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a ${tag} python3 -c \"\$1\" \"\$2\" \"\$3\"" _ "${py_srv}" "${dash_dir}" "${port}" >>"${err_file}" 2>&1 &
         echo $! >"${pid_file}" 2>/dev/null || true
         echo "${port}" >"${port_file}" 2>/dev/null || true
         chmod 600 "${pid_file}" "${port_file}" 2>/dev/null || true
@@ -593,16 +616,26 @@ __znh_start_dashboard_sync_worker() {
     # Keep user dashboard files in sync with root-generated artifacts so an open
     # dashboard tab doesn't go stale when root timers run in the background.
     # This runs as the desktop user, reading world-readable files under /var/log.
+    #
+    # Args:
+    #  1 dash_dir
+    #  2 user_name (optional)
+    #  3 user_home (optional)
+    #  4 interval_override (optional)
+    #  5 max_idle_override (optional)
+    #  6 pid_file_name (optional, default "dashboard-sync.pid"; BG variant uses "dashboard-sync-bg.pid")
+    #  7 tag (optional, default "znh-dashboard-sync"; BG variant uses "znh-dashboard-sync-bg")
     local dash_dir="$1" user_name="${2:-}" user_home="${3:-}"
     local interval_override="${4:-}" max_idle_override="${5:-}"
+    local pid_file_name="${6:-dashboard-sync.pid}" tag="${7:-znh-dashboard-sync}"
     local pid_file
-    pid_file="${dash_dir}/dashboard-sync.pid"
+    pid_file="${dash_dir}/${pid_file_name}"
 
     # If an existing worker is already running, keep it.
     if [ -f "${pid_file}" ]; then
         local old_pid
         old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-        if __znh_pid_is_dashboard_sync_worker "${old_pid}" "${dash_dir}"; then
+        if __znh_pid_is_dashboard_sync_worker "${old_pid}" "${dash_dir}" "${tag}"; then
             return 0
         fi
         rm -f "${pid_file}" 2>/dev/null || true
@@ -610,8 +643,14 @@ __znh_start_dashboard_sync_worker() {
 
     # Write a real worker script into the dashboard directory.
     # This avoids brittle multi-line quoting when we launch it via bash -lc.
-    local worker_script tmp_script
-    worker_script="${dash_dir}/dashboard-sync-worker.sh"
+    # Each variant uses its own worker script file so FG and BG can coexist without
+    # racing on the same on-disk script (env vars are per-process anyway).
+    local worker_basename worker_script tmp_script
+    case "${tag}" in
+        znh-dashboard-sync-bg) worker_basename="dashboard-sync-worker-bg.sh" ;;
+        *)                     worker_basename="dashboard-sync-worker.sh" ;;
+    esac
+    worker_script="${dash_dir}/${worker_basename}"
     tmp_script="${worker_script}.tmp.$$"
 
     cat >"${tmp_script}" <<'EOF'
@@ -765,12 +804,12 @@ EOF
     # Launch worker detached as the desktop user if known.
     # Use a simple argv-only launch command so quoting can't break.
     if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
-        sudo -u "${user_name}" bash -lc "${env_prefix_str:+${env_prefix_str} }nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash \"\$@\"' _ \"${worker_script}\" \"${dash_dir}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        sudo -u "${user_name}" bash -lc "${env_prefix_str:+${env_prefix_str} }nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a ${tag} bash \"\$@\"' _ \"${worker_script}\" \"${dash_dir}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
     else
         if [ "${#env_args[@]}" -gt 0 ] 2>/dev/null; then
-            env "${env_args[@]}" nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash "$@"' _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
+            env "${env_args[@]}" nohup bash -lc "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a ${tag} bash \"\$@\"" _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
         else
-            nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-sync bash "$@"' _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
+            nohup bash -lc "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a ${tag} bash \"\$@\"" _ "${worker_script}" "${dash_dir}" >/dev/null 2>&1 &
         fi
         echo $! >"${pid_file}" 2>/dev/null || true
     fi
@@ -782,15 +821,17 @@ EOF
 }
 
 __znh_stop_dashboard_sync_worker() {
+    # Args: dash_dir [pid_file_name] [tag]
     local dash_dir="$1"
+    local pid_file_name="${2:-dashboard-sync.pid}" tag="${3:-znh-dashboard-sync}"
     local pid_file
-    pid_file="${dash_dir}/dashboard-sync.pid"
+    pid_file="${dash_dir}/${pid_file_name}"
     if [ ! -f "${pid_file}" ]; then
         return 0
     fi
     local pid
     pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-    if __znh_pid_is_dashboard_sync_worker "${pid}" "${dash_dir}"; then
+    if __znh_pid_is_dashboard_sync_worker "${pid}" "${dash_dir}" "${tag}"; then
         # Best-effort: stop child watchers (inotifywait) so we don't leave orphans.
         if command -v pkill >/dev/null 2>&1; then
             pkill -TERM -P "${pid}" 2>/dev/null || true
@@ -812,14 +853,21 @@ __znh_stop_dashboard_sync_worker() {
 }
 
 __znh_pid_is_dashboard_perf_worker() {
-    local pid="$1" dash_dir="$2"
+    # Args: pid dash_dir [tag]
+    local pid="$1" dash_dir="$2" tag="${3:-znh-dashboard-perf}"
     [[ "${pid:-}" =~ ^[0-9]+$ ]] || return 1
     kill -0 "${pid}" 2>/dev/null || return 1
     if command -v ps >/dev/null 2>&1; then
         local args
         args=$(ps -p "${pid}" -o args= 2>/dev/null || true)
-        # We mark the process name via: exec -a znh-dashboard-perf ...
-        printf '%s' "${args}" | grep -q "znh-dashboard-perf" || return 1
+        # We mark the process name via: exec -a <tag> ...
+        printf '%s' "${args}" | grep -q -- "${tag}" || return 1
+        if [ "${tag}" = "znh-dashboard-perf" ]; then
+            # Reject BG variant when foreground tag was requested.
+            if printf '%s' "${args}" | grep -q -- "znh-dashboard-perf-bg"; then
+                return 1
+            fi
+        fi
         # Ensure it's writing into the correct dashboard directory.
         # Pattern begins with "--" so terminate grep options explicitly.
         printf '%s' "${args}" | grep -qF -- "--out-dir ${dash_dir}" || return 1
@@ -832,10 +880,20 @@ __znh_start_dashboard_perf_worker() {
     # Writes perf-data.json into the served dashboard directory so the HTML can
     # plot live CPU/memory/IO usage for helper-related services.
     # Runs as the desktop user.
+    #
+    # Args:
+    #  1 dash_dir
+    #  2 user_name (optional)
+    #  3 user_home (optional)
+    #  4 interval_override (optional)
+    #  5 max_samples_override (optional)
+    #  6 pid_file_name (optional, default "dashboard-perf.pid")
+    #  7 tag (optional, default "znh-dashboard-perf")
     local dash_dir="$1" user_name="${2:-}" user_home="${3:-}"
     local interval_override="${4:-}" max_samples_override="${5:-}"
+    local pid_file_name="${6:-dashboard-perf.pid}" tag="${7:-znh-dashboard-perf}"
     local pid_file
-    pid_file="${dash_dir}/dashboard-perf.pid"
+    pid_file="${dash_dir}/${pid_file_name}"
 
     local worker_bin
     worker_bin="/usr/local/bin/zypper-auto-dashboard-perf-worker"
@@ -854,7 +912,7 @@ __znh_start_dashboard_perf_worker() {
     if [ -f "${pid_file}" ]; then
         local old_pid
         old_pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-        if __znh_pid_is_dashboard_perf_worker "${old_pid}" "${dash_dir}"; then
+        if __znh_pid_is_dashboard_perf_worker "${old_pid}" "${dash_dir}" "${tag}"; then
             return 0
         fi
         rm -f "${pid_file}" 2>/dev/null || true
@@ -877,10 +935,10 @@ __znh_start_dashboard_perf_worker() {
 
     # Launch worker detached as the desktop user if known.
     if [ -n "${user_name}" ] && command -v sudo >/dev/null 2>&1; then
-        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval ${interval} --max-samples ${max_samples} --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
+        sudo -u "${user_name}" bash -lc "nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a ${tag} \"\$@\"' _ ${worker_bin} --out-dir \"${dash_dir}\" --interval ${interval} --max-samples ${max_samples} --units \"${units}\" >/dev/null 2>&1 & echo \$! >\"${pid_file}\"" || true
     else
         # Fallback: run as current user.
-        nohup bash -lc 'if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p $$ >/dev/null 2>&1 || true; fi; exec -a znh-dashboard-perf "$@"' _ "${worker_bin}" --out-dir "${dash_dir}" --interval "${interval}" --max-samples "${max_samples}" --units "${units}" >/dev/null 2>&1 &
+        nohup bash -lc "if command -v ionice >/dev/null 2>&1; then ionice -c3 -p \$\$ >/dev/null 2>&1 || true; fi; if command -v renice >/dev/null 2>&1; then renice -n 19 -p \$\$ >/dev/null 2>&1 || true; fi; exec -a ${tag} \"\$@\"" _ "${worker_bin}" --out-dir "${dash_dir}" --interval "${interval}" --max-samples "${max_samples}" --units "${units}" >/dev/null 2>&1 &
         echo $! >"${pid_file}" 2>/dev/null || true
     fi
 
@@ -891,15 +949,17 @@ __znh_start_dashboard_perf_worker() {
 }
 
 __znh_stop_dashboard_perf_worker() {
+    # Args: dash_dir [pid_file_name] [tag]
     local dash_dir="$1"
+    local pid_file_name="${2:-dashboard-perf.pid}" tag="${3:-znh-dashboard-perf}"
     local pid_file
-    pid_file="${dash_dir}/dashboard-perf.pid"
+    pid_file="${dash_dir}/${pid_file_name}"
     if [ ! -f "${pid_file}" ]; then
         return 0
     fi
     local pid
     pid=$(cat "${pid_file}" 2>/dev/null || echo "")
-    if __znh_pid_is_dashboard_perf_worker "${pid}" "${dash_dir}"; then
+    if __znh_pid_is_dashboard_perf_worker "${pid}" "${dash_dir}" "${tag}"; then
         kill "${pid}" 2>/dev/null || true
         sleep 0.1
         kill -9 "${pid}" 2>/dev/null || true
@@ -1247,6 +1307,63 @@ EOF
     fi
 }
 
+__znh_write_dash_bg_user_unit() {
+    # Write/update the per-user systemd unit that runs the always-on, low-impact
+    # background dashboard server + workers. Idempotent.
+    #
+    # Usage: __znh_write_dash_bg_user_unit <home>
+    #
+    # The unit uses Type=oneshot + RemainAfterExit=true because
+    # `zypper-auto-helper --dash-bg start` exits after detaching the HTTP
+    # server / sync worker / perf worker; systemd considers the unit active
+    # until ExecStop runs (`--dash-bg stop`).
+    local h="$1"
+    [ -n "${h:-}" ] || return 1
+
+    local unit_dir unit_path helper_bin
+    unit_dir="${h}/.config/systemd/user"
+    unit_path="${unit_dir}/zypper-auto-dashboard-bg.service"
+
+    helper_bin="/usr/local/bin/zypper-auto-helper"
+    if [ ! -x "${helper_bin}" ] && [ -x "$0" ]; then
+        helper_bin="$0"
+    fi
+
+    mkdir -p "${unit_dir}" 2>/dev/null || true
+
+    cat >"${unit_path}" <<EOF 2>/dev/null || return 1
+[Unit]
+Description=Zypper Auto Always-On Background Dashboard (low-impact, opt-in)
+Documentation=man:zypper-auto-helper(1)
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=${helper_bin} --dash-bg start
+ExecStop=${helper_bin} --dash-bg stop
+
+# Background priority + caps (best-effort; ignored on older systemd / cgroup setups)
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
+MemoryHigh=120M
+MemoryMax=200M
+
+# Restart the start command if it fails on first launch (does not restart the
+# detached HTTP/worker children; users can run \`systemctl --user restart\` if needed).
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+
+    chmod 644 "${unit_path}" 2>/dev/null || true
+    return 0
+}
+
 if [[ "${1:-}" == "--dash-stop" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
     dash_dir="$HOME/.local/share/zypper-notify"
 
@@ -1527,6 +1644,354 @@ PY
         echo "Generate it with: sudo zypper-auto-helper --dashboard" >&2
         exit 1
     fi
+fi
+
+if [[ "${1:-}" == "--dash-bg" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
+    # Always-on, low-impact background dashboard runner.
+    #
+    # Usage:
+    #   zypper-auto-helper --dash-bg start    # Start HTTP server + sync + perf workers (no browser)
+    #   zypper-auto-helper --dash-bg stop     # Stop only the BG-tagged workers/server
+    #   zypper-auto-helper --dash-bg status   # Print BG worker/server PIDs + listening port
+    #
+    # Distinct from --dash-open:
+    #   * Does NOT call __znh_detach_open_url (no browser tab is opened)
+    #   * Workers/server use BG process tags (znh-dashboard-{http,sync,perf}-bg)
+    #     and BG pid files (dashboard-{http,sync,perf}-bg.pid) so a foreground
+    #     --dash-open session can run alongside without clashing.
+    #   * Picks a port from a separate range (8791-8800) so it never collides
+    #     with the foreground default 8765 range.
+    #   * Defaults to powersaving cadence (longer intervals, larger backoff)
+    #     and is overridable via ZNH_DASHBOARD_BG_INTERVAL_SECONDS /
+    #     ZNH_DASHBOARD_BG_MAX_IDLE_SECONDS for explicit BG profiling.
+    dash_dir="$HOME/.local/share/zypper-notify"
+    dash_path="${dash_dir}/status.html"
+
+    bg_action="${2:-start}"
+    case "${bg_action}" in
+        start|stop|status) ;;
+        *)
+            echo "Unknown --dash-bg action: ${bg_action}" >&2
+            echo "Usage: zypper-auto-helper --dash-bg [start|stop|status]" >&2
+            exit 2
+            ;;
+    esac
+
+    bg_pid_file="${dash_dir}/dashboard-http-bg.pid"
+    bg_port_file="${dash_dir}/dashboard-http-bg.port"
+    bg_err_file="${dash_dir}/dashboard-http-bg.err"
+    bg_http_tag="znh-dashboard-http-bg"
+    bg_sync_pidname="dashboard-sync-bg.pid"
+    bg_sync_tag="znh-dashboard-sync-bg"
+    bg_perf_pidname="dashboard-perf-bg.pid"
+    bg_perf_tag="znh-dashboard-perf-bg"
+
+    case "${bg_action}" in
+        stop)
+            # Stop sync + perf workers first (best-effort), then HTTP server.
+            __znh_stop_dashboard_sync_worker "${dash_dir}" "${bg_sync_pidname}" "${bg_sync_tag}" || true
+            __znh_stop_dashboard_perf_worker "${dash_dir}" "${bg_perf_pidname}" "${bg_perf_tag}" || true
+
+            if [ -f "${bg_pid_file}" ] && [ -f "${bg_port_file}" ]; then
+                old_pid=$(cat "${bg_pid_file}" 2>/dev/null || echo "")
+                old_port=$(cat "${bg_port_file}" 2>/dev/null || echo "")
+                if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}" "${bg_http_tag}"; then
+                    kill "${old_pid}" 2>/dev/null || true
+                    sleep 0.1
+                    if kill -0 "${old_pid}" 2>/dev/null; then
+                        kill -9 "${old_pid}" 2>/dev/null || true
+                    fi
+                    echo "Stopped background dashboard server (pid=${old_pid})."
+                else
+                    echo "Background dashboard server not running or PID could not be validated (stale pid file: ${bg_pid_file})."
+                fi
+                rm -f "${bg_pid_file}" "${bg_port_file}" 2>/dev/null || true
+            else
+                echo "No background dashboard server pid/port files found under ${dash_dir}."
+            fi
+            exit 0
+            ;;
+
+        status)
+            running=0
+            if [ -f "${bg_pid_file}" ] && [ -f "${bg_port_file}" ]; then
+                cur_pid=$(cat "${bg_pid_file}" 2>/dev/null || echo "")
+                cur_port=$(cat "${bg_port_file}" 2>/dev/null || echo "")
+                if [[ "${cur_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${cur_pid}" "${dash_dir}" "${cur_port}" "${bg_http_tag}"; then
+                    echo "Background dashboard server: RUNNING (pid=${cur_pid}, port=${cur_port})."
+                    echo "  URL: http://127.0.0.1:${cur_port}/status.html?live=1"
+                    running=1
+                fi
+            fi
+            if [ "${running}" -ne 1 ] 2>/dev/null; then
+                echo "Background dashboard server: NOT RUNNING."
+            fi
+
+            # Sync worker
+            sync_pid_file="${dash_dir}/${bg_sync_pidname}"
+            if [ -f "${sync_pid_file}" ]; then
+                spid=$(cat "${sync_pid_file}" 2>/dev/null || echo "")
+                if __znh_pid_is_dashboard_sync_worker "${spid}" "${dash_dir}" "${bg_sync_tag}"; then
+                    echo "Background sync worker:        RUNNING (pid=${spid})."
+                else
+                    echo "Background sync worker:        NOT RUNNING (stale pid file)."
+                fi
+            else
+                echo "Background sync worker:        NOT RUNNING."
+            fi
+
+            # Perf worker
+            perf_pid_file="${dash_dir}/${bg_perf_pidname}"
+            if [ -f "${perf_pid_file}" ]; then
+                ppid_=$(cat "${perf_pid_file}" 2>/dev/null || echo "")
+                if __znh_pid_is_dashboard_perf_worker "${ppid_}" "${dash_dir}" "${bg_perf_tag}"; then
+                    echo "Background perf worker:        RUNNING (pid=${ppid_})."
+                else
+                    echo "Background perf worker:        NOT RUNNING (stale pid file)."
+                fi
+            else
+                echo "Background perf worker:        NOT RUNNING."
+            fi
+            exit 0
+            ;;
+
+        start)
+            # Generate dashboard if missing (best-effort, requires sudo).
+            if [ ! -f "${dash_path}" ]; then
+                echo "Dashboard file not found yet: ${dash_path}" >&2
+                if [ -x /usr/local/bin/zypper-auto-helper ]; then
+                    echo "Generating dashboard now (admin permissions may be required)..." >&2
+                    __znh_run_root_cmd /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
+                fi
+            fi
+
+            if [ ! -f "${dash_path}" ]; then
+                echo "Dashboard file not found yet: ${dash_path}" >&2
+                echo "Generate it with: sudo zypper-auto-helper --dashboard" >&2
+                exit 1
+            fi
+
+            mkdir -p "${dash_dir}" 2>/dev/null || true
+
+            # Choose a BG port (separate range from --dash-open's 8765-8790)
+            bg_port=8791
+            reuse_existing_bg=0
+            if [ -f "${bg_pid_file}" ] && [ -f "${bg_port_file}" ]; then
+                old_pid=$(cat "${bg_pid_file}" 2>/dev/null || echo "")
+                old_port=$(cat "${bg_port_file}" 2>/dev/null || echo "")
+                if [[ "${old_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${old_pid}" "${dash_dir}" "${old_port}" "${bg_http_tag}"; then
+                    bg_port="${old_port}"
+                    reuse_existing_bg=1
+                fi
+            fi
+
+            if __znh_port_listen_in_use "${bg_port}" && [ "${reuse_existing_bg}" -ne 1 ] 2>/dev/null; then
+                bg_pick="$(__znh_pick_free_port 8791 8800 2>/dev/null || true)"
+                if [[ "${bg_pick:-}" =~ ^[0-9]+$ ]]; then
+                    bg_port="${bg_pick}"
+                fi
+            fi
+
+            bg_url="http://127.0.0.1:${bg_port}/status.html?live=1"
+
+            # Best-effort token wiring: reuse the foreground token if available so
+            # an existing dashboard tab keeps access. We do NOT rotate or create a
+            # new token from --dash-bg; that's the foreground --dash-open's job.
+            # (Background mode is opt-in and lifecycle-stable; minimum surface area.)
+            token_file="${dash_dir}/dashboard-token.txt"
+            if [ -f "${token_file}" ]; then
+                chmod 600 "${token_file}" 2>/dev/null || true
+            fi
+
+            # Determine whether server is already running (validated)
+            bg_server_running=0
+            if [ -f "${bg_pid_file}" ] && [ -f "${bg_port_file}" ]; then
+                cur_pid=$(cat "${bg_pid_file}" 2>/dev/null || echo "")
+                cur_port=$(cat "${bg_port_file}" 2>/dev/null || echo "")
+                if [[ "${cur_port:-}" =~ ^[0-9]+$ ]] && __znh_pid_is_dashboard_http_server "${cur_pid}" "${dash_dir}" "${cur_port}" "${bg_http_tag}"; then
+                    bg_server_running=1
+                fi
+            fi
+
+            if [ "${bg_server_running}" -ne 1 ] 2>/dev/null; then
+                if command -v python3 >/dev/null 2>&1; then
+                    rm -f "${bg_err_file}" 2>/dev/null || true
+                    __znh_start_dashboard_http_server \
+                        "${dash_dir}" "${bg_port}" \
+                        "${bg_pid_file}" "${bg_port_file}" "${bg_err_file}" \
+                        "" "${bg_http_tag}" || true
+                    sleep 0.25
+                else
+                    echo "python3 not found; cannot start background dashboard server." >&2
+                    echo "Install it with: $(znh_install_hint_for_package "$(znh_resolve_package_name "python3")")" >&2
+                    exit 1
+                fi
+            fi
+
+            # Verify the server is listening (short retry loop)
+            ok=0
+            for _i in $(seq 1 50); do
+                if __znh_port_listen_in_use "${bg_port}"; then
+                    ok=1
+                    break
+                fi
+                sleep 0.1
+            done
+
+            if [ "${ok}" -ne 1 ] 2>/dev/null; then
+                echo "WARNING: background dashboard server did not respond on port ${bg_port}." >&2
+                if [ -s "${bg_err_file}" ]; then
+                    echo "--- background dashboard server error (last 20 lines):" >&2
+                    tail -n 20 "${bg_err_file}" >&2 || true
+                else
+                    echo "(no server error output captured)" >&2
+                fi
+            fi
+
+            # Cadence selection.
+            #
+            # Priority order (first match wins):
+            #   1. Explicit BG-only env knobs (ZNH_DASHBOARD_BG_*)
+            #   2. WEBUI_BACKGROUND_DASH_PROFILE config key
+            #   3. DASHBOARD_PERFORMANCE_MODE config key
+            #   4. powersaving defaults (most conservative)
+            znh_bg_profile="${WEBUI_BACKGROUND_DASH_PROFILE:-}"
+            if [ -z "${znh_bg_profile:-}" ] && [ -r "/etc/zypper-auto.conf" ]; then
+                znh_bg_profile=$(grep -E '^[[:space:]]*WEBUI_BACKGROUND_DASH_PROFILE=' "/etc/zypper-auto.conf" 2>/dev/null \
+                    | head -n 1 \
+                    | sed -E "s/^[[:space:]]*WEBUI_BACKGROUND_DASH_PROFILE=//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^['\"]//; s/['\"]$//" 2>/dev/null || true)
+            fi
+            znh_bg_profile="$(printf '%s' "${znh_bg_profile}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' 2>/dev/null || printf '%s' "${znh_bg_profile}")"
+
+            if [ -z "${znh_bg_profile:-}" ]; then
+                znh_perf_mode="${DASHBOARD_PERFORMANCE_MODE:-}"
+                if [ -z "${znh_perf_mode:-}" ] && [ -r "/etc/zypper-auto.conf" ]; then
+                    znh_perf_mode=$(grep -E '^[[:space:]]*DASHBOARD_PERFORMANCE_MODE=' "/etc/zypper-auto.conf" 2>/dev/null \
+                        | head -n 1 \
+                        | sed -E "s/^[[:space:]]*DASHBOARD_PERFORMANCE_MODE=//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^['\"]//; s/['\"]$//" 2>/dev/null || true)
+                fi
+                znh_bg_profile="$(printf '%s' "${znh_perf_mode}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' 2>/dev/null || printf '%s' "${znh_perf_mode}")"
+            fi
+
+            # Powersaving defaults (intentionally less aggressive than --dash-open's powersaving)
+            znh_bg_sync_interval=8
+            znh_bg_sync_max_idle=120
+            znh_bg_perf_interval=8
+            znh_bg_perf_max_samples=120
+            case "${znh_bg_profile}" in
+                performance)
+                    znh_bg_sync_interval=4
+                    znh_bg_sync_max_idle=60
+                    znh_bg_perf_interval=4
+                    znh_bg_perf_max_samples=240
+                    ;;
+                balanced)
+                    znh_bg_sync_interval=6
+                    znh_bg_sync_max_idle=90
+                    znh_bg_perf_interval=6
+                    znh_bg_perf_max_samples=180
+                    ;;
+                powersaving|"")
+                    ;;
+                *)
+                    # Unknown -> stay on powersaving defaults
+                    ;;
+            esac
+
+            # Explicit env overrides win over the profile (ops escape hatch)
+            if [[ "${ZNH_DASHBOARD_BG_INTERVAL_SECONDS:-}" =~ ^[0-9]+$ ]]; then
+                znh_bg_sync_interval="${ZNH_DASHBOARD_BG_INTERVAL_SECONDS}"
+                znh_bg_perf_interval="${ZNH_DASHBOARD_BG_INTERVAL_SECONDS}"
+            fi
+            if [[ "${ZNH_DASHBOARD_BG_MAX_IDLE_SECONDS:-}" =~ ^[0-9]+$ ]]; then
+                znh_bg_sync_max_idle="${ZNH_DASHBOARD_BG_MAX_IDLE_SECONDS}"
+            fi
+
+            # Restart workers so cadence changes actually apply on subsequent --dash-bg start runs.
+            __znh_stop_dashboard_sync_worker "${dash_dir}" "${bg_sync_pidname}" "${bg_sync_tag}" || true
+            __znh_stop_dashboard_perf_worker "${dash_dir}" "${bg_perf_pidname}" "${bg_perf_tag}" || true
+
+            __znh_start_dashboard_sync_worker \
+                "${dash_dir}" "${USER:-}" "${HOME:-}" \
+                "${znh_bg_sync_interval}" "${znh_bg_sync_max_idle}" \
+                "${bg_sync_pidname}" "${bg_sync_tag}" || true
+            __znh_start_dashboard_perf_worker \
+                "${dash_dir}" "${USER:-}" "${HOME:-}" \
+                "${znh_bg_perf_interval}" "${znh_bg_perf_max_samples}" \
+                "${bg_perf_pidname}" "${bg_perf_tag}" || true
+
+            echo "Background dashboard running at: ${bg_url}"
+            echo "Stop with: zypper-auto-helper --dash-bg stop"
+            echo "Status:    zypper-auto-helper --dash-bg status"
+            exit 0
+            ;;
+    esac
+fi
+
+if [[ "${1:-}" == "--dash-bg-enable" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
+    # Install + enable the user-level systemd service that runs the BG dashboard.
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "systemctl not found; cannot install user systemd unit." >&2
+        echo "Run \`zypper-auto-helper --dash-bg start\` directly instead." >&2
+        exit 1
+    fi
+
+    if ! __znh_write_dash_bg_user_unit "${HOME:-}"; then
+        echo "Failed to write user systemd unit at \"${HOME}/.config/systemd/user/zypper-auto-dashboard-bg.service\"." >&2
+        exit 1
+    fi
+
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+    if systemctl --user enable --now zypper-auto-dashboard-bg.service; then
+        echo "Background dashboard service enabled and started."
+        echo "  Inspect: systemctl --user status zypper-auto-dashboard-bg.service"
+        echo "  Status:  zypper-auto-helper --dash-bg status"
+
+        # Best-effort linger so the unit keeps running after the user logs out.
+        # Requires elevated privileges; we don't fail if it can't be enabled.
+        if command -v loginctl >/dev/null 2>&1 && [ -n "${USER:-}" ]; then
+            linger_state="$(loginctl show-user "${USER}" -p Linger --value 2>/dev/null || echo "")"
+            if [ "${linger_state}" != "yes" ] 2>/dev/null; then
+                if loginctl enable-linger "${USER}" >/dev/null 2>&1; then
+                    echo "Enabled user linger so the dashboard survives logout."
+                else
+                    echo "Tip: enable user linger so the BG dashboard survives logout:"
+                    echo "  sudo loginctl enable-linger ${USER}"
+                fi
+            fi
+        fi
+        exit 0
+    fi
+
+    echo "Failed to enable zypper-auto-dashboard-bg.service via systemctl --user." >&2
+    echo "Try: systemctl --user status zypper-auto-dashboard-bg.service" >&2
+    exit 1
+fi
+
+if [[ "${1:-}" == "--dash-bg-disable" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
+    # Disable + stop the user-level BG dashboard service. Leaves the unit file
+    # in place so the user can re-enable later without --dash-bg-enable.
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "systemctl not found; nothing to disable." >&2
+        exit 1
+    fi
+
+    if systemctl --user disable --now zypper-auto-dashboard-bg.service >/dev/null 2>&1; then
+        echo "Background dashboard service disabled."
+    else
+        echo "Note: zypper-auto-dashboard-bg.service was not enabled (or could not be reached)."
+    fi
+
+    # Defensive fallback: ensure detached workers are stopped even if the unit
+    # never owned them (e.g. user ran --dash-bg start manually before enabling).
+    helper_bin="/usr/local/bin/zypper-auto-helper"
+    if [ ! -x "${helper_bin}" ] && [ -x "$0" ]; then
+        helper_bin="$0"
+    fi
+    "${helper_bin}" --dash-bg stop >/dev/null 2>&1 || true
+
+    exit 0
 fi
 
 
@@ -2396,6 +2861,8 @@ __znh_write_dashboard_schema_json() {
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
     "DASHBOARD_PERFORMANCE_MODE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
+    "WEBUI_BACKGROUND_DASH_ENABLED": {"type": "bool", "default": "false"},
+    "WEBUI_BACKGROUND_DASH_PROFILE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
     "ZNH_DIAG_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "6"},
     "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "8"},
     "MANAGERS_SERVER_POLL_VISIBLE_MS": {"type": "int", "min": 1200, "max": 60000, "step": 100, "default": "4500"},
@@ -8523,6 +8990,25 @@ DASHBOARD_JS_VERBOSE_DEBUG=false
 #   zypper-auto-helper --dash-open
 DASHBOARD_PERFORMANCE_MODE="powersaving"
 
+# WEBUI_BACKGROUND_DASH_ENABLED
+# When true, an opt-in always-on background dashboard service can be enabled
+# via systemctl --user (zypper-auto-dashboard-bg.service) using:
+#   zypper-auto-helper --dash-bg-enable
+# This keeps the WebUI HTTP API + sync/perf workers alive in the background
+# (no browser auto-open) under low-impact systemd resource limits.
+# Allowed values: true / false
+# Default: false
+WEBUI_BACKGROUND_DASH_ENABLED=false
+
+# WEBUI_BACKGROUND_DASH_PROFILE
+# Cadence profile used by the always-on background dashboard workers when
+# the BG service is running. Independently controllable from the foreground
+# DASHBOARD_PERFORMANCE_MODE so the BG service can stay quiet (powersaving)
+# while interactive sessions use a faster profile.
+# Allowed values: powersaving | balanced | performance
+# Default: powersaving
+WEBUI_BACKGROUND_DASH_PROFILE="powersaving"
+
 # WEBUI_AUTO_FETCH_INTERVAL_MINUTES
 # When Live mode is OFF (status-only), the dashboard still performs periodic
 # one-shot refreshes to keep cards/logs reasonably fresh.
@@ -9496,6 +9982,8 @@ EOF
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_allowed_set DASHBOARD_PERFORMANCE_MODE powersaving "powersaving,balanced,performance"
+    validate_bool_flag WEBUI_BACKGROUND_DASH_ENABLED false
+    validate_allowed_set WEBUI_BACKGROUND_DASH_PROFILE powersaving "powersaving,balanced,performance"
     validate_nonneg_int_bounded_optional ZNH_DIAG_MAX_SERVICE_LOGS 6 1 30
     validate_nonneg_int_bounded_optional ZNH_LIVE_LOGS_MAX_SERVICE_LOGS 8 1 30
     validate_nonneg_int_bounded_optional MANAGERS_SERVER_POLL_VISIBLE_MS 4500 1200 60000
@@ -9895,6 +10383,8 @@ EOF
     _mark_missing_key "WEBUI_UNUSUAL_SUPPRESS_JS_BURST_SECONDS"
     _mark_missing_key "WEBUI_AUTO_FETCH_INTERVAL_MINUTES"
     _mark_missing_key "WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED"
+    _mark_missing_key "WEBUI_BACKGROUND_DASH_ENABLED"
+    _mark_missing_key "WEBUI_BACKGROUND_DASH_PROFILE"
     _mark_missing_key "SELF_UPDATE_CHANNEL"
     _mark_missing_key "SELF_UPDATE_STABLE_POLICY"
     _mark_missing_key "WEBUI_HISTORY_RETENTION_DAYS"
@@ -10076,6 +10566,12 @@ EOF
                     ;;
                 WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED)
                     log_info "  - WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED: enables/disables background self-update availability notifications in WebUI (Notification Center + browser desktop notifications)."
+                    ;;
+                WEBUI_BACKGROUND_DASH_ENABLED)
+                    log_info "  - WEBUI_BACKGROUND_DASH_ENABLED: when true, the always-on background dashboard service (zypper-auto-dashboard-bg.service) may be enabled with --dash-bg-enable. Keeps WebUI HTTP API + sync/perf workers running quietly under low-impact systemd resource limits (no browser auto-open)."
+                    ;;
+                WEBUI_BACKGROUND_DASH_PROFILE)
+                    log_info "  - WEBUI_BACKGROUND_DASH_PROFILE: cadence profile (powersaving/balanced/performance) used by the always-on background dashboard workers. Independent from DASHBOARD_PERFORMANCE_MODE so the BG service can stay quiet while interactive sessions use a faster profile."
                     ;;
                 SELF_UPDATE_CHANNEL)
                     log_info "  - SELF_UPDATE_CHANNEL: controls whether the built-in self-updater tracks the rolling (latest main commit) or stable (GitHub Releases) channel."
@@ -18788,7 +19284,9 @@ generate_dashboard() {
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
         { key: 'DASHBOARD_PERFORMANCE_MODE', type: 'enum', label: 'Dashboard: performance mode (PowerSaving/Balanced/Performance)', help: 'Controls WebUI polling cadence and dash-open worker intervals. Default is powersaving to avoid CPU/RAM hogging. Tip: after changing this, re-open the dashboard (zypper-auto-helper --dash-open) to restart background workers with the new mode.' },
-        { key: 'ZNH_DIAG_MAX_SERVICE_LOGS', type: 'int', label: 'Diagnostics follower: max service logs tracked', advanced: true, help: 'Low-noise cap for persistent diagnostics follower source fanout (most-recent service logs). Lower values reduce background process/load.' },
+        { key: 'WEBUI_BACKGROUND_DASH_ENABLED', type: 'bool', label: 'Dashboard: always-on background service (opt-in)', advanced: true, help: 'When true, the always-on background dashboard service can be enabled via systemctl --user (zypper-auto-helper --dash-bg-enable). Keeps WebUI HTTP API + sync/perf workers alive in the background under low-impact systemd resource limits. No browser auto-open.' },
+        { key: 'WEBUI_BACKGROUND_DASH_PROFILE', type: 'enum', label: 'Dashboard: background service cadence profile (PowerSaving/Balanced/Performance)', advanced: true, help: 'Independent from foreground performance mode. Lets the BG service stay quiet (powersaving) while interactive sessions use a faster profile. Restart with --dash-bg stop && --dash-bg start (or restart the user service) to apply.' },
+        { key: 'ZNH_DIAG_MAX_SERVICE_LOGS',
         { key: 'ZNH_LIVE_LOGS_MAX_SERVICE_LOGS', type: 'int', label: 'Live logs fallback: max service logs tracked', advanced: true, help: 'Cap for debug-menu/CLI live-log fallback source fanout. Lower values reduce temporary tail-process spikes.' },
         { key: 'MANAGERS_SERVER_POLL_VISIBLE_MS', type: 'int', label: 'Managers (Server tab): visible poll interval (ms)', advanced: true, help: 'Polling interval while the browser tab is visible. Lower values are more responsive but use more API/CPU.' },
         { key: 'MANAGERS_SERVER_POLL_HIDDEN_MS', type: 'int', label: 'Managers (Server tab): hidden poll interval (ms)', advanced: true, help: 'Polling interval while browser tab is hidden/backgrounded. Use a higher value to reduce idle load.' },
@@ -28254,7 +28752,17 @@ generate_dashboard() {
             conflictSummary = '';
         }
 
-        // Rocket vendor-change toggle (advanced)
+        // Cross-distro conflict guidance: backend may attach a structured guidance
+        // object (single source of truth shared with notifier). zypper keeps the
+        // existing solver buttons + vendor-change toggle UX; apt/dnf/pacman get a
+        // PM-aware block with an Open-terminal CTA driven by guidance.recommended_cmd.
+        var pmName = '';
+        try { pmName = String((p && p.package_manager) || '').trim().toLowerCase(); } catch (e_pm0) { pmName = ''; }
+        if (pmName !== 'zypper' && pmName !== 'apt' && pmName !== 'dnf' && pmName !== 'pacman') pmName = 'zypper';
+        var cfGuidance = (p && p.conflict_guidance && typeof p.conflict_guidance === 'object') ? p.conflict_guidance : null;
+        var isZypperPm = (pmName === 'zypper');
+
+        // Rocket vendor-change toggle (advanced) — zypper-only.
         var allowVendor = false;
         try { allowVendor = String((_settingsConfig || {}).ROCKET_WIZARD_ALLOW_VENDOR_CHANGE || '').toLowerCase() === 'true'; } catch (e_av0) { allowVendor = false; }
 
@@ -28324,25 +28832,60 @@ generate_dashboard() {
 
         var cfBlock = '';
         if (conflictDetected) {
-            cfBlock = [
-                '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
-                '  <div style="font-weight:950; display:flex; align-items:center; gap:8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:999px; background: rgba(239,68,68,0.95); box-shadow: 0 0 0 0 rgba(239,68,68,0.9); animation: znhPulseDanger 1.2s infinite ease-out;"></span><span>Conflict detected</span></div>',
-                '  <div style="margin-top:6px; font-weight:800;">The preview suggests solver conflicts / manual decisions. Non-interactive <code>zypper dup</code> may abort. Recommended: run the update in a terminal.</div>',
-                '  <div style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Rocket setting: <code>ROCKET_WIZARD_ALLOW_VENDOR_CHANGE</code> = <strong>' + (allowVendor ? 'true' : 'false') + '</strong></div>',
-                (vendorConflict && !allowVendor ? '  <div style="margin-top:8px; font-weight:800;">This looks like a <strong>vendor switch</strong> conflict. To try non-interactively, enable <code>--allow-vendor-change</code> (or run the update in a terminal).</div>' : ''),
-                '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>sudo zypper dup --allow-vendor-change</code></div>',
-                '  <div style="margin-top:8px; font-size:0.9rem;">When zypper shows solutions, choose by number: <strong>1/2/3/4</strong> (option 4 can be deinstallation/removal depending on the conflict).</div>',
-                '  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">',
-                '    <button class="pill" type="button" id="ru-solver-1">1</button>',
-                '    <button class="pill" type="button" id="ru-solver-2">2</button>',
-                '    <button class="pill" type="button" id="ru-solver-3">3</button>',
-                '    <button class="pill" type="button" id="ru-solver-4">4</button>',
-                '  </div>',
-                (!allowVendor ? '  <button class="pill" type="button" id="ru-enable-vendor-change" style="margin-top:10px;" disabled>Enable allow-vendor-change (Rocket)</button>' : ''),
-                (!allowVendor ? '  <div style="margin-top:6px; color: var(--muted); font-size:0.88rem;">Tip: first check the manual-intervention box below, then enable vendor change.</div>' : ''),
-                (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + conflictSummary.replace(/</g,'&lt;') + '</pre>') : ''),
-                '</div>',
-            ].join('\n');
+            if (isZypperPm) {
+                cfBlock = [
+                    '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
+                    '  <div style="font-weight:950; display:flex; align-items:center; gap:8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:999px; background: rgba(239,68,68,0.95); box-shadow: 0 0 0 0 rgba(239,68,68,0.9); animation: znhPulseDanger 1.2s infinite ease-out;"></span><span>Conflict detected</span></div>',
+                    '  <div style="margin-top:6px; font-weight:800;">The preview suggests solver conflicts / manual decisions. Non-interactive <code>zypper dup</code> may abort. Recommended: run the update in a terminal.</div>',
+                    '  <div style="margin-top:8px; color: var(--muted); font-size:0.9rem;">Rocket setting: <code>ROCKET_WIZARD_ALLOW_VENDOR_CHANGE</code> = <strong>' + (allowVendor ? 'true' : 'false') + '</strong></div>',
+                    (vendorConflict && !allowVendor ? '  <div style="margin-top:8px; font-weight:800;">This looks like a <strong>vendor switch</strong> conflict. To try non-interactively, enable <code>--allow-vendor-change</code> (or run the update in a terminal).</div>' : ''),
+                    '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>sudo zypper dup --allow-vendor-change</code></div>',
+                    '  <div style="margin-top:8px; font-size:0.9rem;">When zypper shows solutions, choose by number: <strong>1/2/3/4</strong> (option 4 can be deinstallation/removal depending on the conflict).</div>',
+                    '  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">',
+                    '    <button class="pill" type="button" id="ru-solver-1">1</button>',
+                    '    <button class="pill" type="button" id="ru-solver-2">2</button>',
+                    '    <button class="pill" type="button" id="ru-solver-3">3</button>',
+                    '    <button class="pill" type="button" id="ru-solver-4">4</button>',
+                    '  </div>',
+                    (!allowVendor ? '  <button class="pill" type="button" id="ru-enable-vendor-change" style="margin-top:10px;" disabled>Enable allow-vendor-change (Rocket)</button>' : ''),
+                    (!allowVendor ? '  <div style="margin-top:6px; color: var(--muted); font-size:0.88rem;">Tip: first check the manual-intervention box below, then enable vendor change.</div>' : ''),
+                    (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + conflictSummary.replace(/</g,'&lt;') + '</pre>') : ''),
+                    '</div>',
+                ].join('\n');
+            } else {
+                // Cross-distro (apt/dnf/pacman): solver prompts cannot be answered from
+                // the WebUI. Render a PM-aware block driven by backend guidance and add
+                // an Open-terminal CTA so the user can resolve interactively.
+                var gPm = (cfGuidance && cfGuidance.package_manager) ? String(cfGuidance.package_manager) : pmName;
+                var gHeadline = (cfGuidance && cfGuidance.headline) ? String(cfGuidance.headline) : ('Manual decision required (' + gPm + ')');
+                var gExplain = (cfGuidance && cfGuidance.explanation) ? String(cfGuidance.explanation) : 'The dashboard cannot drive interactive package-manager prompts. Resolve in a terminal.';
+                var gRec = (cfGuidance && cfGuidance.recommended_cmd) ? String(cfGuidance.recommended_cmd) : '';
+                var gMgr = (cfGuidance && cfGuidance.manager_hint) ? String(cfGuidance.manager_hint) : '';
+                var gSteps = (cfGuidance && cfGuidance.steps && cfGuidance.steps.length) ? cfGuidance.steps : null;
+                function _ruEsc(s) { return String(s || '').replace(/</g, '&lt;'); }
+                var stepsHtml = '';
+                if (gSteps) {
+                    var stepLis = '';
+                    for (var si = 0; si < gSteps.length; si++) {
+                        stepLis += '<li>' + _ruEsc(gSteps[si]) + '</li>';
+                    }
+                    stepsHtml = '  <ol style="margin-top:8px; padding-left:1.4em; font-size:0.9rem;">' + stepLis + '</ol>';
+                }
+                cfBlock = [
+                    '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
+                    '  <div style="font-weight:950; display:flex; align-items:center; gap:8px;"><span style="display:inline-block; width:10px; height:10px; border-radius:999px; background: rgba(239,68,68,0.95); box-shadow: 0 0 0 0 rgba(239,68,68,0.9); animation: znhPulseDanger 1.2s infinite ease-out;"></span><span>' + _ruEsc(gHeadline) + '</span></div>',
+                    '  <div style="margin-top:6px; font-weight:800;">' + _ruEsc(gExplain) + '</div>',
+                    (gMgr ? '  <div style="margin-top:6px; color: var(--muted); font-size:0.9rem;">Detected: <strong>' + _ruEsc(gMgr) + '</strong></div>' : ''),
+                    (gRec ? '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>' + _ruEsc(gRec) + '</code></div>' : ''),
+                    stepsHtml,
+                    '  <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">',
+                    (gRec ? '    <button class="pill" type="button" id="ru-pm-open-terminal" data-cmd="' + _ruEsc(gRec) + '">Open terminal (copy command)</button>' : ''),
+                    (gRec ? '    <button class="pill" type="button" id="ru-pm-copy-cmd" data-cmd="' + _ruEsc(gRec) + '">Copy recommended command</button>' : ''),
+                    '  </div>',
+                    (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 200px; margin-top: 10px;">' + _ruEsc(conflictSummary) + '</pre>') : ''),
+                    '</div>',
+                ].join('\n');
+            }
         }
 
         e.body.innerHTML = [
@@ -28385,7 +28928,13 @@ generate_dashboard() {
 
                 // If this looks like a vendor-switch conflict and vendor-change is OFF,
                 // do not allow proceeding into a non-interactive run that will likely abort.
-                if (vendorConflict && !allowVendor) {
+                // (zypper-only path; non-zypper PMs require terminal regardless.)
+                if (isZypperPm && vendorConflict && !allowVendor) {
+                    ok = false;
+                }
+                // Non-zypper PMs cannot be driven from the WebUI; always require terminal
+                // resolution (the Next button stays disabled to avoid a guaranteed abort).
+                if (!isZypperPm) {
                     ok = false;
                 }
             }
@@ -28469,6 +29018,35 @@ generate_dashboard() {
             if (b4) b4.addEventListener('click', function(ev){ _ruPickSolverChoice('4', ev); });
         }
         _ruWireSolverChoiceButtons();
+
+        // Cross-distro (apt/dnf/pacman) helper buttons: Copy recommended cmd / Open terminal.
+        // Both copy the recommended command to the clipboard and toast a clear hint that
+        // the user must answer prompts in a real terminal (the WebUI cannot drive them).
+        function _ruPmCopyAndToast(cmd, ev, headline) {
+            var c = String(cmd || '').trim();
+            if (!c) return;
+            try { if (ev) addRipple(ev.currentTarget, ev.clientX, ev.clientY); } catch (e0) {}
+            try {
+                if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(c, ev ? ev.currentTarget : null);
+                } else if (typeof copyTextToClipboard === 'function') {
+                    copyTextToClipboard(c, ev ? ev.currentTarget : null, 'Command copied');
+                } else if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(c);
+                }
+            } catch (e1) {}
+            toast(String(headline || 'Open a terminal'), 'Paste & run: ' + c, 'ok');
+        }
+        var pmOt = document.getElementById('ru-pm-open-terminal');
+        if (pmOt) pmOt.addEventListener('click', function(ev) {
+            var c = pmOt.getAttribute('data-cmd') || '';
+            _ruPmCopyAndToast(c, ev, 'Open a terminal and paste');
+        });
+        var pmCp = document.getElementById('ru-pm-copy-cmd');
+        if (pmCp) pmCp.addEventListener('click', function(ev) {
+            var c = pmCp.getAttribute('data-cmd') || '';
+            _ruPmCopyAndToast(c, ev, 'Command copied');
+        });
 
         // Conflict helper: enable vendor change for Rocket (best-effort)
         // IMPORTANT: gated behind the manual-intervention checkbox.
@@ -28697,32 +29275,87 @@ generate_dashboard() {
             conflictSummary = '';
         }
 
+        // PM + structured guidance: zypper keeps existing solver-button UX, while
+        // apt/dnf/pacman get a PM-aware block with Copy/Open-terminal CTA.
+        var pmDone = '';
+        try { pmDone = String((opts && opts.package_manager) || '').trim().toLowerCase(); } catch (e_pmd) { pmDone = ''; }
+        if (pmDone !== 'zypper' && pmDone !== 'apt' && pmDone !== 'dnf' && pmDone !== 'pacman') pmDone = 'zypper';
+        var isZypperDone = (pmDone === 'zypper');
+        var cfDoneGuide = (opts && opts.conflict_guidance && typeof opts.conflict_guidance === 'object') ? opts.conflict_guidance : null;
+
         var interactiveCmd = '';
         try { interactiveCmd = String(opts && opts.interactive_cmd ? opts.interactive_cmd : '').trim(); } catch (e_cmd0) { interactiveCmd = ''; }
-        if (!interactiveCmd) interactiveCmd = 'zypper-run-install';
+        if (!interactiveCmd) {
+            // Sensible per-PM default when callers did not pre-fill interactive_cmd.
+            if (isZypperDone) {
+                interactiveCmd = 'zypper-run-install';
+            } else if (cfDoneGuide && cfDoneGuide.recommended_cmd) {
+                interactiveCmd = String(cfDoneGuide.recommended_cmd);
+            } else if (pmDone === 'apt') {
+                interactiveCmd = 'sudo apt-get dist-upgrade';
+            } else if (pmDone === 'dnf') {
+                interactiveCmd = 'sudo dnf upgrade';
+            } else if (pmDone === 'pacman') {
+                interactiveCmd = 'sudo pacman -Syu';
+            } else {
+                interactiveCmd = 'zypper-run-install';
+            }
+        }
 
         var hintBlock = '';
         if (conflictDetected) {
-            hintBlock = [
-                '<div class="overlay-alert overlay-alert-warn" style="margin-top: 12px; border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
-                '  <div style="font-weight:950;">Manual solver decision required</div>',
-                '  <div style="margin-top:6px; font-weight:800;">The WebUI runs <code>zypper dup</code> non-interactively. If zypper prompts for a solution (vendor switch / obsolete / dependency break), run an interactive update in a terminal.</div>',
-                '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>sudo zypper dup --allow-vendor-change</code></div>',
-                '  <div style="margin-top:8px; font-size:0.9rem;">When zypper asks for a solution, select by number: <strong>1/2/3/4</strong> (option 4 can be deinstallation/removal depending on the conflict).</div>',
-                '  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">',
-                '    <button class="pill" type="button" id="ru-result-solver-1">1</button>',
-                '    <button class="pill" type="button" id="ru-result-solver-2">2</button>',
-                '    <button class="pill" type="button" id="ru-result-solver-3">3</button>',
-                '    <button class="pill" type="button" id="ru-result-solver-4">4</button>',
-                '  </div>',
-                (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 180px; margin-top: 10px;">' + safe(conflictSummary) + '</pre>') : ''),
-                '  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
-                '    <button class="pill" type="button" id="ru-copy-interactive">Copy command</button>',
-                '    <code style="font-size:0.90rem;">' + safe(interactiveCmd) + '</code>',
-                '  </div>',
-                '  <div style="color: var(--muted); font-size:0.88rem; margin-top:8px;">Alternative: run <code>sudo zypper dup</code> directly and choose a solution.</div>',
-                '</div>'
-            ].join('\n');
+            if (isZypperDone) {
+                hintBlock = [
+                    '<div class="overlay-alert overlay-alert-warn" style="margin-top: 12px; border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
+                    '  <div style="font-weight:950;">Manual solver decision required</div>',
+                    '  <div style="margin-top:6px; font-weight:800;">The WebUI runs <code>zypper dup</code> non-interactively. If zypper prompts for a solution (vendor switch / obsolete / dependency break), run an interactive update in a terminal.</div>',
+                    '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>sudo zypper dup --allow-vendor-change</code></div>',
+                    '  <div style="margin-top:8px; font-size:0.9rem;">When zypper asks for a solution, select by number: <strong>1/2/3/4</strong> (option 4 can be deinstallation/removal depending on the conflict).</div>',
+                    '  <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">',
+                    '    <button class="pill" type="button" id="ru-result-solver-1">1</button>',
+                    '    <button class="pill" type="button" id="ru-result-solver-2">2</button>',
+                    '    <button class="pill" type="button" id="ru-result-solver-3">3</button>',
+                    '    <button class="pill" type="button" id="ru-result-solver-4">4</button>',
+                    '  </div>',
+                    (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 180px; margin-top: 10px;">' + safe(conflictSummary) + '</pre>') : ''),
+                    '  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+                    '    <button class="pill" type="button" id="ru-copy-interactive">Copy command</button>',
+                    '    <code style="font-size:0.90rem;">' + safe(interactiveCmd) + '</code>',
+                    '  </div>',
+                    '  <div style="color: var(--muted); font-size:0.88rem; margin-top:8px;">Alternative: run <code>sudo zypper dup</code> directly and choose a solution.</div>',
+                    '</div>'
+                ].join('\n');
+            } else {
+                // apt / dnf / pacman: PM-aware result block driven by guidance.
+                var gPmD = (cfDoneGuide && cfDoneGuide.package_manager) ? String(cfDoneGuide.package_manager) : pmDone;
+                var gHeadlineD = (cfDoneGuide && cfDoneGuide.headline) ? String(cfDoneGuide.headline) : ('Manual decision required (' + gPmD + ')');
+                var gExplainD = (cfDoneGuide && cfDoneGuide.explanation) ? String(cfDoneGuide.explanation) : 'The dashboard cannot answer interactive package-manager prompts. Resolve in a terminal.';
+                var gMgrD = (cfDoneGuide && cfDoneGuide.manager_hint) ? String(cfDoneGuide.manager_hint) : '';
+                var gStepsD = (cfDoneGuide && cfDoneGuide.steps && cfDoneGuide.steps.length) ? cfDoneGuide.steps : null;
+                var stepsHtmlD = '';
+                if (gStepsD) {
+                    var stepLisD = '';
+                    for (var siD = 0; siD < gStepsD.length; siD++) {
+                        stepLisD += '<li>' + safe(gStepsD[siD]) + '</li>';
+                    }
+                    stepsHtmlD = '  <ol style="margin-top:8px; padding-left:1.4em; font-size:0.9rem;">' + stepLisD + '</ol>';
+                }
+                hintBlock = [
+                    '<div class="overlay-alert overlay-alert-warn" style="margin-top: 12px; border-color: rgba(255,110,110,0.55); background: rgba(255,110,110,0.08);">',
+                    '  <div style="font-weight:950;">' + safe(gHeadlineD) + '</div>',
+                    '  <div style="margin-top:6px; font-weight:800;">' + safe(gExplainD) + '</div>',
+                    (gMgrD ? '  <div style="margin-top:6px; color: var(--muted); font-size:0.9rem;">Detected: <strong>' + safe(gMgrD) + '</strong></div>' : ''),
+                    '  <div style="margin-top:8px; font-size:0.9rem;">Recommended command: <code>' + safe(interactiveCmd) + '</code></div>',
+                    stepsHtmlD,
+                    (conflictSummary ? ('  <pre class="overlay-pre" style="max-height: 180px; margin-top: 10px;">' + safe(conflictSummary) + '</pre>') : ''),
+                    '  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">',
+                    '    <button class="pill" type="button" id="ru-copy-interactive">Copy command</button>',
+                    '    <code style="font-size:0.90rem;">' + safe(interactiveCmd) + '</code>',
+                    '  </div>',
+                    '  <div style="color: var(--muted); font-size:0.88rem; margin-top:8px;">The WebUI cannot drive interactive ' + safe(gPmD) + ' prompts. Open a terminal and run the command above.</div>',
+                    '</div>'
+                ].join('\n');
+            }
         }
 
         e.body.innerHTML = [
@@ -28999,15 +29632,31 @@ generate_dashboard() {
                             } catch (eCFJ2) {}
                         }
 
-                        var doneOpts = {};
+                        // Pull PM and structured guidance from the job payload so the result
+                        // overlay can render PM-aware messaging without re-detecting.
+                        var pmJob3 = '';
+                        try { pmJob3 = String((j && j.package_manager) || '').trim().toLowerCase(); } catch (ePm3) { pmJob3 = ''; }
+                        if (pmJob3 !== 'zypper' && pmJob3 !== 'apt' && pmJob3 !== 'dnf' && pmJob3 !== 'pacman') pmJob3 = 'zypper';
+                        var cfgJob3 = (j && j.conflict_guidance && typeof j.conflict_guidance === 'object') ? j.conflict_guidance : null;
+
+                        var doneOpts = { package_manager: pmJob3 };
                         if (cfDet3) {
                             doneOpts.conflict_detected = true;
                             doneOpts.conflict_summary = cfSum3;
-                            doneOpts.interactive_cmd = 'zypper-run-install';
+                            doneOpts.conflict_guidance = cfgJob3;
+                            // Default zypper interactive command stays the same; for non-zypper
+                            // PMs the recommended command from guidance is what the user copies.
+                            if (pmJob3 === 'zypper') {
+                                doneOpts.interactive_cmd = 'zypper-run-install';
+                            } else if (cfgJob3 && cfgJob3.recommended_cmd) {
+                                doneOpts.interactive_cmd = String(cfgJob3.recommended_cmd);
+                            } else {
+                                doneOpts.interactive_cmd = 'sudo apt-get dist-upgrade';
+                            }
                         }
 
                         try { znhTaskDone('system-update', false); } catch (e_task_ru4) {}
-                        _ruRenderDone('Update failed', 'zypper dup returned a non-zero exit code (see log).', logText, j.restart_check_output || '', doneOpts);
+                        _ruRenderDone('Update failed', 'Update returned a non-zero exit code (see log).', logText, j.restart_check_output || '', doneOpts);
                     }
                 }
 
@@ -44401,6 +45050,10 @@ run_uninstall_helper_only() {
         execute_guarded "Stop user notifier service" \
             sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
             systemctl --user stop zypper-notify-user.service || true
+        # Always-on background dashboard service (opt-in; may not be enabled).
+        execute_guarded "Disable user BG dashboard service" \
+            sudo -u "$SUDO_USER" DBUS_SESSION_BUS_ADDRESS="$USER_BUS_PATH" \
+            systemctl --user disable --now zypper-auto-dashboard-bg.service || true
     fi
 
     # 3. Remove systemd unit files and root binaries
@@ -44456,6 +45109,7 @@ run_uninstall_helper_only() {
         execute_guarded "Remove user scripts, unit files, and desktop shortcuts" rm -f \
             "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service" \
             "$SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.timer" \
+            "$SUDO_USER_HOME/.config/systemd/user/zypper-auto-dashboard-bg.service" \
             "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" \
             "$SUDO_USER_HOME/.local/bin/zypper-run-install" \
             "$SUDO_USER_HOME/.local/bin/zypper-with-ps" \
@@ -45230,6 +45884,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --dashboard             Generate/update a static HTML status page"
     echo "  --dash-open             Generate/refresh and open the dashboard in your browser"
     echo "  --dash-stop             Stop the local live dashboard server started by --dash-open"
+    echo "  --dash-bg [start|stop|status]"
+    echo "                          Always-on, low-impact background dashboard runner"
+    echo "                          (no browser; default subcommand is 'start')."
+    echo "  --dash-bg-enable        Install + enable the user systemd unit so the BG"
+    echo "                          dashboard auto-starts at login (linger-aware)."
+    echo "  --dash-bg-disable       Disable + stop the BG dashboard user systemd unit."
     echo "  --dash-install          Enterprise quickstart: enable default hooks + generate/open dashboard"
     echo "  --dash-api-on           Start the localhost dashboard Settings API (root; used by Settings drawer)"
     echo "  --dash-api-off          Stop the localhost dashboard Settings API (root)"
@@ -49412,6 +50072,187 @@ def _recommended_manual_refresh_command() -> str:
         return "sudo pacman -Sy"
     return "sudo zypper refresh"
 
+def _conflict_guidance(surface: str = "notifier", conflict_summary: str = "") -> dict:
+    """Cross-distro guidance for solver/conflict situations.
+
+    Mirrors the dashboard API helper so the notifier and the WebUI display
+    the same headline, explanation, recommended command, follow-up steps and
+    solver options for whichever package manager is active. The notifier
+    derives the PM from SYSTEM_PKG_MANAGER; the WebUI passes the PM via the
+    /api/system/conflict-guidance endpoint.
+    """
+    pm = SYSTEM_PKG_MANAGER or "unknown"
+    recommended_cmd = _recommended_manual_update_command()
+    refresh_cmd = _recommended_manual_refresh_command()
+    surface_lower = (surface or "notifier").lower()
+    if surface_lower not in ("notifier", "webui"):
+        surface_lower = "notifier"
+
+    if pm == "zypper":
+        terminal_only = False
+        headline = "Updates require your decision"
+        explanation = (
+            "zypper detected a conflict (vendor change, dependency or repository "
+            "issue) that needs your input before it can continue."
+        )
+        manager_hint = (
+            "When zypper shows solution options, type the option number "
+            "(1, 2, 3 or 4) and press Enter. Option 4 may remove conflicting "
+            "packages depending on the case."
+        )
+        solver_choices = [
+            "1 - keep both vendors, no version change",
+            "2 - downgrade or change vendor as suggested",
+            "3 - keep affected package(s) at current version",
+            "4 - deinstall conflicting package(s)",
+        ]
+        steps = [
+            "Open a terminal as your normal user.",
+            f"Run: {recommended_cmd}",
+            "Read the conflict description, then enter 1/2/3/4 as appropriate.",
+            "If unsure, choose '1' to keep current packages and rerun later.",
+        ]
+    elif pm == "apt":
+        terminal_only = True
+        headline = "apt needs your decision"
+        explanation = (
+            "apt cannot complete the upgrade because of held packages, broken "
+            "dependencies or interactive prompts. Resolve them in a terminal."
+        )
+        manager_hint = (
+            "If apt reports held or broken packages, fix those first, then re-run "
+            "the recommended command. Use 'apt list --upgradable' to inspect."
+        )
+        solver_choices = []
+        steps = [
+            "Open a terminal as your normal user.",
+            f"Run: {refresh_cmd}",
+            f"Then run: {recommended_cmd}",
+            "If asked about config files, choose 'N' (keep current) unless certain.",
+        ]
+    elif pm == "dnf":
+        terminal_only = True
+        headline = "dnf needs your decision"
+        explanation = (
+            "dnf detected a dependency conflict and stopped before installing. "
+            "Review the listed packages in a terminal."
+        )
+        manager_hint = (
+            "If dnf lists package conflicts, try 'dnf upgrade --best' or "
+            "'dnf upgrade --allowerasing' after reviewing the impact."
+        )
+        solver_choices = []
+        steps = [
+            "Open a terminal as your normal user.",
+            f"Run: {refresh_cmd}",
+            f"Then run: {recommended_cmd}",
+            "When dnf prompts, type 'y' to confirm or 'N' to abort.",
+        ]
+    elif pm == "pacman":
+        terminal_only = True
+        headline = "pacman needs your decision"
+        explanation = (
+            "pacman detected a file or dependency conflict and stopped. "
+            "Resolve it in a terminal before continuing."
+        )
+        manager_hint = (
+            "If pacman reports file conflicts, inspect the offending package "
+            "and either remove or override after careful review."
+        )
+        solver_choices = []
+        steps = [
+            "Open a terminal as your normal user.",
+            f"Run: {refresh_cmd}",
+            f"Then run: {recommended_cmd}",
+            "Answer pacman prompts carefully (default is usually safe).",
+        ]
+    else:
+        terminal_only = True
+        headline = "Package manager needs your decision"
+        explanation = (
+            f"{pm or 'The package manager'} stopped before installing because it "
+            "needs interactive input."
+        )
+        manager_hint = (
+            "Open a terminal and follow the recommended command above. "
+            "Answer prompts carefully."
+        )
+        solver_choices = []
+        steps = [
+            "Open a terminal as your normal user.",
+            f"Run: {refresh_cmd}",
+            f"Then run: {recommended_cmd}",
+        ]
+
+    return {
+        "package_manager": pm,
+        "surface": surface_lower,
+        "headline": headline,
+        "explanation": explanation,
+        "recommended_cmd": recommended_cmd,
+        "refresh_cmd": refresh_cmd,
+        "terminal_only": terminal_only,
+        "solver_choices": solver_choices,
+        "steps": steps,
+        "manager_hint": manager_hint,
+        "conflict_summary": conflict_summary or "",
+    }
+
+def _open_terminal_with_command(cmd_str: str) -> bool:
+    """Open a GUI terminal that runs cmd_str and waits for the user to press Enter.
+
+    Returns True if a terminal was launched, False otherwise. The terminal is
+    started in a new session/scope so the notifier oneshot can exit cleanly
+    while the terminal stays open for the user.
+    """
+    if not cmd_str:
+        return False
+
+    inner = (
+        f"{cmd_str}; rc=$?; echo; "
+        "echo 'Press Enter to close this window...'; "
+        "read -r _ </dev/tty 2>/dev/null || sleep 5; exit $rc"
+    )
+
+    candidates = ("konsole", "gnome-terminal", "kitty", "alacritty", "xterm")
+    env = os.environ.copy()
+    for term in candidates:
+        if not shutil.which(term):
+            continue
+        try:
+            if term == "gnome-terminal":
+                argv = [term, "--", "bash", "-lc", inner]
+            else:
+                argv = [term, "-e", "bash", "-lc", inner]
+            try:
+                sd_cmd = ["systemd-run", "--user", "--scope"]
+                for key in (
+                    "DISPLAY",
+                    "WAYLAND_DISPLAY",
+                    "XDG_SESSION_TYPE",
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "XAUTHORITY",
+                ):
+                    val = env.get(key)
+                    if val:
+                        sd_cmd.append(f"--setenv={key}={val}")
+                sd_cmd.extend(argv)
+                log_debug(
+                    "Launching terminal via systemd-run: "
+                    + " ".join(shlex.quote(part) for part in sd_cmd)
+                )
+                subprocess.Popen(sd_cmd, env=env, start_new_session=True)
+            except FileNotFoundError:
+                log_debug(f"systemd-run not available; launching {term} directly")
+                subprocess.Popen(argv, env=env, start_new_session=True)
+            log_info(f"Opened terminal '{term}' with recommended command")
+            return True
+        except Exception as e:
+            log_debug(f"Failed to launch terminal '{term}': {e}")
+            continue
+    log_error("No GUI terminal could be launched for open-terminal action")
+    return False
+
 # --- Caching Functions ---
 def read_cache():
     """Read cached update check results.
@@ -50521,6 +51362,29 @@ def on_action(notification, action_id, user_data):
         except Exception as e:
             log_error(f"Failed to launch action script: {e}")
     
+    elif action_id == "open-terminal":
+        # Cross-distro "Open Terminal" action: launches a GUI terminal that
+        # runs the recommended PM-aware command (manual update or refresh).
+        # The command string is passed as user_data; if missing we fall back
+        # to the per-PM manual-update command.
+        log_info("User clicked Open Terminal action")
+        update_status("User opened terminal for manual command")
+        try:
+            cmd_str = user_data if isinstance(user_data, str) and user_data.strip() else _recommended_manual_update_command()
+        except Exception:
+            cmd_str = _recommended_manual_update_command()
+        try:
+            launched = _open_terminal_with_command(cmd_str)
+            if not launched:
+                log_error("Open Terminal action failed: no GUI terminal could be launched")
+        except Exception as e:
+            log_error(f"Open Terminal action failed: {e}")
+            try:
+                import traceback
+                log_debug(f"Traceback: {traceback.format_exc()}")
+            except Exception:
+                pass
+
     elif action_id == "snooze-1h":
         set_snooze(SNOOZE_SHORT_HOURS)
         update_status(f"Updates snoozed for {SNOOZE_SHORT_HOURS} hour(s)")
@@ -50927,14 +51791,16 @@ def main():
 
                 elif status.startswith("error:repo"):
                     # Repositories themselves reported an error (e.g. invalid
-                    # metadata). Treat similarly to network errors but use a
-                    # slightly different message.
+                    # metadata). Treat similarly to network errors but offer a
+                    # PM-aware Open Terminal action so the user can run the
+                    # refresh command directly without copy-pasting it.
                     log_error("Background downloader reported a repository error while checking for updates")
                     refresh_cmd = _recommended_manual_refresh_command()
                     msg = (
                         "The background updater hit an error while talking to configured repositories.\n\n"
                         f"{SYSTEM_PKG_MANAGER} reported repository failures or invalid metadata.\n\n"
-                        f"Run '{refresh_cmd}' in a terminal for full details."
+                        f"Run '{refresh_cmd}' in a terminal for full details, "
+                        "or click 'Open Terminal' to run it now."
                     )
                     n = Notify.Notification.new(
                         "Update check failed (repositories)",
@@ -50944,8 +51810,12 @@ def main():
                     n.set_timeout(30000)
                     n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-repo-error"))
                     n.set_urgency(Notify.Urgency.NORMAL)
+                    n.add_action("open-terminal", "Open Terminal", on_action, refresh_cmd)
+                    n.add_action("snooze-1h", "1h", on_action, None)
                     n.show()
 
+                    # Reset status to idle so we do not spam the same
+                    # notification on every timer tick.
                     try:
                         with open(download_status_file, "w") as f:
                             f.write("idle")
@@ -50956,10 +51826,11 @@ def main():
 
                 elif status.startswith("error:solver:"):
                     # Background downloader hit a solver/non-interactive error.
-                    # Show a persistent notification that both:
-                    #   - explains the conflict, and
-                    #   - summarises how many updates are available (if possible),
-                    # with an "Install Now" action that runs the helper.
+                    # Build a PM-aware notification using the shared
+                    # _conflict_guidance helper so the headline, explanation,
+                    # recommended command, follow-up steps and solver options
+                    # stay consistent across zypper/apt/dnf/pacman and the
+                    # WebUI overlay (which consumes the same structure).
                     try:
                         parts = status.split(":")
                         exit_code = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -50988,11 +51859,6 @@ def main():
                         log_debug(f"Failed to run preview command for solver summary: {e2}")
                         dry_output = ""
 
-                    title = "Updates require your decision"
-                    message = ""
-
-                    # If we got useful output, reuse the normal parser to describe
-                    # how many updates are pending and a short preview.
                     parsed_title = None
                     parsed_message = None
                     pkg_count = 0
@@ -51003,49 +51869,80 @@ def main():
                             log_debug(f"parse_output failed for solver summary: {e3}")
                             parsed_title, parsed_message, pkg_count = None, None, 0
 
+                    # Single source of truth for the cross-distro guidance text.
+                    try:
+                        guidance = _conflict_guidance(
+                            surface="notifier",
+                            conflict_summary=(parsed_message or ""),
+                        )
+                    except Exception as eg:
+                        log_debug(f"_conflict_guidance failed; using minimal fallback: {eg}")
+                        guidance = {
+                            "package_manager": SYSTEM_PKG_MANAGER,
+                            "headline": "Updates require your decision",
+                            "explanation": "",
+                            "recommended_cmd": _recommended_manual_update_command(),
+                            "refresh_cmd": _recommended_manual_refresh_command(),
+                            "terminal_only": SYSTEM_PKG_MANAGER != "zypper",
+                            "solver_choices": [],
+                            "steps": [],
+                            "manager_hint": "",
+                        }
+
+                    headline = guidance.get("headline") or "Updates require your decision"
+                    explanation = guidance.get("explanation") or ""
+                    recommended_cmd = guidance.get("recommended_cmd") or _recommended_manual_update_command()
+                    refresh_cmd = guidance.get("refresh_cmd") or _recommended_manual_refresh_command()
+                    manager_hint = guidance.get("manager_hint") or ""
+                    solver_choices = guidance.get("solver_choices") or []
+                    terminal_only = bool(guidance.get("terminal_only"))
+
                     if parsed_title:
                         title = f"{parsed_title} (manual decision needed)"
-                        message = (
-                            parsed_message
-                            + f"\\n\\n{SYSTEM_PKG_MANAGER} needs your decision to resolve conflicts before these updates can be installed."
+                    else:
+                        title = headline
+
+                    message_parts = []
+                    if parsed_message:
+                        message_parts.append(parsed_message)
+                        message_parts.append(
+                            f"{SYSTEM_PKG_MANAGER} needs your decision to resolve conflicts before these updates can be installed."
                         )
                     else:
-                        # Fallback generic explanation
                         if exit_code is not None:
-                            message = (
-                                f"Background download of updates hit a {SYSTEM_PKG_MANAGER} solver/conflict error (exit code {exit_code}).\\n\\n"
-                                "Some packages may already be cached, but manual conflict resolution is required to continue."
+                            message_parts.append(
+                                f"Background download of updates hit a {SYSTEM_PKG_MANAGER} solver/conflict error (exit code {exit_code})."
                             )
                         else:
-                            message = (
-                                f"Background download of updates hit a {SYSTEM_PKG_MANAGER} solver/conflict error.\\n\\n"
-                                "Some packages may already be cached, but manual conflict resolution is required to continue."
+                            message_parts.append(
+                                f"Background download of updates hit a {SYSTEM_PKG_MANAGER} solver/conflict error."
                             )
+                        message_parts.append(
+                            "Some packages may already be cached, but manual conflict resolution is required to continue."
+                        )
 
-                    # Always give clear instructions on what to do next.
-                    recommended_cmd = _recommended_manual_update_command()
-                    message += (
-                        "\\n\\nRecommended command:\\n"
-                        f"  {recommended_cmd}\\n"
-                        "or click 'Install Now' to open the helper."
-                    )
-                    if SYSTEM_PKG_MANAGER == "zypper":
-                        message += (
-                            "\\n\\nWhen zypper shows solution options, enter the option number and press Enter "
-                            "(for example: 1/2/3/4). Option 4 may remove/deinstall conflicting packages depending on the case."
-                        )
-                    elif SYSTEM_PKG_MANAGER == "apt":
-                        message += (
-                            "\\n\\nIf apt reports held or broken packages, resolve those first, then rerun the command."
-                        )
-                    elif SYSTEM_PKG_MANAGER == "dnf":
-                        message += (
-                            "\\n\\nIf dnf reports dependency conflicts, review the listed packages and retry after resolving them."
-                        )
-                    elif SYSTEM_PKG_MANAGER == "pacman":
-                        message += (
-                            "\\n\\nIf pacman reports dependency or file conflicts, resolve them and rerun the command."
-                        )
+                    if explanation:
+                        message_parts.append(explanation)
+
+                    message_parts.append(f"Recommended command:\\n  {recommended_cmd}")
+                    if terminal_only:
+                        message_parts.append("Click 'Open Terminal' to run it now.")
+                    else:
+                        message_parts.append("or click 'Install Now' to open the helper, or 'Open Terminal' to run it directly.")
+
+                    if solver_choices:
+                        choice_lines = ["Solver options you may see:"]
+                        for choice in solver_choices:
+                            choice_lines.append(f"  \u2022 {choice}")
+                        message_parts.append("\\n".join(choice_lines))
+
+                    if manager_hint:
+                        message_parts.append(manager_hint)
+
+                    if refresh_cmd and refresh_cmd != recommended_cmd:
+                        message_parts.append(f"Repository refresh: {refresh_cmd}")
+
+                    message = "\\n\\n".join(message_parts)
 
                     action_script = os.path.expanduser("~/.local/bin/zypper-run-install")
 
@@ -51059,8 +51956,17 @@ def main():
                     n.set_urgency(Notify.Urgency.CRITICAL)
                     n.set_hint("x-canonical-private-synchronous", GLib.Variant("s", "zypper-updates-conflict"))
 
-                    # Add the same actions as the normal "updates ready" notification.
-                    n.add_action("install", "Install Now", on_action, action_script)
+                    if terminal_only:
+                        # apt/dnf/pacman: the install helper cannot drive
+                        # interactive prompts, so we offer a direct terminal
+                        # in place of the Install Now button.
+                        n.add_action("open-terminal", "Open Terminal", on_action, recommended_cmd)
+                    else:
+                        # zypper: keep the existing Install Now path which
+                        # opens a terminal running the install helper, and
+                        # also expose a direct "Open Terminal" shortcut.
+                        n.add_action("install", "Install Now", on_action, action_script)
+                        n.add_action("open-terminal", "Open Terminal", on_action, recommended_cmd)
                     n.add_action("view-changes", "View Changes", on_action, None)
                     n.add_action("snooze-1h", "1h", on_action, None)
                     n.add_action("snooze-4h", "4h", on_action, None)
@@ -53651,6 +54557,149 @@ def _detect_solver_conflict(text: str, rc: int, pm: str = "zypper") -> tuple[boo
     return True, snippet
 
 
+# --- Cross-distro conflict guidance (single source of truth) ---
+# Returns a structured guidance dict that both the WebUI overlays and the
+# notifier desktop notification consume so wording, recommended commands,
+# and solver buttons stay in sync per package manager. The notifier has its
+# own thin copy of this helper (so it works when the API service is down) but
+# both copies must agree on shape and per-PM wording.
+def _conflict_guidance_recommended_cmd(pm: str) -> str:
+    manager = _normalize_pm(pm)
+    if manager == "zypper":
+        return "sudo zypper dup --allow-vendor-change"
+    if manager == "apt":
+        return "sudo apt-get dist-upgrade"
+    if manager == "dnf":
+        return "sudo dnf upgrade"
+    if manager == "pacman":
+        return "sudo pacman -Syu"
+    return "sudo zypper dup --allow-vendor-change"
+
+
+def _conflict_guidance_refresh_cmd(pm: str) -> str:
+    manager = _normalize_pm(pm)
+    if manager == "zypper":
+        return "sudo zypper refresh"
+    if manager == "apt":
+        return "sudo apt-get update"
+    if manager == "dnf":
+        return "sudo dnf makecache --refresh"
+    if manager == "pacman":
+        return "sudo pacman -Sy"
+    return "sudo zypper refresh"
+
+
+def _conflict_guidance(pm: str, surface: str = "webui", *, conflict_summary: str = "") -> dict:
+    manager = _normalize_pm(pm)
+    surf = str(surface or "").strip().lower()
+    if surf not in ("webui", "notifier"):
+        surf = "webui"
+
+    rec_cmd = _conflict_guidance_recommended_cmd(manager)
+    ref_cmd = _conflict_guidance_refresh_cmd(manager)
+
+    if manager == "zypper":
+        return {
+            "package_manager": manager,
+            "surface": surf,
+            "headline": "Conflict detected",
+            "explanation": (
+                "The preview suggests solver conflicts / manual decisions. "
+                "Non-interactive zypper dup may abort."
+            ),
+            "recommended_cmd": rec_cmd,
+            "refresh_cmd": ref_cmd,
+            "terminal_only": False,
+            "solver_choices": ["1", "2", "3", "4"],
+            "steps": [
+                f"Run the recommended command in a terminal: {rec_cmd}",
+                "When zypper shows numbered solutions, type 1, 2, 3, or 4 and press Enter.",
+                "Option 4 may include deinstallation/replacement \u2014 review carefully.",
+            ],
+            "manager_hint": "vendor change / solver choice",
+            "conflict_summary": str(conflict_summary or ""),
+        }
+    if manager == "apt":
+        return {
+            "package_manager": manager,
+            "surface": surf,
+            "headline": "Manual decision required (apt)",
+            "explanation": (
+                "apt reported held or unmet dependencies. The dashboard cannot "
+                "answer apt prompts; resolve them in a terminal."
+            ),
+            "recommended_cmd": rec_cmd,
+            "refresh_cmd": ref_cmd,
+            "terminal_only": True,
+            "solver_choices": [],
+            "steps": [
+                "Open a terminal.",
+                f"Refresh repositories: {ref_cmd}",
+                f"Run the upgrade and answer Y/N prompts: {rec_cmd}",
+                "If apt reports broken/held packages, resolve those first then retry.",
+            ],
+            "manager_hint": "unmet dependencies / held packages",
+            "conflict_summary": str(conflict_summary or ""),
+        }
+    if manager == "dnf":
+        return {
+            "package_manager": manager,
+            "surface": surf,
+            "headline": "Manual decision required (dnf)",
+            "explanation": (
+                "dnf reported a transaction test error or conflicting requests. "
+                "The dashboard cannot drive dnf prompts; resolve them in a terminal."
+            ),
+            "recommended_cmd": rec_cmd,
+            "refresh_cmd": ref_cmd,
+            "terminal_only": True,
+            "solver_choices": [],
+            "steps": [
+                "Open a terminal.",
+                f"Refresh metadata: {ref_cmd}",
+                f"Run the upgrade and answer Y/N prompts: {rec_cmd}",
+                "If dnf reports dependency conflicts, review the listed packages and retry after resolving them.",
+            ],
+            "manager_hint": "transaction test error / conflicting requests",
+            "conflict_summary": str(conflict_summary or ""),
+        }
+    if manager == "pacman":
+        return {
+            "package_manager": manager,
+            "surface": surf,
+            "headline": "Manual decision required (pacman)",
+            "explanation": (
+                "pacman failed to prepare or commit the transaction (e.g. file/dependency conflicts). "
+                "The dashboard cannot drive pacman prompts; resolve them in a terminal."
+            ),
+            "recommended_cmd": rec_cmd,
+            "refresh_cmd": ref_cmd,
+            "terminal_only": True,
+            "solver_choices": [],
+            "steps": [
+                "Open a terminal.",
+                f"Sync databases: {ref_cmd}",
+                f"Run the upgrade and answer Y/N prompts: {rec_cmd}",
+                "If pacman reports file conflicts, inspect /var/log/pacman.log and retry.",
+            ],
+            "manager_hint": "failed to prepare/commit transaction",
+            "conflict_summary": str(conflict_summary or ""),
+        }
+    return {
+        "package_manager": "zypper",
+        "surface": surf,
+        "headline": "Conflict detected",
+        "explanation": "Manual decision required.",
+        "recommended_cmd": rec_cmd,
+        "refresh_cmd": ref_cmd,
+        "terminal_only": False,
+        "solver_choices": ["1", "2", "3", "4"],
+        "steps": [f"Run: {rec_cmd}"],
+        "manager_hint": "unknown",
+        "conflict_summary": str(conflict_summary or ""),
+    }
+
+
 def _zypper_xml_pretty(text: str) -> str:
     """Convert zypper --xmlout output to a more readable text form (best-effort)."""
     if not text:
@@ -56151,6 +57200,13 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
     except Exception:
         conflict_detected, conflict_summary = False, ""
 
+    conflict_guidance = {}
+    try:
+        if conflict_detected:
+            conflict_guidance = _conflict_guidance(pm_name, surface="webui", conflict_summary=str(conflict_summary or ""))
+    except Exception:
+        conflict_guidance = {}
+
     return {
         "job_id": jid,
         "type": "system-dup",
@@ -56166,6 +57222,7 @@ def _recover_system_dup_job(job_id: str) -> dict | None:
         "restart_check_output": restart_out,
         "conflict_detected": bool(conflict_detected),
         "conflict_summary": str(conflict_summary or ""),
+        "conflict_guidance": conflict_guidance,
         "resumed": True,
         "unit": unit,
         "log_path": log_path,
@@ -57458,6 +58515,33 @@ class Handler(BaseHTTPRequestHandler):
             payload["ok"] = True
             payload["ts"] = time.time()
             return _json_response(self, 200, payload, origin)
+        if path == "/api/system/conflict-guidance":
+            # Cross-distro conflict guidance helper exposed for the WebUI overlay
+            # and the notifier (single source of truth for headline/explanation/
+            # recommended_cmd/refresh_cmd/terminal_only/solver_choices/steps).
+            # Query params: pm=<zypper|apt|dnf|pacman> (defaults to detected),
+            # surface=<webui|notifier> (defaults to webui).
+            pm_arg = ""
+            try:
+                pm_arg = str((qs.get("pm") or [""])[0]).strip().lower()
+            except Exception:
+                pm_arg = ""
+            surf_arg = "webui"
+            try:
+                surf_arg = str((qs.get("surface") or ["webui"])[0]).strip().lower() or "webui"
+            except Exception:
+                surf_arg = "webui"
+            if not pm_arg or pm_arg not in SUPPORTED_PACKAGE_MANAGERS:
+                try:
+                    pm_arg = _detect_system_package_manager()
+                except Exception:
+                    pm_arg = "zypper"
+            try:
+                guidance = _conflict_guidance(pm_arg, surface=surf_arg)
+            except Exception as e:
+                return _json_response(self, 500, {"error": f"conflict guidance failed: {e}"}, origin)
+            payload = {"ok": True, "ts": time.time(), "guidance": guidance}
+            return _json_response(self, 200, payload, origin)
         if path == "/api/snapper/timers":
             def _systemd_time_to_utc(raw: str) -> str:
                 s = str(raw or "").strip()
@@ -58395,6 +59479,12 @@ class Handler(BaseHTTPRequestHandler):
             effective_rc = 0 if _rocket_preview_rc_ok(pm_name, raw_rc) else raw_rc
             out_full = (preface or "") + out_pm
             conflict_detected, conflict_summary = _detect_solver_conflict(out_full, effective_rc, pm=pm_name)
+            conflict_guidance_obj = {}
+            try:
+                if conflict_detected:
+                    conflict_guidance_obj = _conflict_guidance(pm_name, surface="webui", conflict_summary=str(conflict_summary or ""))
+            except Exception:
+                conflict_guidance_obj = {}
 
             reboot_required = False
             try:
@@ -58434,6 +59524,7 @@ class Handler(BaseHTTPRequestHandler):
                 "zypp_lock_timed_out": False,
                 "conflict_detected": bool(conflict_detected),
                 "conflict_summary": conflict_summary,
+                "conflict_guidance": conflict_guidance_obj,
                 "reboot_required": bool(reboot_required),
                 "cache_updated": bool(cache_updated),
             }, origin)
@@ -58486,6 +59577,14 @@ class Handler(BaseHTTPRequestHandler):
                         tail_raw = out
                         pm_job = _normalize_pm(str(job.get("package_manager", "zypper") or "zypper"))
                         tail = _zypper_xml_pretty(tail_raw) if pm_job == "zypper" else tail_raw
+                        cfd_job = bool(job.get("conflict_detected"))
+                        cfs_job = str(job.get("conflict_summary") or "")
+                        cfg_job = {}
+                        try:
+                            if cfd_job:
+                                cfg_job = _conflict_guidance(pm_job, surface="webui", conflict_summary=cfs_job)
+                        except Exception:
+                            cfg_job = {}
                         return _json_response(self, 200, {
                             "job_id": job_id,
                             "type": job.get("type"),
@@ -58499,8 +59598,9 @@ class Handler(BaseHTTPRequestHandler):
                             "output": tail,
                             "output_truncated": bool(job.get("output_truncated")),
                             "restart_check_output": job.get("restart_check_output"),
-                            "conflict_detected": bool(job.get("conflict_detected")),
-                            "conflict_summary": str(job.get("conflict_summary") or ""),
+                            "conflict_detected": cfd_job,
+                            "conflict_summary": cfs_job,
+                            "conflict_guidance": cfg_job,
                         }, origin)
                 else:
                     job = jobs.get(job_id)
@@ -58524,6 +59624,14 @@ class Handler(BaseHTTPRequestHandler):
                     tail_raw = out
                     pm_job = _normalize_pm(str(job.get("package_manager", "zypper") or "zypper"))
                     tail = _zypper_xml_pretty(tail_raw) if pm_job == "zypper" else tail_raw
+                    cfd_job = bool(job.get("conflict_detected"))
+                    cfs_job = str(job.get("conflict_summary") or "")
+                    cfg_job = {}
+                    try:
+                        if cfd_job:
+                            cfg_job = _conflict_guidance(pm_job, surface="webui", conflict_summary=cfs_job)
+                    except Exception:
+                        cfg_job = {}
                     return _json_response(self, 200, {
                         "job_id": job_id,
                         "type": job.get("type"),
@@ -58537,8 +59645,9 @@ class Handler(BaseHTTPRequestHandler):
                         "output": tail,
                         "output_truncated": bool(job.get("output_truncated")),
                         "restart_check_output": job.get("restart_check_output"),
-                        "conflict_detected": bool(job.get("conflict_detected")),
-                        "conflict_summary": str(job.get("conflict_summary") or ""),
+                        "conflict_detected": cfd_job,
+                        "conflict_summary": cfs_job,
+                        "conflict_guidance": cfg_job,
                     }, origin)
             except Exception as e:
                 return _json_response(self, 500, {"error": f"job lookup failed: {e}"}, origin)
