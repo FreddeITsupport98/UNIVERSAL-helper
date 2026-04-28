@@ -103,6 +103,7 @@ assert_contains "${source_text}" "key: 'WEBUI_BACKGROUND_DASH_PROFILE'" "SETTING
 
 # Uninstaller takes the BG service down and removes its unit file.
 assert_contains "${source_text}" "systemctl --user disable --now zypper-auto-dashboard-bg.service || true" "uninstaller missing BG service disable in user-timer/service section"
+# shellcheck disable=SC2016  # intentionally literal: we are grepping UNI-auto.sh for the unexpanded $SUDO_USER_HOME reference inside its uninstaller rm -f list.
 assert_contains "${source_text}" '"$SUDO_USER_HOME/.config/systemd/user/zypper-auto-dashboard-bg.service"' "uninstaller missing BG service unit file in rm -f list"
 
 if [ "${#FAILURES[@]}" -gt 0 ]; then
