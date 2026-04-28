@@ -158,6 +158,516 @@ znh_install_package_via_system_pm() {
     esac
 }
 
+# ---------------------------------------------------------------------
+# Distro release-cycle / distro-upgrade detection helpers
+# ---------------------------------------------------------------------
+# Some Linux distributions ship "fixed-cycle" releases (e.g. Fedora ~6 months,
+# Ubuntu LTS every 2 years, Debian every ~2 years, openSUSE Leap ~12-18 months)
+# and require an explicit major version upgrade to move forward. Rolling
+# releases (Tumbleweed, Arch, Manjaro, etc.) keep updating continuously and
+# don't have a separate "distro upgrade" event.
+#
+# These helpers:
+#  - classify the running distro as rolling/fixed/unknown
+#  - check whether a major version upgrade is available
+#  - persist a state JSON (`distro-upgrade.json`) for the WebUI to surface a
+#    "ready to install" notification card
+#  - send a desktop notification through `notify-send` when available
+#  - expose a CLI entry point (--check-distro-upgrade, --distro-upgrade,
+#    --distro-upgrade-status) so users can act either via the dashboard or
+#    a terminal
+#
+# Rolling distros are intentionally LEFT ALONE here: they get a state file
+# tagged "rolling" and the rest of the helper continues with normal updates.
+
+ZNH_DISTRO_RELEASE_MODEL=""        # rolling | fixed | unknown
+ZNH_DISTRO_UPGRADE_FAMILY=""       # fedora | ubuntu | debian | leap | rhel | mint | arch-like | unknown
+ZNH_DISTRO_UPGRADE_CURRENT=""      # current VERSION_ID (or codename for Debian)
+ZNH_DISTRO_UPGRADE_AVAILABLE=0     # 0 = no upgrade, 1 = upgrade available
+ZNH_DISTRO_UPGRADE_TARGET=""       # target version when available
+
+ZNH_DISTRO_UPGRADE_STATE_DIR="/var/lib/zypper-auto"
+ZNH_DISTRO_UPGRADE_STATE_FILE="${ZNH_DISTRO_UPGRADE_STATE_DIR}/distro-upgrade.json"
+
+__znh_distro_upgrade_json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "${s}"
+}
+
+znh_distro_release_model_classify() {
+    # Populates ZNH_DISTRO_RELEASE_MODEL and ZNH_DISTRO_UPGRADE_FAMILY based
+    # on /etc/os-release values (already sourced earlier in this script).
+    local id id_like name variant
+    id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+    id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+    name="$(printf '%s' "${NAME:-}" | tr '[:upper:]' '[:lower:]')"
+    variant="$(printf '%s' "${VARIANT_ID:-}" | tr '[:upper:]' '[:lower:]')"
+
+    case "${id}" in
+        opensuse-tumbleweed|opensuse-slowroll)
+            ZNH_DISTRO_RELEASE_MODEL="rolling"
+            ZNH_DISTRO_UPGRADE_FAMILY="opensuse-rolling"
+            return 0
+            ;;
+        opensuse)
+            # Bare "opensuse" can be Leap (fixed) or Tumbleweed (rolling).
+            if [[ "${name}" == *tumbleweed* ]] || [[ "${variant}" == *tumbleweed* ]] \
+               || [[ "${name}" == *slowroll* ]]; then
+                ZNH_DISTRO_RELEASE_MODEL="rolling"
+                ZNH_DISTRO_UPGRADE_FAMILY="opensuse-rolling"
+            elif [ -n "${VERSION_ID:-}" ]; then
+                ZNH_DISTRO_RELEASE_MODEL="fixed"
+                ZNH_DISTRO_UPGRADE_FAMILY="leap"
+            else
+                ZNH_DISTRO_RELEASE_MODEL="rolling"
+                ZNH_DISTRO_UPGRADE_FAMILY="opensuse-rolling"
+            fi
+            return 0
+            ;;
+        opensuse-leap|sles|sled)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="leap"
+            return 0
+            ;;
+        arch|manjaro|endeavouros|garuda|artix|cachyos|siduction|gentoo|void|nixos|chimera|kaos)
+            ZNH_DISTRO_RELEASE_MODEL="rolling"
+            ZNH_DISTRO_UPGRADE_FAMILY="${id}"
+            return 0
+            ;;
+        fedora|nobara)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="fedora"
+            return 0
+            ;;
+        rhel|centos|rocky|almalinux|ol|amzn|oracle|eurolinux)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="rhel"
+            return 0
+            ;;
+        ubuntu|pop|elementary|neon|kali|zorin)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="ubuntu"
+            return 0
+            ;;
+        linuxmint|lmde)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="mint"
+            return 0
+            ;;
+        debian|raspbian|devuan)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="debian"
+            return 0
+            ;;
+    esac
+
+    case "${id_like}" in
+        *arch*)
+            ZNH_DISTRO_RELEASE_MODEL="rolling"
+            ZNH_DISTRO_UPGRADE_FAMILY="arch-like"
+            return 0
+            ;;
+        *fedora*|*rhel*)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="fedora"
+            return 0
+            ;;
+        *ubuntu*)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="ubuntu"
+            return 0
+            ;;
+        *debian*)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="debian"
+            return 0
+            ;;
+        *suse*)
+            ZNH_DISTRO_RELEASE_MODEL="fixed"
+            ZNH_DISTRO_UPGRADE_FAMILY="leap"
+            return 0
+            ;;
+    esac
+
+    ZNH_DISTRO_RELEASE_MODEL="unknown"
+    ZNH_DISTRO_UPGRADE_FAMILY="unknown"
+    return 0
+}
+
+znh_distro_upgrade_state_write_file() {
+    # Args: status target reason
+    # Writes a small JSON state file the WebUI / notifier can read.
+    local status target reason now family model current pm
+    status="${1:-unknown}"
+    target="${2:-}"
+    reason="${3:-}"
+    family="${ZNH_DISTRO_UPGRADE_FAMILY:-unknown}"
+    model="${ZNH_DISTRO_RELEASE_MODEL:-unknown}"
+    current="${ZNH_DISTRO_UPGRADE_CURRENT:-${VERSION_ID:-}}"
+    pm="${SYSTEM_PKG_MANAGER:-unknown}"
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date 2>/dev/null || echo "")"
+
+    mkdir -p "${ZNH_DISTRO_UPGRADE_STATE_DIR}" 2>/dev/null || return 1
+    local tmp="${ZNH_DISTRO_UPGRADE_STATE_FILE}.tmp.$$"
+    {
+        printf '{\n'
+        printf '  "schema": 1,\n'
+        printf '  "status": "%s",\n'           "$(__znh_distro_upgrade_json_escape "${status}")"
+        printf '  "release_model": "%s",\n'    "$(__znh_distro_upgrade_json_escape "${model}")"
+        printf '  "distro_family": "%s",\n'    "$(__znh_distro_upgrade_json_escape "${family}")"
+        printf '  "distro_id": "%s",\n'        "$(__znh_distro_upgrade_json_escape "${ID:-}")"
+        printf '  "distro_name": "%s",\n'      "$(__znh_distro_upgrade_json_escape "${NAME:-}")"
+        printf '  "current_version": "%s",\n'  "$(__znh_distro_upgrade_json_escape "${current}")"
+        printf '  "target_version": "%s",\n'   "$(__znh_distro_upgrade_json_escape "${target}")"
+        printf '  "reason": "%s",\n'           "$(__znh_distro_upgrade_json_escape "${reason}")"
+        printf '  "checked_at": "%s",\n'       "$(__znh_distro_upgrade_json_escape "${now}")"
+        printf '  "package_manager": "%s"\n'   "$(__znh_distro_upgrade_json_escape "${pm}")"
+        printf '}\n'
+    } > "${tmp}" 2>/dev/null || { rm -f "${tmp}" 2>/dev/null || true; return 1; }
+    mv -f "${tmp}" "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null || { rm -f "${tmp}" 2>/dev/null || true; return 1; }
+    chmod 644 "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null || true
+    return 0
+}
+
+znh_distro_upgrade_check_fedora() {
+    # Fedora has a ~6 month cycle; the canonical "newer release exists" test
+    # is whether a higher releasever resolves the fedora-release package.
+    local current target dnf_bin probe candidate
+    current="${VERSION_ID:-}"
+    ZNH_DISTRO_UPGRADE_CURRENT="${current}"
+    [ -n "${current}" ] || return 1
+    [[ "${current}" =~ ^[0-9]+$ ]] || return 1
+
+    if command -v dnf5 >/dev/null 2>&1; then
+        dnf_bin="dnf5"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf_bin="dnf"
+    else
+        return 1
+    fi
+
+    target=""
+    for probe in 1 2 3; do
+        candidate=$((current + probe))
+        if "${dnf_bin}" --quiet repoquery --releasever="${candidate}" \
+               --refresh --queryformat='%{name}' fedora-release 2>/dev/null \
+               | grep -qx 'fedora-release'; then
+            target="${candidate}"
+            break
+        fi
+    done
+
+    if [ -n "${target}" ]; then
+        ZNH_DISTRO_UPGRADE_AVAILABLE=1
+        ZNH_DISTRO_UPGRADE_TARGET="${target}"
+        return 0
+    fi
+    ZNH_DISTRO_UPGRADE_AVAILABLE=0
+    ZNH_DISTRO_UPGRADE_TARGET=""
+    return 1
+}
+
+znh_distro_upgrade_check_ubuntu() {
+    # Ubuntu and Mint expose a `do-release-upgrade -c` probe that returns 0
+    # when an upgrade is available. Cycle is 6 months for normal releases
+    # and ~2 years for LTS, so the helper just trusts the probe.
+    local out rc target
+    ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-${VERSION_CODENAME:-}}"
+
+    if ! command -v do-release-upgrade >/dev/null 2>&1; then
+        return 1
+    fi
+
+    out="$(do-release-upgrade -c 2>&1 || true)"
+    rc=$?
+
+    if [ "${rc}" -eq 0 ]; then
+        target="$(printf '%s\n' "${out}" \
+            | sed -nE "s/^.*[Nn]ew release[[:space:]]+[\"\']?([0-9A-Za-z._-]+)[\"\']?.*$/\\1/p" \
+            | head -n 1)"
+        ZNH_DISTRO_UPGRADE_AVAILABLE=1
+        ZNH_DISTRO_UPGRADE_TARGET="${target:-newer}"
+        return 0
+    fi
+    ZNH_DISTRO_UPGRADE_AVAILABLE=0
+    ZNH_DISTRO_UPGRADE_TARGET=""
+    return 1
+}
+
+znh_distro_upgrade_check_debian() {
+    # Debian dist-upgrades have a ~2 year cycle but the upgrade requires a
+    # manual sources.list rewrite; we never auto-flag a target, but we still
+    # surface a state so the WebUI/CLI can guide the user.
+    ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_CODENAME:-${VERSION_ID:-}}"
+    ZNH_DISTRO_UPGRADE_AVAILABLE=0
+    ZNH_DISTRO_UPGRADE_TARGET=""
+    return 1
+}
+
+znh_distro_upgrade_check_leap() {
+    # openSUSE Leap upgrades require a manual repository swap; do not flag.
+    ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-}"
+    ZNH_DISTRO_UPGRADE_AVAILABLE=0
+    ZNH_DISTRO_UPGRADE_TARGET=""
+    return 1
+}
+
+znh_distro_upgrade_check() {
+    # Top-level entry: classify, run the family-specific probe, write state.
+    znh_distro_release_model_classify
+
+    case "${ZNH_DISTRO_RELEASE_MODEL}" in
+        rolling)
+            ZNH_DISTRO_UPGRADE_AVAILABLE=0
+            ZNH_DISTRO_UPGRADE_TARGET=""
+            ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-${VERSION_CODENAME:-rolling}}"
+            znh_distro_upgrade_state_write_file "rolling" "" \
+                "Rolling release (${NAME:-${ID:-unknown}}); continuous updates, no distro-upgrade event." || true
+            return 0
+            ;;
+        unknown)
+            ZNH_DISTRO_UPGRADE_AVAILABLE=0
+            znh_distro_upgrade_state_write_file "unknown" "" \
+                "Could not classify distro release model (ID=${ID:-?}, ID_LIKE=${ID_LIKE:-?})." || true
+            return 0
+            ;;
+    esac
+
+    case "${ZNH_DISTRO_UPGRADE_FAMILY}" in
+        fedora)
+            if znh_distro_upgrade_check_fedora; then
+                znh_distro_upgrade_state_write_file "available" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                    "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${ZNH_DISTRO_UPGRADE_TARGET} ready to install" || true
+            else
+                znh_distro_upgrade_state_write_file "uptodate" "" \
+                    "No newer Fedora release detected." || true
+            fi
+            ;;
+        ubuntu|mint)
+            if znh_distro_upgrade_check_ubuntu; then
+                znh_distro_upgrade_state_write_file "available" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                    "${NAME:-Ubuntu/Mint} ${ZNH_DISTRO_UPGRADE_CURRENT:-?} -> ${ZNH_DISTRO_UPGRADE_TARGET} ready to install" || true
+            else
+                znh_distro_upgrade_state_write_file "uptodate" "" \
+                    "do-release-upgrade reports no upgrade available." || true
+            fi
+            ;;
+        debian)
+            znh_distro_upgrade_check_debian || true
+            znh_distro_upgrade_state_write_file "manual" "" \
+                "Debian distro-upgrades require manual sources.list review (e.g. bookworm -> trixie)." || true
+            ;;
+        leap)
+            znh_distro_upgrade_check_leap || true
+            znh_distro_upgrade_state_write_file "manual" "" \
+                "openSUSE Leap upgrades require a manual repository swap; see SDB:System_upgrade." || true
+            ;;
+        rhel)
+            ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-}"
+            ZNH_DISTRO_UPGRADE_AVAILABLE=0
+            znh_distro_upgrade_state_write_file "manual" "" \
+                "RHEL/CentOS-style distros use leapp/major-version migration; not auto-flagged." || true
+            ;;
+        *)
+            znh_distro_upgrade_state_write_file "unknown" "" \
+                "No automated upgrade path for distro family '${ZNH_DISTRO_UPGRADE_FAMILY}'." || true
+            ;;
+    esac
+    return 0
+}
+
+znh_distro_upgrade_send_notification() {
+    # Args: title body urgency
+    # Best-effort desktop + journald notification. Never fatal.
+    local title body urgency target_user user_uid
+    title="${1:-Distro upgrade ready to install}"
+    body="${2:-A new release is available for your distribution.}"
+    urgency="${3:-normal}"
+
+    if command -v notify-send >/dev/null 2>&1; then
+        target_user="${SUDO_USER:-${USER:-}}"
+        if [ -z "${target_user}" ] && [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+            target_user="$(id -un 2>/dev/null || echo "")"
+        fi
+
+        if [ -n "${target_user}" ] && [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null; then
+            user_uid="$(id -u "${target_user}" 2>/dev/null || echo "")"
+            if [ -n "${user_uid}" ]; then
+                sudo -u "${target_user}" \
+                    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
+                    notify-send -u "${urgency}" -t 20000 \
+                        -i "system-software-update" \
+                        "${title}" "${body}" 2>/dev/null || true
+            fi
+        else
+            notify-send -u "${urgency}" -t 20000 \
+                -i "system-software-update" \
+                "${title}" "${body}" 2>/dev/null || true
+        fi
+    fi
+
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "zypper-auto-helper-distro-upgrade" -p user.notice \
+            "${title}: ${body}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+znh_distro_upgrade_status_print() {
+    # Human-readable status report (used by --distro-upgrade-status).
+    znh_distro_upgrade_check >/dev/null 2>&1 || true
+    local ready="no"
+    if [ "${ZNH_DISTRO_UPGRADE_AVAILABLE:-0}" -eq 1 ] 2>/dev/null; then
+        ready="yes"
+    fi
+    cat <<EOF
+=== Distro upgrade status ===
+Distro:           ${NAME:-unknown} (${ID:-unknown})
+Release model:    ${ZNH_DISTRO_RELEASE_MODEL:-unknown}
+Family:           ${ZNH_DISTRO_UPGRADE_FAMILY:-unknown}
+Current version:  ${ZNH_DISTRO_UPGRADE_CURRENT:-unknown}
+Upgrade target:   ${ZNH_DISTRO_UPGRADE_TARGET:-(none)}
+Upgrade ready:    ${ready}
+State file:       ${ZNH_DISTRO_UPGRADE_STATE_FILE}
+WebUI:            this state is consumed by the dashboard's "distro upgrade" card
+                  and surfaces a "Ready to install" notification when status=available.
+EOF
+    return 0
+}
+
+znh_distro_upgrade_run_apply() {
+    # Initiates the distro upgrade interactively. The user must confirm.
+    local assume_yes="${1:-0}"
+    local target dnf_bin
+
+    znh_distro_upgrade_check >/dev/null 2>&1 || true
+
+    if [ "${ZNH_DISTRO_RELEASE_MODEL}" = "rolling" ]; then
+        printf '%s\n' "This is a rolling release (${NAME:-${ID:-unknown}}); no separate distro upgrade is required."
+        printf '%s\n' "Just run your normal update flow (e.g. 'sudo zypper-auto-helper install')."
+        return 0
+    fi
+
+    if [ "${ZNH_DISTRO_UPGRADE_AVAILABLE:-0}" -ne 1 ]; then
+        printf '%s\n' "No distro upgrade is currently flagged as available."
+        printf '%s\n' "Run 'sudo zypper-auto-helper --check-distro-upgrade' first to refresh state."
+        return 1
+    fi
+
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        printf '%s\n' "Distro upgrade must run as root. Re-run with sudo." >&2
+        return 1
+    fi
+
+    if [ "${assume_yes}" -ne 1 ] 2>/dev/null; then
+        printf '\n%s\n' "================================================================"
+        printf '%s\n'   "  Distro upgrade: ${NAME:-${ID:-unknown}} ${ZNH_DISTRO_UPGRADE_CURRENT:-?} -> ${ZNH_DISTRO_UPGRADE_TARGET:-?}"
+        printf '%s\n'   "================================================================"
+        printf '%s\n'   "This is a MAJOR system upgrade. Make sure you have backups."
+        local confirm=""
+        read -r -p "Continue? Type 'YES' to proceed: " confirm || true
+        if [ "${confirm}" != "YES" ]; then
+            printf '%s\n' "Aborted by user."
+            return 1
+        fi
+    fi
+
+    case "${ZNH_DISTRO_UPGRADE_FAMILY}" in
+        fedora)
+            target="${ZNH_DISTRO_UPGRADE_TARGET}"
+            if command -v dnf5 >/dev/null 2>&1; then
+                dnf_bin="dnf5"
+            else
+                dnf_bin="dnf"
+            fi
+            printf 'Running: %s install -y %s-plugin-system-upgrade\n' "${dnf_bin}" "${dnf_bin}"
+            "${dnf_bin}" install -y "${dnf_bin}-plugin-system-upgrade" 2>/dev/null || true
+            printf 'Running: %s system-upgrade download --refresh --releasever=%s -y\n' "${dnf_bin}" "${target}"
+            if "${dnf_bin}" system-upgrade download --refresh --releasever="${target}" -y; then
+                printf '\nDownload complete. To apply the upgrade and reboot, run:\n'
+                printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
+                return 0
+            fi
+            return 1
+            ;;
+        ubuntu|mint)
+            if command -v do-release-upgrade >/dev/null 2>&1; then
+                do-release-upgrade
+                return $?
+            fi
+            printf '%s\n' "do-release-upgrade is not installed. Install 'update-manager-core' first." >&2
+            return 1
+            ;;
+        debian)
+            printf '%s\n' "Debian distro upgrades require manual review."
+            printf '%s\n' "See: https://www.debian.org/releases/stable/releasenotes"
+            printf '%s\n' "Typical flow:"
+            printf '%s\n' "  1. Update /etc/apt/sources.list to the new codename"
+            printf '%s\n' "  2. sudo apt update"
+            printf '%s\n' "  3. sudo apt full-upgrade"
+            return 2
+            ;;
+        leap)
+            printf '%s\n' "openSUSE Leap upgrades require a manual repository swap."
+            printf '%s\n' "See: https://en.opensuse.org/SDB:System_upgrade"
+            return 2
+            ;;
+        rhel)
+            printf '%s\n' "RHEL/CentOS-style distros use leapp for major-version migration."
+            printf '%s\n' "See: https://access.redhat.com/articles/4263361"
+            return 2
+            ;;
+        *)
+            printf '%s\n' "Automated upgrade is not implemented for distro family '${ZNH_DISTRO_UPGRADE_FAMILY}'." >&2
+            return 1
+            ;;
+    esac
+}
+
+znh_distro_upgrade_cli_dispatch() {
+    # Dispatches the --distro-upgrade subcommands. Used by the main argument
+    # parser further down in this file.
+    local cmd="${1:-status}"
+    shift || true
+    case "${cmd}" in
+        status|--status)
+            znh_distro_upgrade_status_print
+            return 0
+            ;;
+        check|--check|--check-only)
+            znh_distro_upgrade_check
+            znh_distro_upgrade_status_print
+            if [ "${ZNH_DISTRO_UPGRADE_AVAILABLE:-0}" -eq 1 ] 2>/dev/null; then
+                znh_distro_upgrade_send_notification \
+                    "Distro upgrade ready to install" \
+                    "${NAME:-${ID:-Linux}} ${ZNH_DISTRO_UPGRADE_CURRENT:-?} -> ${ZNH_DISTRO_UPGRADE_TARGET:-?} is ready to install. Open the dashboard or run: sudo zypper-auto-helper --distro-upgrade apply" \
+                    "normal"
+            fi
+            return 0
+            ;;
+        upgrade|apply|run|--apply|--run)
+            local yes=0 arg
+            for arg in "$@"; do
+                case "${arg}" in
+                    --yes|-y|--non-interactive) yes=1 ;;
+                esac
+            done
+            znh_distro_upgrade_run_apply "${yes}"
+            return $?
+            ;;
+        *)
+            printf '%s\n' "Unknown distro-upgrade subcommand: ${cmd}" >&2
+            printf '%s\n' "Usage: zypper-auto-helper --distro-upgrade [status|check|apply [--yes]]" >&2
+            return 1
+            ;;
+    esac
+}
+
 # Fast-path: if invoked as the installed helper (zypper-auto-helper) with an
 # unknown option-like first argument (starts with '-'), reject it immediately
 # before doing any logging, sanity checks, or installation work. This avoids
@@ -178,6 +688,7 @@ if [[ $# -gt 0 ]]; then
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-bg|--dash-bg-enable|--dash-bg-disable|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
+        --check-distro-upgrade|--distro-upgrade|--distro-upgrade-status|--distro-upgrade-check|\
         --analyze|--health|--debug)
             # Known commands/options; continue into main logic
             :
@@ -44969,6 +45480,7 @@ run_uninstall_helper_only() {
         echo "    /usr/local/bin/zypper-scrub-ghost + /usr/local/bin/scrub-ghost (boot entry scrubber)" | tee -a "${LOG_FILE}"
         echo "  - Dashboard API state + history DB: /var/lib/zypper-auto/dashboard-history.sqlite3 (and -wal/-shm)" | tee -a "${LOG_FILE}"
         echo "    plus: /var/lib/zypper-auto/dashboard-api.* /var/lib/zypper-auto/dashboard-schema.json" | tee -a "${LOG_FILE}"
+        echo "    plus: /var/lib/zypper-auto/distro-upgrade.json (distro-upgrade detection state for the WebUI)" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
@@ -45222,6 +45734,7 @@ run_uninstall_helper_only() {
                 /var/lib/zypper-auto/dashboard-schema.json \
                 /var/lib/zypper-auto/self-update-state.json \
                 /var/lib/zypper-auto/snapper-auto-disabled.intent \
+                /var/lib/zypper-auto/distro-upgrade.json \
                 /var/lib/zypper-auto/dashboard-history.sqlite3 \
                 /var/lib/zypper-auto/dashboard-history.sqlite3-wal \
                 /var/lib/zypper-auto/dashboard-history.sqlite3-shm \
@@ -45895,6 +46408,15 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --dash-api-off          Stop the localhost dashboard Settings API (root)"
     echo "  --dash-api-status       Show status of the dashboard Settings API (root)"
     echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
+    echo "  --check-distro-upgrade  Check whether a major distro version upgrade is available"
+    echo "                          (Fedora ~6 month cycle, Ubuntu/Mint via do-release-upgrade,"
+    echo "                          Debian/Leap surfaced as 'manual'; rolling distros are left alone)."
+    echo "                          Writes ${ZNH_DISTRO_UPGRADE_STATE_FILE:-/var/lib/zypper-auto/distro-upgrade.json}"
+    echo "                          for the WebUI 'Ready to install' card and emits a desktop notification."
+    echo "  --distro-upgrade-status Print the current distro-upgrade detection state"
+    echo "  --distro-upgrade [status|check|apply [--yes]]"
+    echo "                          Initiate the distro upgrade (Fedora: dnf system-upgrade,"
+    echo "                          Ubuntu/Mint: do-release-upgrade). Requires root for 'apply'."
     echo "  --uninstall-zypper      Remove zypper-auto-helper services, timers, logs, and user scripts"
     echo "  --help                  Show this help message"
     echo ""
@@ -45948,6 +46470,25 @@ elif [[ "${1:-}" == "--self-update" ]]; then
 elif [[ "${1:-}" == "--self-update-rollback" ]]; then
     log_info "Self-update rollback mode requested"
     run_self_update_rollback_only
+    exit $?
+elif [[ "${1:-}" == "--check-distro-upgrade" || "${1:-}" == "--distro-upgrade-check" ]]; then
+    log_info "Distro-upgrade detection mode requested"
+    znh_distro_upgrade_cli_dispatch check
+    exit $?
+elif [[ "${1:-}" == "--distro-upgrade-status" ]]; then
+    log_info "Distro-upgrade status report requested"
+    znh_distro_upgrade_cli_dispatch status
+    exit $?
+elif [[ "${1:-}" == "--distro-upgrade" ]]; then
+    log_info "Distro-upgrade dispatcher requested"
+    shift || true
+    if [ "$#" -eq 0 ]; then
+        # Default to status when no subcommand supplied so users can
+        # discover the current state safely without triggering an upgrade.
+        znh_distro_upgrade_cli_dispatch status
+        exit $?
+    fi
+    znh_distro_upgrade_cli_dispatch "$@"
     exit $?
 elif [[ "${1:-}" == "--rollback" ]]; then
     log_info "Rollback wizard mode requested"
