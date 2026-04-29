@@ -10279,6 +10279,21 @@ VERIFY_NOTIFY_USER_ENABLED=true
 # installer log, then reset to the safe default "full".
 DOWNLOADER_DOWNLOAD_MODE=full
 
+# DOWNLOADER_INCLUDE_DISTRO_UPGRADE
+# Cross-distro feature: after the regular package prefetch finishes, optionally
+# pre-stage the next major distro upgrade (where the distribution supports a
+# safe download-only mode):
+#   true  - (default) Fedora: run "dnf system-upgrade download --refresh
+#           --releasever=N -y" so the next major release is staged in the
+#           background. The reboot/apply step is left to the user.
+#           Ubuntu/Mint/Debian/Leap/RHEL: detection-only (manual review).
+#           Rolling distros (Tumbleweed, Arch, Manjaro, …) are skipped.
+#   false - never run distro-upgrade prefetch from the timer; users can still
+#           do it manually with: sudo zypper-auto-helper --distro-upgrade apply
+# This is gated by DOWNLOADER_DOWNLOAD_MODE so detect-only mode never triggers
+# the heavy distro-upgrade download.
+DOWNLOADER_INCLUDE_DISTRO_UPGRADE=true
+
 # DUP_EXTRA_FLAGS
 # Extra arguments appended to every "zypper dup" invocation run by this
 # helper, both for the background downloader ("dup --download-only") and
@@ -10523,6 +10538,7 @@ EOF
 
     # Enums
     validate_allowed_set DOWNLOADER_DOWNLOAD_MODE full "full,detect-only"
+    validate_bool_flag DOWNLOADER_INCLUDE_DISTRO_UPGRADE true
     validate_allowed_set AUTO_DUPLICATE_RPM_MODE whitelist "whitelist,thirdparty,both"
     validate_allowed_set CLEANUP_REPORT_FORMAT both "text,json,both"
     validate_allowed_set BOOT_ENTRY_CLEANUP_MODE backup "backup,delete"
@@ -35381,7 +35397,8 @@ if [ -f "${VERIFY_UNIT_FILE}" ] && [ -n "${user_dash_rw:-}" ]; then
             verify_changed=1
         fi
     else
-        printf '%s\n' "ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp ${user_dash_rw}" >>"${VERIFY_UNIT_FILE}" 2>/dev/null || true
+        # Cross-distro: prefix non-zypper paths with '-' so missing dirs don't fail the unit on Fedora/Arch/Debian.
+        printf '%s\n' "ReadWritePaths=${LOG_DIR} /run /var/run -/var/cache/zypp -/var/cache/dnf -/var/cache/apt -/var/cache/pacman/pkg ${user_dash_rw}" >>"${VERIFY_UNIT_FILE}" 2>/dev/null || true
         verify_changed=1
     fi
 
@@ -35392,6 +35409,51 @@ if [ -f "${VERIFY_UNIT_FILE}" ] && [ -n "${user_dash_rw:-}" ]; then
     else
         log_success "✓ Verification unit sandbox paths look OK"
     fi
+fi
+
+# Check 10c: Downloader unit ReadWritePaths must tolerate cross-distro paths.
+# Older builds shipped
+#   ReadWritePaths=/var/cache/zypp /var/cache/dnf /var/cache/apt /var/cache/pacman/pkg ...
+# without '-' prefixes, which makes systemd refuse to spawn the service
+# (status=226/NAMESPACE) on any distro that doesn't have all of those paths.
+# When that happens the downloader script never runs and download-status.txt
+# stays at 'idle' forever (visible as 'DOWNLOADER STATUS: idle' on the dashboard).
+log_debug "[10c/${TOTAL_CHECKS}] Checking downloader unit ReadWritePaths (cross-distro)..."
+local DL_UNIT_FILE dl_expected_rw dl_changed dl_existing
+DL_UNIT_FILE="/etc/systemd/system/zypper-autodownload.service"
+dl_expected_rw="ReadWritePaths=/var/log/zypper-auto -/var/cache/zypp -/var/cache/zypp/packages -/var/cache/dnf -/var/cache/libdnf5 -/var/cache/apt -/var/cache/apt/archives -/var/cache/pacman/pkg -/var/lib/dnf -/var/lib/apt -/var/lib/apt/lists -/var/lib/pacman -/var/lib/dpkg -/var/lib/zypp -/var/lib/zypper -/var/lib/zypper-auto"
+dl_changed=0
+if [ -f "${DL_UNIT_FILE}" ]; then
+    if grep -q '^ReadWritePaths=' "${DL_UNIT_FILE}" 2>/dev/null; then
+        dl_existing="$(grep -m1 '^ReadWritePaths=' "${DL_UNIT_FILE}" 2>/dev/null || true)"
+        # Trigger a rewrite if any cross-distro path is listed without the '-' optional prefix.
+        if printf '%s\n' "${dl_existing}" | grep -Eq '(^| )(/var/cache/(apt|dnf|libdnf5|pacman/pkg)|/var/lib/(apt|apt/lists|dnf|pacman|dpkg))(\s|$)'; then
+            execute_guarded "Patch downloader unit (ReadWritePaths cross-distro tolerant)" \
+                sed -i "s|^ReadWritePaths=.*$|${dl_expected_rw}|" "${DL_UNIT_FILE}" || true
+            dl_changed=1
+        fi
+    else
+        printf '%s\n' "${dl_expected_rw}" >>"${DL_UNIT_FILE}" 2>/dev/null || true
+        dl_changed=1
+    fi
+
+    if [ "${dl_changed}" -eq 1 ] 2>/dev/null; then
+        execute_guarded "systemd daemon-reload (downloader unit auto-fix)" systemctl daemon-reload || true
+        # Reset any failed state from prior 226/NAMESPACE crashes so the timer
+        # can launch the service cleanly on the next tick.
+        execute_optional "Reset failed state for ${DL_UNIT_FILE##*/}" \
+            systemctl reset-failed zypper-autodownload.service || true
+        if systemctl is-active --quiet zypper-autodownload.timer 2>/dev/null; then
+            execute_optional "Restart downloader timer (apply ReadWritePaths fix)" \
+                systemctl restart zypper-autodownload.timer || true
+        fi
+        REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + 1))
+        log_success "  ✓ Auto-fixed downloader unit ReadWritePaths (cross-distro safe)"
+    else
+        log_success "✓ Downloader unit ReadWritePaths look OK"
+    fi
+else
+    log_debug "Downloader unit not installed (skipping cross-distro ReadWritePaths fix)"
 fi
 
 # Check 11: Dashboard artifacts freshness (apply new changes automatically)
@@ -47864,6 +47926,14 @@ fi
 DUP_EXTRA_FLAGS="${DUP_EXTRA_FLAGS:-}"
 CACHE_EXPIRY_MINUTES="${CACHE_EXPIRY_MINUTES:-60}"
 DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
+# Cross-distro: when set to true the downloader will pre-stage the next
+# distro release on Fedora-style fixed-cycle distros via
+# `dnf system-upgrade download --refresh --releasever=N -y`. Other families
+# (Ubuntu/Mint/Debian/Leap/RHEL) are left in 'manual' state because their
+# upgrade tooling is interactive or repo-rewrite based. Rolling distros
+# (Tumbleweed/Arch/Manjaro/...) are skipped because they don't have a
+# separate distro upgrade event.
+DOWNLOADER_INCLUDE_DISTRO_UPGRADE="${DOWNLOADER_INCLUDE_DISTRO_UPGRADE:-true}"
 PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
 if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
     derr "Shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}"
@@ -48159,6 +48229,135 @@ znh_downloader_run_prefetch_download() {
     rm -f "${dl_err}"
     return 0
 }
+
+# --- Optional: distro-upgrade prefetch (cross-distro safe) ---
+# After the regular package prefetch, optionally pre-stage a major distro
+# upgrade so the user can later run `dnf system-upgrade reboot` (Fedora) or
+# the equivalent without waiting on the download.
+# This NEVER applies the upgrade and NEVER reboots; it only downloads.
+znh_downloader_distro_upgrade_prefetch() {
+    case "${DOWNLOADER_INCLUDE_DISTRO_UPGRADE:-true}" in
+        true|TRUE|1|yes|YES|on|ON|enabled|ENABLED) ;;
+        *)
+            dlog "Distro-upgrade prefetch disabled via DOWNLOADER_INCLUDE_DISTRO_UPGRADE"
+            return 0
+            ;;
+    esac
+    if [ "${DOWNLOADER_DOWNLOAD_MODE:-full}" = "detect-only" ]; then
+        dlog "Distro-upgrade prefetch skipped (DOWNLOADER_DOWNLOAD_MODE=detect-only)"
+        return 0
+    fi
+
+    # Only Fedora has a safe non-interactive prefetch; other families just refresh state.
+    local helper_bin="/usr/local/bin/zypper-auto-helper"
+    if [ -x "${helper_bin}" ]; then
+        # Refresh distro-upgrade.json so the WebUI "Distro upgrade" card shows current state.
+        "${helper_bin}" --check-distro-upgrade >/dev/null 2>&1 || true
+    fi
+
+    # Identify distro family from /etc/os-release (downloader script may not have sourced helpers).
+    local id="" name="" id_like="" version_id=""
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+        name="$(printf '%s' "${NAME:-}" | tr '[:upper:]' '[:lower:]')"
+        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+        version_id="${VERSION_ID:-}"
+    fi
+
+    local family="unknown"
+    case "${id}" in
+        fedora|nobara) family="fedora" ;;
+        rhel|centos|rocky|almalinux|ol|amzn|oracle|eurolinux) family="rhel" ;;
+        ubuntu|pop|elementary|neon|kali|zorin) family="ubuntu" ;;
+        linuxmint|lmde) family="mint" ;;
+        debian|raspbian|devuan) family="debian" ;;
+        opensuse-leap|sles|sled) family="leap" ;;
+        arch|manjaro|endeavouros|garuda|artix|cachyos|siduction|gentoo|void|nixos|chimera|kaos) family="rolling" ;;
+        opensuse|opensuse-tumbleweed|opensuse-slowroll) family="rolling" ;;
+        *)
+            case "${id_like}" in
+                *fedora*|*rhel*) family="fedora" ;;
+                *ubuntu*) family="ubuntu" ;;
+                *debian*) family="debian" ;;
+                *suse*) family="leap" ;;
+                *arch*) family="rolling" ;;
+            esac
+            ;;
+    esac
+
+    if [ "${family}" = "rolling" ] || [ "${family}" = "unknown" ]; then
+        dlog "Distro-upgrade prefetch: family=${family} (skipped; rolling/unknown)"
+        return 0
+    fi
+
+    if [ "${family}" != "fedora" ]; then
+        # Other fixed-cycle distros (Ubuntu/Mint/Debian/Leap/RHEL) require
+        # interactive or manual flows; we only refresh the state JSON above.
+        dlog "Distro-upgrade prefetch: family=${family} requires manual review; state file refreshed"
+        return 0
+    fi
+
+    # Fedora family: probe target releasever then run dnf system-upgrade download.
+    local dnf_bin=""
+    if command -v dnf5 >/dev/null 2>&1; then
+        dnf_bin="dnf5"
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf_bin="dnf"
+    else
+        dlog "Distro-upgrade prefetch: dnf/dnf5 not available; skipping"
+        return 0
+    fi
+
+    # Re-use the helper's detection (writes ZNH_DISTRO_UPGRADE_TARGET into the JSON).
+    # We re-parse the JSON manually with a small grep so we don't need jq here.
+    local state_file="/var/lib/zypper-auto/distro-upgrade.json"
+    local target="" status_str=""
+    if [ -r "${state_file}" ]; then
+        status_str="$(grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "${state_file}" 2>/dev/null \
+            | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+        target="$(grep -oE '"target_version"[[:space:]]*:[[:space:]]*"[^"]*"' "${state_file}" 2>/dev/null \
+            | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+    fi
+
+    if [ -z "${target}" ] || [ "${status_str}" != "available" ]; then
+        dlog "Distro-upgrade prefetch: no Fedora upgrade flagged available (status=${status_str:-?}, target=${target:-?})"
+        return 0
+    fi
+    if ! [[ "${target}" =~ ^[0-9]+$ ]]; then
+        dlog "Distro-upgrade prefetch: refusing non-numeric target='${target}'"
+        return 0
+    fi
+    if [ -n "${version_id}" ] && [ "${target}" = "${version_id}" ]; then
+        dlog "Distro-upgrade prefetch: already at target=${target}; skipping"
+        return 0
+    fi
+
+    # Best-effort: install the system-upgrade plugin (idempotent).
+    "${dnf_bin}" install -y "${dnf_bin}-plugin-system-upgrade" >/dev/null 2>&1 || true
+
+    znh_downloader_write_status "downloading:0:unknown:0:0" "distro-upgrade prefetch (${dnf_bin} system-upgrade download --releasever=${target})"
+    dlog "Distro-upgrade prefetch: ${dnf_bin} system-upgrade download --refresh --releasever=${target} -y"
+
+    local du_err du_rc=0
+    du_err="$(mktemp)"
+    set +e
+    /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 \
+        "${dnf_bin}" system-upgrade download --refresh --releasever="${target}" -y >/dev/null 2>"${du_err}"
+    du_rc=$?
+    set -e
+    if [ "${du_rc}" -eq 0 ]; then
+        znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} prefetch ready (run: sudo ${dnf_bin} system-upgrade reboot)"
+        dlog "Distro-upgrade prefetch complete (Fedora ${version_id} -> ${target}); reboot via: sudo ${dnf_bin} system-upgrade reboot"
+    else
+        znh_downloader_write_status "error:solver:${du_rc}" "distro-upgrade prefetch returned rc=${du_rc} (manual review required)"
+        derr "Distro-upgrade prefetch failed (rc=${du_rc}); see ${du_err}"
+        cat "${du_err}" >&2 || true
+    fi
+    rm -f "${du_err}"
+    return 0
+}
 # Cross-distro backend path (apt/dnf/pacman). Keep zypper flow below for
 # full progress-parity behaviour.
 if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
@@ -48206,6 +48405,15 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
     else
         znh_downloader_write_status "error:solver:$ZYP_RET" "prefetch download returned solver/error code"
         derr "Download pass returned rc=${ZYP_RET} (pm=${SYSTEM_PKG_MANAGER})"
+    fi
+
+    # Cross-distro: also stage the next distro upgrade in the background
+    # (Fedora today; other families just refresh state for the WebUI).
+    znh_downloader_distro_upgrade_prefetch || true
+
+    # Keep the live dashboard data fresh on cross-distro flows too.
+    if [ "${DASHBOARD_ENABLED:-true}" = "true" ] && [ -x /usr/local/bin/zypper-auto-helper ]; then
+        /usr/local/bin/zypper-auto-helper --dashboard >/dev/null 2>&1 || true
     fi
 
     rm -f "$DRY_OUTPUT"
@@ -48384,6 +48592,10 @@ else
     trigger_notifier
 fi
 
+# Cross-distro: pre-stage the next distro upgrade as well (Fedora today;
+# other families just refresh distro-upgrade.json for the WebUI).
+znh_downloader_distro_upgrade_prefetch || true
+
 # Keep the live dashboard data fresh (best-effort): regenerate status.html + status-data.json
 # at the end of downloader runs so long-lived dashboard tabs don't go stale.
 if [ "${DASHBOARD_ENABLED:-true}" = "true" ] && [ -x /usr/local/bin/zypper-auto-helper ]; then
@@ -48424,7 +48636,17 @@ ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
-ReadWritePaths=/var/cache/zypp /var/cache/dnf /var/cache/apt /var/cache/pacman/pkg /var/lib/dnf /var/lib/apt /var/lib/pacman /var/lib/dpkg /var/log/zypper-auto
+# IMPORTANT (cross-distro):
+# systemd's ReadWritePaths refuses to start the unit if any path is missing.
+# When this helper is installed on Fedora, the apt/pacman caches do NOT exist
+# and the service fails with code=226/NAMESPACE before any line of the
+# downloader script can run. That is the root cause of the dashboard being
+# stuck on "DOWNLOADER STATUS: idle" on Fedora/Arch/Debian/Ubuntu/Tumbleweed
+# alike, because download-status.txt never gets rewritten.
+# Prefix every distro-specific path with '-' so missing paths are tolerated
+# (per systemd.exec(5)). /var/log/zypper-auto is always present (we create
+# it earlier in the installer) so it stays unprefixed.
+ReadWritePaths=/var/log/zypper-auto -/var/cache/zypp -/var/cache/zypp/packages -/var/cache/dnf -/var/cache/libdnf5 -/var/cache/apt -/var/cache/apt/archives -/var/cache/pacman/pkg -/var/lib/dnf -/var/lib/apt -/var/lib/apt/lists -/var/lib/pacman -/var/lib/dpkg -/var/lib/zypp -/var/lib/zypper -/var/lib/zypper-auto
 EOF
 log_success "Downloader service file created"
 chmod 644 "${DL_SERVICE_FILE}" 2>/dev/null || true
@@ -48557,7 +48779,9 @@ ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
-ReadWritePaths=${LOG_DIR} /run /var/run /var/cache/zypp ${SUDO_USER_HOME}/.local/share/zypper-notify
+# Verify/auto-repair unit. /var/cache/zypp is zypper-only, so prefix it with
+# '-' so the unit also starts cleanly on Fedora/Debian/Arch (cross-distro).
+ReadWritePaths=${LOG_DIR} /run /var/run -/var/cache/zypp -/var/cache/dnf -/var/cache/apt -/var/cache/pacman/pkg ${SUDO_USER_HOME}/.local/share/zypper-notify
 EOF
 log_success "Verification service file created"
 chmod 644 "${VERIFY_SERVICE_FILE}" 2>/dev/null || true
