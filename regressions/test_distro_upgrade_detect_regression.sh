@@ -196,6 +196,55 @@ require_contains "${source_text}" "/var/lib/zypper-auto/distro-upgrade.json (dis
 require_contains "${source_text}" "/var/lib/zypper-auto/distro-upgrade.json \\" \
     "Uninstaller cleanup section missing distro-upgrade.json removal entry"
 
+# 12) Dashboard API endpoint surfaces the distro-upgrade JSON to the WebUI.
+require_contains "${source_text}" "/api/system/distro-upgrade" \
+    "Dashboard API missing /api/system/distro-upgrade endpoint string"
+
+# 13) Dashboard banner element wired into the main card so fixed-cycle distros
+#    get a visible "ready to install" surface (rolling distros stay hidden).
+require_contains "${source_text}" 'id="znh-distro-upgrade-banner"' \
+    "Dashboard HTML missing znh-distro-upgrade-banner element"
+require_contains "${source_text}" 'id="znh-distro-upgrade-open-btn"' \
+    "Dashboard banner missing 'Open in Rocket' button"
+require_contains "${source_text}" 'id="znh-distro-upgrade-copy-btn"' \
+    "Dashboard banner missing 'Copy command' button"
+require_contains "${source_text}" 'id="znh-distro-upgrade-refresh-btn"' \
+    "Dashboard banner missing 'Re-check' button"
+require_contains "${source_text}" 'id="znh-distro-upgrade-dismiss-btn"' \
+    "Dashboard banner missing 'Dismiss' button"
+
+# 14) JS helpers fetch + render the distro-upgrade state, gate visibility on
+#    fixed release model + available status, and wire into the Rocket UI init.
+require_contains "${source_text}" "function znhDistroUpgradeFetch(" \
+    "Missing znhDistroUpgradeFetch JS helper"
+require_contains "${source_text}" "function znhDistroUpgradeRender(" \
+    "Missing znhDistroUpgradeRender JS helper"
+require_contains "${source_text}" "function _wireDistroUpgradeBannerUI(" \
+    "Missing _wireDistroUpgradeBannerUI wiring helper"
+require_contains "${source_text}" "releaseModel === 'fixed' && status === 'available'" \
+    "Distro-upgrade renderer not gated on release_model='fixed' AND status='available'"
+require_contains "${source_text}" "if (typeof _wireDistroUpgradeBannerUI === 'function') _wireDistroUpgradeBannerUI();" \
+    "_wireRocketUI does not invoke _wireDistroUpgradeBannerUI on init"
+
+# 15) Rocket Wizard distro_upgrade mode: opt branch + family-specific renderer
+#    so dashboard banner clicks land in a focused wizard flow instead of the
+#    regular package-update preview.
+require_contains "${source_text}" "function _ruRenderDistroUpgrade(" \
+    "Missing _ruRenderDistroUpgrade wizard renderer"
+require_contains "${source_text}" "opts.distro_upgrade === true || opts.distroUpgrade === true" \
+    "rocketUpdateWizardOpen missing distro_upgrade opt branch"
+require_contains "${source_text}" "DISTROUPGRADE" \
+    "Distro-upgrade wizard missing DISTROUPGRADE confirmation phrase"
+require_contains "${source_text}" "action: 'distro-upgrade'" \
+    "Distro-upgrade wizard missing distro-upgrade quick-action invocation"
+
+# 16) Quick-action allowlist: zypper-auto-helper exposes the new distro-upgrade
+#    keys so the wizard's Apply via Rocket button can launch a background job.
+require_contains "${source_text}" "distro-upgrade-check" \
+    "Quick-action allowlist missing distro-upgrade-check entry"
+require_contains "${source_text}" "--distro-upgrade apply --yes" \
+    "Quick-action allowlist missing --distro-upgrade apply --yes command"
+
 if [ "${#FAILURES[@]}" -gt 0 ]; then
     echo "FAIL SUMMARY (${#FAILURES[@]})" >&2
     for f in "${FAILURES[@]}"; do

@@ -13537,6 +13537,27 @@ generate_dashboard() {
         </div>
       </div>
 
+      <!-- Distro-upgrade banner (Rocket Update Manager surface for fixed-cycle distros) -->
+      <!-- Hidden by default. The renderer (znhDistroUpgradeRender) only shows it when -->
+      <!-- /api/system/distro-upgrade reports release_model="fixed" AND status="available", -->
+      <!-- so rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...) -->
+      <!-- never see this card. -->
+      <div id="znh-distro-upgrade-banner" style="display:none; margin-top: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(96,165,250,0.45); background: rgba(96,165,250,0.10); color: var(--text);">
+        <div style="display:flex; gap:12px; justify-content: space-between; flex-wrap: wrap; align-items: center;">
+          <div>
+            <div style="font-weight: 950;">🚀 Distro upgrade ready to install</div>
+            <div id="znh-distro-upgrade-text" style="margin-top:4px; font-size:0.92rem; color: var(--text); font-weight: 850;">(checking…)</div>
+            <div id="znh-distro-upgrade-detail" style="margin-top:4px; font-size:0.82rem; color: var(--muted); font-weight: 800;"></div>
+          </div>
+          <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
+            <button class="pill" type="button" id="znh-distro-upgrade-open-btn" title="Open the distro upgrade flow inside the Rocket Update Manager">Open in Rocket</button>
+            <button class="pill" type="button" id="znh-distro-upgrade-copy-btn" style="border-color: rgba(255,255,255,0.14);" title="Copy the apply command to the clipboard">Copy command</button>
+            <button class="pill" type="button" id="znh-distro-upgrade-refresh-btn" style="border-color: rgba(255,255,255,0.14);" title="Re-run the distro-upgrade detection probe">Re-check</button>
+            <button class="pill" type="button" id="znh-distro-upgrade-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
+          </div>
+        </div>
+      </div>
+
       <div class="grid" style="margin-top: 18px;">
         <div class="stat-box">
             <span class="stat-label">Kernel</span>
@@ -29022,6 +29043,143 @@ generate_dashboard() {
         }, 450);
     }
 
+    // ---- Distro upgrade (Rocket Update Manager surface) ----
+    // Cached state from /api/system/distro-upgrade.
+    // The renderer ONLY reveals the banner when:
+    //   release_model === 'fixed' AND status === 'available'
+    // so rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...)
+    // never see the card. This matches the bash classifier in
+    // znh_distro_release_model_classify().
+    var _znhDistroUpgradeState = null;
+    var _znhDistroUpgradeDismissed = false;
+
+    function znhDistroUpgradeRender(d) {
+        var card = document.getElementById('znh-distro-upgrade-banner');
+        if (!card) return;
+        var state = d || _znhDistroUpgradeState || {};
+        _znhDistroUpgradeState = state;
+
+        var releaseModel = String(state.release_model || '').toLowerCase();
+        var status = String(state.status || '').toLowerCase();
+        var family = String(state.distro_family || '').toLowerCase();
+        var actionable = !!state.actionable && releaseModel === 'fixed' && status === 'available';
+
+        // Hide on rolling/uptodate/manual/unknown distros AND when the user
+        // dismissed the banner this session.
+        if (!actionable || _znhDistroUpgradeDismissed) {
+            card.style.display = 'none';
+            return;
+        }
+
+        var distroName = String(state.distro_name || state.distro_id || 'Linux');
+        var current = String(state.current_version || '?');
+        var target = String(state.target_version || '?');
+        var pm = String(state.package_manager || '').toLowerCase();
+        var familyLabel = '';
+        switch (family) {
+            case 'fedora':  familyLabel = 'Fedora ~6 month cycle'; break;
+            case 'ubuntu':  familyLabel = 'Ubuntu (do-release-upgrade)'; break;
+            case 'mint':    familyLabel = 'Linux Mint (do-release-upgrade)'; break;
+            case 'debian':  familyLabel = 'Debian (manual sources.list review)'; break;
+            case 'leap':    familyLabel = 'openSUSE Leap (manual repository swap)'; break;
+            case 'rhel':    familyLabel = 'RHEL/CentOS-style (leapp)'; break;
+            default:        familyLabel = family || 'fixed-cycle distro';
+        }
+
+        var msgEl = document.getElementById('znh-distro-upgrade-text');
+        var detailEl = document.getElementById('znh-distro-upgrade-detail');
+        if (msgEl) msgEl.textContent = distroName + ' ' + current + ' → ' + target + ' is ready to install.';
+        if (detailEl) {
+            var detailParts = [familyLabel];
+            if (pm) detailParts.push('Package manager: ' + pm);
+            if (state.reason) detailParts.push(String(state.reason));
+            detailEl.textContent = detailParts.join(' • ');
+        }
+
+        // Tooltip on the Copy/Open buttons reflects the family-specific command.
+        try {
+            var copyBtn = document.getElementById('znh-distro-upgrade-copy-btn');
+            if (copyBtn) copyBtn.title = state.apply_command || 'No automated command for this family';
+        } catch (e0) {}
+
+        card.style.display = '';
+    }
+
+    function znhDistroUpgradeFetch(opts) {
+        opts = opts || {};
+        var qs = opts.refresh ? '?refresh=1' : '';
+        return _api('/api/system/distro-upgrade' + qs, { method: 'GET' }).then(function(r) {
+            _znhDistroUpgradeState = r || {};
+            try { znhDistroUpgradeRender(_znhDistroUpgradeState); } catch (eR) {}
+            return _znhDistroUpgradeState;
+        }).catch(function(_e) {
+            // API not reachable; keep the banner hidden.
+            try {
+                var card = document.getElementById('znh-distro-upgrade-banner');
+                if (card) card.style.display = 'none';
+            } catch (eHide) {}
+            return null;
+        });
+    }
+
+    function _wireDistroUpgradeBannerUI() {
+        var card = document.getElementById('znh-distro-upgrade-banner');
+        if (!card) return;
+
+        var openBtn = document.getElementById('znh-distro-upgrade-open-btn');
+        var copyBtn = document.getElementById('znh-distro-upgrade-copy-btn');
+        var refreshBtn = document.getElementById('znh-distro-upgrade-refresh-btn');
+        var dismissBtn = document.getElementById('znh-distro-upgrade-dismiss-btn');
+
+        if (openBtn) openBtn.addEventListener('click', function(ev) {
+            try { addRipple(openBtn, ev.clientX, ev.clientY); } catch (e0) {}
+            try {
+                if (typeof rocketUpdateWizardOpen === 'function') {
+                    rocketUpdateWizardOpen({ distro_upgrade: true, distro_state: _znhDistroUpgradeState });
+                } else {
+                    toast('Update wizard not ready', 'Reload dashboard after reinstall', 'err');
+                }
+            } catch (e1) {
+                var msg = (e1 && e1.message) ? e1.message : 'failed';
+                toast('Rocket action failed', msg, 'err');
+            }
+        });
+
+        if (copyBtn) copyBtn.addEventListener('click', function(ev) {
+            var cmd = '';
+            try { cmd = String((_znhDistroUpgradeState && _znhDistroUpgradeState.apply_command) || ''); } catch (e0) { cmd = ''; }
+            if (!cmd) {
+                toast('No automated command', 'This distro family requires a manual upgrade flow.', 'err');
+                return;
+            }
+            try { addRipple(copyBtn, ev.clientX, ev.clientY); } catch (e1) {}
+            try {
+                if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(cmd, copyBtn);
+                } else if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(cmd);
+                    toast('Command copied', cmd, 'ok');
+                }
+            } catch (e2) {}
+        });
+
+        if (refreshBtn) refreshBtn.addEventListener('click', function(ev) {
+            try { addRipple(refreshBtn, ev.clientX, ev.clientY); } catch (e0) {}
+            toast('Re-checking distro upgrade…', 'Refreshing /var/lib/zypper-auto/distro-upgrade.json', 'ok');
+            // Trigger a non-blocking refresh, then poll the state again after a
+            // short delay so the bash probe has time to write the JSON.
+            znhDistroUpgradeFetch({ refresh: true });
+            setTimeout(function() {
+                try { znhDistroUpgradeFetch({ refresh: false }); } catch (e1) {}
+            }, 4500);
+        });
+
+        if (dismissBtn) dismissBtn.addEventListener('click', function() {
+            _znhDistroUpgradeDismissed = true;
+            card.style.display = 'none';
+        });
+    }
+
     function selfUpdateFetchChangelog(btnEl) {
         var btn = btnEl || document.getElementById('self-update-changelog-btn');
         if (btn) btn.disabled = true;
@@ -30341,6 +30499,185 @@ generate_dashboard() {
         }
     }
 
+    // Render the distro-upgrade variant of the Rocket Wizard. This is shown
+    // when the WebUI is opened with rocketUpdateWizardOpen({ distro_upgrade: true })
+    // (e.g. from the dashboard banner click). It surfaces family-specific
+    // commands and — for Fedora/Nobara — lets the user trigger the apply path
+    // through the WebUI quick-action launcher (action key: distro-upgrade).
+    // Other families (Ubuntu/Mint via interactive do-release-upgrade,
+    // Debian/Leap/RHEL manual flows) intentionally only offer Copy + open-
+    // terminal CTAs because their upgrade tooling cannot be driven from a
+    // browser overlay.
+    function _ruRenderDistroUpgrade(state) {
+        var e = _suEls();
+        if (!e.body) return;
+        state = state || _znhDistroUpgradeState || {};
+
+        var distroName = String(state.distro_name || state.distro_id || 'Linux');
+        var current = String(state.current_version || '?');
+        var target = String(state.target_version || '?');
+        var family = String(state.distro_family || '').toLowerCase();
+        var releaseModel = String(state.release_model || '').toLowerCase();
+        var status = String(state.status || '').toLowerCase();
+        var actionable = !!state.actionable && releaseModel === 'fixed' && status === 'available';
+        var apply_command = String(state.apply_command || '');
+        var manualUrl = String(state.manual_url || '');
+        var qaSupported = !!state.quick_action_supported;
+
+        function _esc(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
+
+        if (releaseModel === 'rolling') {
+            // This should never happen because the banner is hidden on rolling
+            // distros, but be defensive about direct-call paths.
+            e.body.innerHTML = [
+                '<div class="overlay-alert overlay-alert-warn">',
+                '  <div style="font-weight:950;">Rolling release detected</div>',
+                '  <div style="margin-top:6px; font-weight:800;">' + _esc(distroName) + ' is a rolling release; there is no separate distro-upgrade event. Run normal package updates instead.</div>',
+                '</div>'
+            ].join('\n');
+            _ruSetHeader('Distro upgrade', 'Info', 'Rolling release');
+            _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
+            return;
+        }
+
+        if (!actionable) {
+            e.body.innerHTML = [
+                '<div class="overlay-alert overlay-alert-warn">',
+                '  <div style="font-weight:950;">No distro upgrade is currently available</div>',
+                '  <div style="margin-top:6px; font-weight:800;">Status: <code>' + _esc(status || 'unknown') + '</code> (release model: ' + _esc(releaseModel || 'unknown') + ')</div>',
+                '  <div style="margin-top:6px; color: var(--muted);">Try the Re-check button on the dashboard banner, or run <code>sudo zypper-auto-helper --check-distro-upgrade</code> in a terminal.</div>',
+                '</div>'
+            ].join('\n');
+            _ruSetHeader('Distro upgrade', 'Info', 'Distro upgrade status');
+            _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
+            return;
+        }
+
+        var familyLabel = family || 'fixed-cycle distro';
+        var familyExplain = '';
+        switch (family) {
+            case 'fedora':
+                familyExplain = 'Fedora releases roughly every 6 months. The apply path runs <code>dnf system-upgrade download --refresh --releasever=' + _esc(target) + '</code>; you finish the upgrade with <code>sudo dnf system-upgrade reboot</code>.';
+                break;
+            case 'ubuntu':
+            case 'mint':
+                familyExplain = (family === 'mint' ? 'Linux Mint' : 'Ubuntu') + ' uses <code>do-release-upgrade</code>, which is interactive. The dashboard cannot drive that prompt directly — copy the command below and run it in a terminal.';
+                break;
+            case 'debian':
+                familyExplain = 'Debian distro upgrades require a manual <code>/etc/apt/sources.list</code> review (e.g. <code>bookworm → trixie</code>) before <code>apt full-upgrade</code>. See the upstream guide.';
+                break;
+            case 'leap':
+                familyExplain = 'openSUSE Leap upgrades require a manual repository swap. See SDB:System_upgrade for the full procedure.';
+                break;
+            case 'rhel':
+                familyExplain = 'RHEL/CentOS-style distros use <code>leapp</code> for major-version migration. Follow the Red Hat documentation linked below.';
+                break;
+            default:
+                familyExplain = 'No automated upgrade path is available for this distro family. Refer to your distro’s upstream upgrade guide.';
+        }
+
+        var actions = [];
+        if (qaSupported && apply_command) {
+            // Fedora-style: drive apply via WebUI quick-action launcher (non-interactive).
+            actions.push('    <button class="pill" type="button" id="ru-distro-apply">Apply via Rocket (' + _esc(family) + ')</button>');
+        }
+        if (apply_command) {
+            actions.push('    <button class="pill" type="button" id="ru-distro-copy" data-cmd="' + _esc(apply_command) + '">Copy command</button>');
+            actions.push('    <button class="pill" type="button" id="ru-distro-open-terminal" data-cmd="' + _esc(apply_command) + '">Open terminal (paste)</button>');
+        }
+        if (manualUrl) {
+            actions.push('    <a class="pill" href="' + _esc(manualUrl) + '" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Open upstream guide</a>');
+        }
+
+        var safetyBlock = '';
+        if (qaSupported) {
+            safetyBlock = [
+                '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); margin-top:10px;">',
+                '  <div style="font-weight:950;">DANGER ZONE: major-version upgrade</div>',
+                '  <div style="margin-top:6px; font-weight:800;">Apply via Rocket runs <code>' + _esc(apply_command) + '</code> as a background quick-action with confirmation phrase <code>DISTROUPGRADE</code>. The apply itself does NOT reboot; you must run the family-specific finishing command afterwards.</div>',
+                '</div>'
+            ].join('\n');
+        }
+
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">🚀 ' + _esc(distroName) + ' ' + _esc(current) + ' → ' + _esc(target) + ' is ready to install</div>',
+            '  <div style="margin-top:6px; font-weight:800;">Family: <code>' + _esc(familyLabel) + '</code> • Release model: <code>' + _esc(releaseModel || 'unknown') + '</code></div>',
+            '</div>',
+            '<div style="color: var(--muted); font-size:0.92rem;">' + familyExplain + '</div>',
+            (apply_command ? ('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Apply command: <code style="font-size:0.85rem;">' + _esc(apply_command) + '</code></div>') : ''),
+            (state.reason ? ('<div style="color: var(--muted); font-size:0.86rem;">' + _esc(state.reason) + '</div>') : ''),
+            (actions.length ? ('<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">' + actions.join('\n') + '</div>') : ''),
+            safetyBlock
+        ].join('\n');
+
+        _ruSetHeader('Distro upgrade', 'Step 1/1', distroName + ' ' + current + ' → ' + target);
+        _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
+
+        // Wire action handlers.
+        try {
+            var copyBtn = document.getElementById('ru-distro-copy');
+            if (copyBtn) copyBtn.addEventListener('click', function(ev) {
+                var c = copyBtn.getAttribute('data-cmd') || '';
+                if (typeof _ruPmCopyAndToast === 'function') {
+                    _ruPmCopyAndToast(c, ev, 'Distro upgrade command copied');
+                } else if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(c, copyBtn);
+                }
+            });
+            var openTermBtn = document.getElementById('ru-distro-open-terminal');
+            if (openTermBtn) openTermBtn.addEventListener('click', function(ev) {
+                var c = openTermBtn.getAttribute('data-cmd') || '';
+                if (typeof _ruPmCopyAndToast === 'function') {
+                    _ruPmCopyAndToast(c, ev, 'Open a terminal and paste');
+                } else if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(c, openTermBtn);
+                }
+            });
+        } catch (eA0) {}
+
+        // Apply via Rocket: route through the existing quick-action launcher
+        // (with the DISTROUPGRADE confirmation phrase). Only enabled for
+        // families where /api/system/distro-upgrade reported
+        // quick_action_supported=true (Fedora/Nobara today).
+        try {
+            var applyBtn = document.getElementById('ru-distro-apply');
+            if (applyBtn && qaSupported) {
+                applyBtn.addEventListener('click', function(ev) {
+                    try { addRipple(applyBtn, ev.clientX, ev.clientY); } catch (e0) {}
+                    var phrase = 'DISTROUPGRADE';
+                    if (!confirm('Start distro upgrade for ' + distroName + ' ' + current + ' → ' + target + '?\n\n' +
+                                 'This runs:\n  ' + apply_command + '\n\n' +
+                                 'The apply itself does NOT reboot. You must run the family-specific finishing command afterwards.')) {
+                        return;
+                    }
+                    applyBtn.disabled = true;
+                    toast('Requesting confirmation…', 'Distro upgrade quick-action token', 'ok');
+                    _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade' }) }).then(function(c) {
+                        if (!c || !c.confirm_token) throw new Error('missing confirm_token');
+                        return _api('/api/quick/start', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                action: 'distro-upgrade',
+                                confirm_token: c.confirm_token,
+                                confirm_phrase: phrase
+                            })
+                        });
+                    }).then(function(r) {
+                        if (!r || !r.job_id) throw new Error('missing job_id');
+                        toast('Distro upgrade running…', 'Tracking via quick-action job ' + r.job_id, 'ok');
+                        try { _suShow(false); } catch (e1) {}
+                    }).catch(function(err) {
+                        var msg = (err && err.message) ? err.message : 'failed';
+                        toast('Distro upgrade start failed', msg, 'err');
+                    }).finally(function() {
+                        try { applyBtn.disabled = false; } catch (e2) {}
+                    });
+                });
+            }
+        } catch (eA1) {}
+    }
+
     function rocketUpdateWizardOpen(arg) {
         var opts = {};
         try {
@@ -30351,6 +30688,49 @@ generate_dashboard() {
                 opts = arg || {};
             }
         } catch (e0) { opts = {}; }
+
+        // Distro-upgrade mode (Rocket Update Manager surface). Triggered by the
+        // dashboard banner. Renders a different overlay flow that targets the
+        // distro upgrade probe state rather than zypper dup / apt full-upgrade /
+        // dnf upgrade / pacman -Syu.
+        var distroMode = false;
+        var distroState = null;
+        try {
+            distroMode = !!(opts && (opts.distro_upgrade === true || opts.distroUpgrade === true));
+            if (distroMode) {
+                distroState = (opts && opts.distro_state) ? opts.distro_state : (_znhDistroUpgradeState || null);
+            }
+        } catch (eDU0) { distroMode = false; distroState = null; }
+
+        if (distroMode) {
+            try { _suReset(); } catch (eDU1) {}
+            _ruReset();
+            _suShow(true);
+            _ruSetHeader('Distro upgrade', 'Loading…', 'Distro upgrade');
+            var ee = _suEls();
+            if (ee.body) {
+                ee.body.innerHTML = '<div style="color: var(--muted); font-weight:900;">Loading distro upgrade state…</div>';
+            }
+            _suSetButtons({
+                show_cancel: true,
+                show_back: false,
+                show_next: false,
+                show_install: false,
+                show_close: false,
+                footer_center: true
+            });
+            // Always re-fetch the latest state so the overlay reflects what the
+            // bash probe wrote most recently.
+            znhDistroUpgradeFetch({ refresh: false }).then(function(r) {
+                _ruRenderDistroUpgrade(r || distroState || {});
+            }).catch(function() {
+                _ruRenderDistroUpgrade(distroState || {});
+            });
+
+            if (ee.cancel) ee.cancel.onclick = function() { _suShow(false); };
+            if (ee.close) ee.close.onclick = function() { _suShow(false); };
+            return;
+        }
 
         var autoSim = false;
         var autoSimSpecified = false;
@@ -31513,6 +31893,44 @@ generate_dashboard() {
                 toast('Rocket simulation failed', msg, 'err');
             }
         });
+
+        // ---- Distro-upgrade banner (Rocket Update Manager surface) ----
+        // The banner only becomes visible when /api/system/distro-upgrade reports
+        // release_model='fixed' AND status='available'. Rolling distros
+        // (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...) never see it
+        // because the renderer hides the card on release_model!='fixed'. We wire
+        // the click handlers and trigger an initial fetch so the card appears
+        // on page load when applicable.
+        try {
+            if (typeof _wireDistroUpgradeBannerUI === 'function') _wireDistroUpgradeBannerUI();
+        } catch (eDU0) {}
+        try {
+            if (typeof znhDistroUpgradeFetch === 'function') znhDistroUpgradeFetch({ refresh: false });
+        } catch (eDU1) {}
+
+        // Refresh distro-upgrade state when the user comes back to the tab so
+        // the banner reflects external CLI runs (e.g. zypper-auto-helper
+        // --check-distro-upgrade) without a hard reload.
+        try {
+            document.addEventListener('visibilitychange', function() {
+                try {
+                    if (document.visibilityState === 'visible' && typeof znhDistroUpgradeFetch === 'function') {
+                        znhDistroUpgradeFetch({ refresh: false });
+                    }
+                } catch (eDU2) {}
+            });
+        } catch (eDU3) {}
+
+        // Also re-render when the dashboard fires its standard data-update event
+        // (status-data.json polling cycle), so the banner picks up freshly
+        // probed JSON without a manual refresh button click.
+        try {
+            window.addEventListener('znh-data-updated', function() {
+                try {
+                    if (typeof znhDistroUpgradeFetch === 'function') znhDistroUpgradeFetch({ refresh: false });
+                } catch (eDU4) {}
+            });
+        } catch (eDU5) {}
     }
 
     // Wire self-update UI (channel toggle + changelog fetch).
@@ -57535,6 +57953,32 @@ def _quick_action_table() -> dict:
             "explain": "Disables the aggregated diagnostics log follower (systemd unit: zypper-auto-diag-logs.service). Existing diag log files are kept; this just stops collecting new combined output.",
             "warning": "After disabling, you may lose useful context for debugging future failures. You can re-enable it at any time.",
         },
+
+        # Distro upgrade detection / apply (Rocket Update Manager surface).
+        # The detection path (`distro-upgrade-check`) is read-only and refreshes
+        # /var/lib/zypper-auto/distro-upgrade.json; rolling distros short-circuit
+        # to a friendly "no event" status so they NEVER drive an apply pass.
+        "distro-upgrade-check": {
+            "title": "Check Distro Upgrade",
+            "cmd": [HELPER_BIN, "--check-distro-upgrade"],
+            "timeout_s": 240,
+            "needs_confirm": False,
+            "phrase": "",
+        },
+        # The apply path (`distro-upgrade`) only triggers a real upgrade for
+        # families with a non-interactive backend (Fedora `dnf system-upgrade
+        # download` today). Ubuntu/Mint `do-release-upgrade` is interactive and
+        # the helper short-circuits to a "manual" message; Debian/Leap/RHEL
+        # likewise print guidance instead of running anything destructive.
+        "distro-upgrade": {
+            "title": "Apply Distro Upgrade",
+            "cmd": [HELPER_BIN, "--distro-upgrade", "apply", "--yes"],
+            "timeout_s": 90 * 60,
+            "needs_confirm": True,
+            "phrase": "DISTROUPGRADE",
+            "explain": "Stages the next major version of your distribution (Fedora: runs `dnf system-upgrade download --refresh --releasever=N` so you can `sudo dnf system-upgrade reboot` when ready; Ubuntu/Mint short-circuits because do-release-upgrade is interactive; Debian/openSUSE Leap/RHEL print the manual upstream guide). Rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/...) are intentionally skipped; this card never shows up there.",
+            "warning": "Major-version upgrades are slow and disruptive. Only run when you have a recent backup. The apply itself does NOT reboot; you must run the family-specific finishing command afterwards (e.g. `sudo dnf system-upgrade reboot` on Fedora).",
+        },
     }
 
 
@@ -59280,6 +59724,135 @@ class Handler(BaseHTTPRequestHandler):
             payload["ok"] = True
             payload["ts"] = time.time()
             return _json_response(self, 200, payload, origin)
+        if path == "/api/system/distro-upgrade":
+            # Distro-upgrade detection state for the Rocket Update Manager
+            # banner. Reads /var/lib/zypper-auto/distro-upgrade.json (written
+            # by the bash helper `znh_distro_upgrade_check`) and returns a
+            # WebUI-friendly payload with derived fields:
+            #   - actionable: True ONLY for fixed-cycle distros with
+            #     status="available" (so rolling/uptodate/manual/unknown
+            #     keep the banner hidden).
+            #   - apply_command: family-specific terminal command users can
+            #     copy (Fedora/Nobara -> sudo zypper-auto-helper
+            #     --distro-upgrade apply --yes; Ubuntu/Mint -> sudo
+            #     do-release-upgrade; Debian/Leap/RHEL -> empty + manual_url).
+            #   - manual_url: upstream guide URL for families that require a
+            #     manual sources.list/repo swap.
+            #   - quick_action_supported: True when /api/quick/start can
+            #     drive the apply path safely (Fedora today; everything else
+            #     stays Copy + open-terminal).
+            # Optional ?refresh=1 fires a non-blocking
+            # zypper-auto-helper --check-distro-upgrade pass via
+            # systemd-run --collect so the WebUI can request a fresh probe
+            # without holding the GET.
+            state_file = "/var/lib/zypper-auto/distro-upgrade.json"
+            refresh = False
+            try:
+                refresh = bool(str((qs.get("refresh") or [""])[0]).strip() in ("1", "true", "yes", "on"))
+            except Exception:
+                refresh = False
+
+            if refresh:
+                # Best-effort, non-blocking refresh. We do NOT wait for the
+                # probe to finish (it can take several seconds on slow
+                # mirrors). The next GET will pick up the new state file.
+                try:
+                    unit = f"znh-webui-distro-upgrade-check-{secrets.token_hex(4)}"
+                    subprocess.Popen(
+                        [
+                            "systemd-run", "--quiet", "--collect",
+                            "--unit", unit, "--",
+                            HELPER_BIN, "--check-distro-upgrade",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        close_fds=True,
+                    )
+                except Exception:
+                    # Fall back to a detached direct invocation; failure is non-fatal.
+                    try:
+                        subprocess.Popen(
+                            [HELPER_BIN, "--check-distro-upgrade"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            close_fds=True,
+                        )
+                    except Exception:
+                        pass
+
+            state = {}
+            state_present = os.path.isfile(state_file)
+            if state_present:
+                try:
+                    with open(state_file, "r", encoding="utf-8", errors="replace") as f:
+                        state = json.load(f) or {}
+                    if not isinstance(state, dict):
+                        state = {}
+                except Exception:
+                    state = {}
+
+            status = str(state.get("status", "") or "").strip().lower() or "unknown"
+            release_model = str(state.get("release_model", "") or "").strip().lower() or "unknown"
+            family = str(state.get("distro_family", "") or "").strip().lower() or "unknown"
+            current_version = str(state.get("current_version", "") or "").strip()
+            target_version = str(state.get("target_version", "") or "").strip()
+            distro_id = str(state.get("distro_id", "") or "").strip()
+            distro_name = str(state.get("distro_name", "") or "").strip()
+            reason = str(state.get("reason", "") or "").strip()
+            checked_at = str(state.get("checked_at", "") or "").strip()
+            package_manager = str(state.get("package_manager", "") or "").strip().lower()
+
+            # Derive WebUI-facing flags. "actionable" stays False for rolling
+            # distros so the dashboard banner never shows up on Tumbleweed /
+            # Slowroll / Arch / Manjaro / EndeavourOS / Garuda / etc., even
+            # if the JSON file is stale.
+            actionable = bool(release_model == "fixed" and status == "available")
+
+            apply_command = ""
+            manual_url = ""
+            quick_action_supported = False
+            if family in ("fedora",):
+                apply_command = "sudo zypper-auto-helper --distro-upgrade apply --yes"
+                quick_action_supported = True
+            elif family in ("ubuntu", "mint"):
+                apply_command = "sudo do-release-upgrade"
+                # do-release-upgrade is interactive; the WebUI cannot drive it.
+                quick_action_supported = False
+            elif family == "debian":
+                apply_command = "sudo apt update && sudo apt full-upgrade"
+                manual_url = "https://www.debian.org/releases/stable/releasenotes"
+            elif family == "leap":
+                apply_command = ""
+                manual_url = "https://en.opensuse.org/SDB:System_upgrade"
+            elif family == "rhel":
+                apply_command = ""
+                manual_url = "https://access.redhat.com/articles/4263361"
+            else:
+                apply_command = ""
+
+            payload = {
+                "ok": True,
+                "ts": time.time(),
+                "state_present": bool(state_present),
+                "state_file": state_file,
+                "refreshed": bool(refresh),
+                "status": status,
+                "release_model": release_model,
+                "distro_family": family,
+                "distro_id": distro_id,
+                "distro_name": distro_name,
+                "current_version": current_version,
+                "target_version": target_version,
+                "reason": reason,
+                "checked_at": checked_at,
+                "package_manager": package_manager,
+                "actionable": bool(actionable),
+                "apply_command": apply_command,
+                "manual_url": manual_url,
+                "quick_action_supported": bool(quick_action_supported),
+                "quick_action_key": "distro-upgrade" if quick_action_supported else "",
+            }
+            return _json_response(self, 200, payload, origin)
         if path == "/api/system/conflict-guidance":
             # Cross-distro conflict guidance helper exposed for the WebUI overlay
             # and the notifier (single source of truth for headline/explanation/
@@ -59306,6 +59879,116 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return _json_response(self, 500, {"error": f"conflict guidance failed: {e}"}, origin)
             payload = {"ok": True, "ts": time.time(), "guidance": guidance}
+            return _json_response(self, 200, payload, origin)
+        if path == "/api/system/distro-upgrade":
+            # Read /var/lib/zypper-auto/distro-upgrade.json (written by
+            # `zypper-auto-helper --check-distro-upgrade`) and return a small,
+            # WebUI-friendly payload for the Rocket Update Manager.
+            #
+            # Optional query param: ?refresh=1
+            # Best-effort, non-blocking refresh through the helper so the UI can
+            # request a fresh probe without waiting on package-manager work.
+            state_file = "/var/lib/zypper-auto/distro-upgrade.json"
+
+            refresh_requested = False
+            try:
+                refresh_requested = str((qs.get("refresh") or [""])[0] or "").strip().lower() in ("1", "true", "yes")
+            except Exception:
+                refresh_requested = False
+
+            if refresh_requested:
+                try:
+                    if os.access(HELPER_BIN, os.X_OK):
+                        unit = f"znh-webui-distro-upgrade-check-{secrets.token_hex(4)}"
+                        subprocess.Popen(
+                            [
+                                "systemd-run", "--quiet", "--collect", "--unit", unit,
+                                "--", HELPER_BIN, "--check-distro-upgrade",
+                            ],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            close_fds=True,
+                        )
+                except Exception:
+                    pass
+
+            state = {}
+            try:
+                if os.path.isfile(state_file):
+                    with open(state_file, "r", encoding="utf-8", errors="replace") as f:
+                        state = json.load(f) or {}
+                    if not isinstance(state, dict):
+                        state = {}
+            except Exception:
+                state = {}
+
+            status = str(state.get("status", "") or "").strip().lower() or "unknown"
+            release_model = str(state.get("release_model", "") or "").strip().lower() or "unknown"
+            distro_family = str(state.get("distro_family", "") or "").strip().lower()
+            distro_id = str(state.get("distro_id", "") or "").strip().lower()
+            distro_name = str(state.get("distro_name", "") or "").strip()
+            current_version = str(state.get("current_version", "") or "").strip()
+            target_version = str(state.get("target_version", "") or "").strip()
+            reason = str(state.get("reason", "") or "").strip()
+            checked_at = str(state.get("checked_at", "") or "").strip()
+            package_manager = str(state.get("package_manager", "") or "").strip().lower()
+
+            # Derive UI actions from the distro family.
+            # Rolling/unknown distros intentionally get no action surface.
+            apply_command = ""
+            manual_url = ""
+            apply_supported = False
+            apply_quick_action = ""
+
+            if release_model == "fixed" and status in ("available", "manual"):
+                if distro_family == "fedora":
+                    if status == "available" and target_version:
+                        apply_command = "sudo zypper-auto-helper --distro-upgrade apply --yes"
+                        apply_supported = True
+                        apply_quick_action = "distro-upgrade"
+                elif distro_family in ("ubuntu", "mint"):
+                    apply_command = "sudo do-release-upgrade"
+                elif distro_family == "debian":
+                    manual_url = "https://www.debian.org/releases/stable/releasenotes"
+                elif distro_family == "leap":
+                    manual_url = "https://en.opensuse.org/SDB:System_upgrade"
+                elif distro_family == "rhel":
+                    manual_url = "https://access.redhat.com/articles/4263361"
+
+            actionable = bool(
+                release_model == "fixed"
+                and status == "available"
+                and current_version
+                and target_version
+            )
+            visible_for_webui = bool(
+                release_model == "fixed"
+                and status in ("available", "manual")
+            )
+
+            payload = {
+                "ok": True,
+                "ts": time.time(),
+                "state_file": state_file,
+                "state_present": bool(state),
+                "refresh_requested": bool(refresh_requested),
+                "status": status,
+                "release_model": release_model,
+                "distro_family": distro_family,
+                "distro_id": distro_id,
+                "distro_name": distro_name,
+                "current_version": current_version,
+                "target_version": target_version,
+                "reason": reason,
+                "checked_at": checked_at,
+                "package_manager": package_manager,
+                "actionable": bool(actionable),
+                "visible_for_webui": bool(visible_for_webui),
+                "apply_command": apply_command,
+                "apply_supported": bool(apply_supported),
+                "apply_quick_action": apply_quick_action,
+                "manual_url": manual_url,
+            }
             return _json_response(self, 200, payload, origin)
         if path == "/api/snapper/timers":
             def _systemd_time_to_utc(raw: str) -> str:
