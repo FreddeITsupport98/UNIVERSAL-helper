@@ -245,6 +245,43 @@ require_contains "${source_text}" "distro-upgrade-check" \
 require_contains "${source_text}" "--distro-upgrade apply --yes" \
     "Quick-action allowlist missing --distro-upgrade apply --yes command"
 
+# 17) Distro-upgrade FINISH path: bash helper, dispatcher branch, and quick-action
+#    entry so Fedora users get a one-click "Reboot now to finish upgrade" path
+#    after the staged download completes.
+require_contains "${source_text}" "znh_distro_upgrade_run_finish() {" \
+    "Missing distro-upgrade finish helper (znh_distro_upgrade_run_finish)"
+require_contains "${source_text}" "finish|reboot|--finish|--reboot)" \
+    "Dispatcher missing finish/reboot subcommand routing"
+require_contains "${source_text}" "znh_distro_upgrade_run_finish \"\${fin_yes}\"" \
+    "Dispatcher does not forward --distro-upgrade finish to znh_distro_upgrade_run_finish"
+require_contains "${source_text}" "system-upgrade reboot" \
+    "Distro-upgrade finish helper missing dnf system-upgrade reboot invocation"
+require_contains "${source_text}" "\"distro-upgrade-reboot\":" \
+    "Quick-action allowlist missing distro-upgrade-reboot entry"
+require_contains "${source_text}" "--distro-upgrade\", \"finish\", \"--yes\"" \
+    "Quick-action distro-upgrade-reboot missing --distro-upgrade finish --yes argv"
+require_contains "${source_text}" 'REBOOTUPGRADE' \
+    "Distro-upgrade reboot quick-action missing REBOOTUPGRADE confirmation phrase"
+
+# 18) WebUI progress + reboot wiring: the Rocket Wizard now keeps the overlay
+#    open after starting the apply quick-action, streams progress through the
+#    same big banner used by the regular Rocket update flow, and renders a
+#    "Reboot now to finish upgrade" CTA on completion.
+require_contains "${source_text}" "function _ruDistroUpgradeTrackJob(" \
+    "Missing _ruDistroUpgradeTrackJob progress tracker"
+require_contains "${source_text}" "function _ruDistroUpgradeRenderRunning(" \
+    "Missing _ruDistroUpgradeRenderRunning progress banner renderer"
+require_contains "${source_text}" "function _ruDistroUpgradeRenderDone(" \
+    "Missing _ruDistroUpgradeRenderDone result renderer"
+require_contains "${source_text}" "function _ruDistroUpgradeFinishingCommand(" \
+    "Missing _ruDistroUpgradeFinishingCommand helper for family-specific reboot command"
+require_contains "${source_text}" "_znhApiJobStreamStart('quick-action'" \
+    "Distro-upgrade tracker not using SSE quick-action stream for live progress"
+require_contains "${source_text}" "action: 'distro-upgrade-reboot'" \
+    "Distro-upgrade reboot button does not invoke distro-upgrade-reboot quick-action"
+require_contains "${source_text}" "id=\"ru-distro-reboot\"" \
+    "Distro-upgrade done view missing Reboot now CTA button"
+
 if [ "${#FAILURES[@]}" -gt 0 ]; then
     echo "FAIL SUMMARY (${#FAILURES[@]})" >&2
     for f in "${FAILURES[@]}"; do

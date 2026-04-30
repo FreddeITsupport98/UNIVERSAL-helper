@@ -93,7 +93,14 @@ if ! detect_system_package_manager; then
 fi
 
 if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
-    echo "Notice: detected package manager '${SYSTEM_PKG_MANAGER}'. This build now supports cross-distro dependency installs/hints, but the update engine remains zypper-focused." >&2
+    # Cross-distro update engine notice: the helper now wires apt/dnf/pacman
+    # through the shared package-manager runtime (refresh/preview/install/
+    # view-changes/notifier), the PM-aware Rocket WebUI, the classifier-based
+    # downloader prefetch, and the filesystem/PM-aware Snapper relevance
+    # check. zypper-only deep-repair paths (e.g. zypper turbo tuning, stale
+    # zypp cache sweep, zypp lock final pass) remain gated as zypper-only and
+    # are skipped with reason logs on other backends.
+    echo "Notice: detected package manager '${SYSTEM_PKG_MANAGER}'. Cross-distro update engine active (apt/dnf/pacman/zypper); zypper-only deep-repair paths are skipped with reason logs." >&2
 fi
 
 znh_resolve_package_name() {
@@ -629,6 +636,91 @@ znh_distro_upgrade_run_apply() {
     esac
 }
 
+znh_distro_upgrade_run_finish() {
+    # Runs the family-specific finishing command after a successful staged
+    # distro-upgrade download. For Fedora/Nobara this is
+    # `dnf system-upgrade reboot` (which reboots the machine into the
+    # offline upgrade environment). Other families either reboot themselves
+    # (Ubuntu/Mint do-release-upgrade) or require manual review (Debian/
+    # Leap/RHEL) so the helper just prints guidance there.
+    #
+    # IMPORTANT: this WILL reboot the machine on Fedora when it succeeds.
+    # The WebUI's Apply via Rocket flow only invokes this after the user
+    # types the REBOOTUPGRADE confirmation phrase; the CLI requires --yes
+    # for non-interactive runs (no TTY).
+    local assume_yes="${1:-0}"
+    local dnf_bin
+
+    znh_distro_upgrade_check >/dev/null 2>&1 || true
+
+    if [ "${ZNH_DISTRO_RELEASE_MODEL}" = "rolling" ]; then
+        printf '%s\n' "This is a rolling release (${NAME:-${ID:-unknown}}); no separate distro-upgrade reboot is required."
+        return 0
+    fi
+
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        printf '%s\n' "Distro-upgrade finish must run as root. Re-run with sudo." >&2
+        return 1
+    fi
+
+    if [ "${assume_yes}" -ne 1 ] 2>/dev/null; then
+        if [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+            printf '\n%s\n' "================================================================"
+            printf '%s\n'   "  Distro-upgrade finish: this WILL reboot the machine."
+            printf '%s\n'   "================================================================"
+            local confirm=""
+            read -r -p "Continue and reboot now? Type 'YES' to proceed: " confirm || true
+            if [ "${confirm}" != "YES" ]; then
+                printf '%s\n' "Aborted by user."
+                return 1
+            fi
+        else
+            printf '%s\n' "Refusing to reboot without --yes (non-interactive mode)." >&2
+            return 1
+        fi
+    fi
+
+    case "${ZNH_DISTRO_UPGRADE_FAMILY}" in
+        fedora)
+            if command -v dnf5 >/dev/null 2>&1; then
+                dnf_bin="dnf5"
+            elif command -v dnf >/dev/null 2>&1; then
+                dnf_bin="dnf"
+            else
+                printf '%s\n' "dnf/dnf5 not found; cannot run system-upgrade reboot." >&2
+                return 1
+            fi
+            printf 'Running: %s system-upgrade reboot\n' "${dnf_bin}"
+            "${dnf_bin}" system-upgrade reboot
+            return $?
+            ;;
+        ubuntu|mint)
+            printf '%s\n' "Ubuntu/Mint upgrades reboot themselves through do-release-upgrade."
+            printf '%s\n' "If do-release-upgrade did not reboot, run: sudo systemctl reboot"
+            return 0
+            ;;
+        debian)
+            printf '%s\n' "Debian distro upgrades require manual review; no automated reboot step."
+            printf '%s\n' "After 'apt full-upgrade' completes, run: sudo systemctl reboot"
+            return 2
+            ;;
+        leap)
+            printf '%s\n' "openSUSE Leap upgrades require a manual repository swap; no automated reboot step."
+            printf '%s\n' "See: https://en.opensuse.org/SDB:System_upgrade"
+            return 2
+            ;;
+        rhel)
+            printf '%s\n' "RHEL/CentOS-style distros use leapp; follow the upstream guide for the reboot step."
+            printf '%s\n' "See: https://access.redhat.com/articles/4263361"
+            return 2
+            ;;
+        *)
+            printf '%s\n' "Distro-upgrade finish is not implemented for distro family '${ZNH_DISTRO_UPGRADE_FAMILY}'." >&2
+            return 1
+            ;;
+    esac
+}
+
 znh_distro_upgrade_cli_dispatch() {
     # Dispatches the --distro-upgrade subcommands. Used by the main argument
     # parser further down in this file.
@@ -660,9 +752,19 @@ znh_distro_upgrade_cli_dispatch() {
             znh_distro_upgrade_run_apply "${yes}"
             return $?
             ;;
+        finish|reboot|--finish|--reboot)
+            local fin_yes=0 fin_arg
+            for fin_arg in "$@"; do
+                case "${fin_arg}" in
+                    --yes|-y|--non-interactive) fin_yes=1 ;;
+                esac
+            done
+            znh_distro_upgrade_run_finish "${fin_yes}"
+            return $?
+            ;;
         *)
             printf '%s\n' "Unknown distro-upgrade subcommand: ${cmd}" >&2
-            printf '%s\n' "Usage: zypper-auto-helper --distro-upgrade [status|check|apply [--yes]]" >&2
+            printf '%s\n' "Usage: zypper-auto-helper --distro-upgrade [status|check|apply [--yes]|finish [--yes]]" >&2
             return 1
             ;;
     esac
@@ -30640,6 +30742,14 @@ generate_dashboard() {
         // (with the DISTROUPGRADE confirmation phrase). Only enabled for
         // families where /api/system/distro-upgrade reported
         // quick_action_supported=true (Fedora/Nobara today).
+        //
+        // Unlike the previous implementation, the overlay stays open after
+        // start so the user sees a proper progress banner (stage + percent +
+        // live log) — same UX as the regular Rocket update flow. When the
+        // staged download finishes successfully we render a custom "done"
+        // view that offers a one-click "Reboot now to finish upgrade" button
+        // (Fedora) plus the family-specific finishing command and a
+        // copy/open-terminal fallback for everyone else.
         try {
             var applyBtn = document.getElementById('ru-distro-apply');
             if (applyBtn && qaSupported) {
@@ -30666,16 +30776,399 @@ generate_dashboard() {
                     }).then(function(r) {
                         if (!r || !r.job_id) throw new Error('missing job_id');
                         toast('Distro upgrade running…', 'Tracking via quick-action job ' + r.job_id, 'ok');
-                        try { _suShow(false); } catch (e1) {}
+                        try {
+                            _ruDistroUpgradeTrackJob(String(r.job_id), {
+                                distroName: distroName,
+                                current: current,
+                                target: target,
+                                family: family,
+                                apply_command: apply_command
+                            });
+                        } catch (eTrack) {
+                            try { _suShow(false); } catch (e1) {}
+                        }
                     }).catch(function(err) {
                         var msg = (err && err.message) ? err.message : 'failed';
                         toast('Distro upgrade start failed', msg, 'err');
-                    }).finally(function() {
                         try { applyBtn.disabled = false; } catch (e2) {}
                     });
                 });
             }
         } catch (eA1) {}
+    }
+
+    // Compute the family-specific finishing command shown to the user after
+    // the staged distro-upgrade download completes. Returns an object with
+    // { command, supports_quick_action, label } where supports_quick_action
+    // is true only for families where the WebUI can drive the reboot via the
+    // distro-upgrade-reboot quick action (Fedora/Nobara today).
+    function _ruDistroUpgradeFinishingCommand(family) {
+        var fam = String(family || '').toLowerCase();
+        if (fam === 'fedora' || fam === 'nobara') {
+            return {
+                command: 'sudo dnf system-upgrade reboot',
+                supports_quick_action: true,
+                label: 'Reboot now to finish upgrade'
+            };
+        }
+        if (fam === 'ubuntu' || fam === 'mint') {
+            return {
+                command: 'sudo systemctl reboot',
+                supports_quick_action: false,
+                label: 'Reboot (do-release-upgrade usually reboots itself)'
+            };
+        }
+        if (fam === 'debian') {
+            return {
+                command: 'sudo apt full-upgrade && sudo systemctl reboot',
+                supports_quick_action: false,
+                label: 'Manual: apt full-upgrade then reboot'
+            };
+        }
+        if (fam === 'leap') {
+            return {
+                command: '',
+                supports_quick_action: false,
+                label: 'Manual: see openSUSE SDB:System_upgrade'
+            };
+        }
+        if (fam === 'rhel') {
+            return {
+                command: '',
+                supports_quick_action: false,
+                label: 'Manual: follow the leapp upstream guide'
+            };
+        }
+        return {
+            command: '',
+            supports_quick_action: false,
+            label: 'No automated finishing command for this distro family'
+        };
+    }
+
+    // Render the running progress banner for the distro-upgrade apply path.
+    // Uses the same su-stage / su-percent / su-progress-bar / su-live-log
+    // markup as the regular Rocket update flow so the user gets the familiar
+    // big banner with download progress.
+    function _ruDistroUpgradeRenderRunning(ctx) {
+        var e = _suEls();
+        if (!e.body) return;
+        ctx = ctx || {};
+        var distroName = String(ctx.distroName || 'Linux');
+        var current = String(ctx.current || '?');
+        var target = String(ctx.target || '?');
+        var apply_command = String(ctx.apply_command || '');
+        function _esc2(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
+        _suSetMinBtnVisible(true);
+        e.body.innerHTML = [
+            '<div class="overlay-alert overlay-alert-warn">',
+            '  <div style="font-weight:950;">🚀 ' + _esc2(distroName) + ' ' + _esc2(current) + ' → ' + _esc2(target) + ' is downloading</div>',
+            '  <div style="margin-top:6px; font-weight:800;">Apply via Rocket is running <code>' + _esc2(apply_command) + '</code> as a background quick-action. You can minimize this window and reopen it from the bottom-right bubble.</div>',
+            '</div>',
+            '<div class="overlay-progress">',
+            '  <div class="overlay-progress-row"><span id="su-stage">Starting</span><span id="su-percent">0%</span></div>',
+            '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+            '</div>',
+            '<pre class="overlay-pre" id="su-live-log" style="max-height: 320px;">(streaming logs…)</pre>'
+        ].join('\n');
+        _ruSetHeader('Distro upgrade', 'In progress', distroName + ' ' + current + ' → ' + target);
+        _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: false, footer_center: true });
+    }
+
+    // Render the "download complete" view with a Reboot now CTA. ok=true when
+    // the apply quick-action returned rc=0; rc != 0 surfaces an error block.
+    function _ruDistroUpgradeRenderDone(ctx, ok, logText) {
+        var e = _suEls();
+        if (!e.body) return;
+        ctx = ctx || {};
+        var distroName = String(ctx.distroName || 'Linux');
+        var current = String(ctx.current || '?');
+        var target = String(ctx.target || '?');
+        var family = String(ctx.family || '').toLowerCase();
+        function _esc3(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
+        var fin = _ruDistroUpgradeFinishingCommand(family);
+        var safeLog = _esc3(logText || '(no output)');
+
+        var headerBlock;
+        if (ok) {
+            headerBlock = [
+                '<div class="overlay-alert overlay-alert-warn">',
+                '  <div style="font-weight:950;">🚀 ' + _esc3(distroName) + ' ' + _esc3(current) + ' → ' + _esc3(target) + ' staged successfully</div>',
+                '  <div style="margin-top:6px; font-weight:800;">The download finished. The upgrade is NOT applied yet — finish the upgrade by running the family-specific reboot command below.</div>',
+                '</div>'
+            ].join('\n');
+        } else {
+            headerBlock = [
+                '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08);">',
+                '  <div style="font-weight:950;">Distro upgrade staging failed</div>',
+                '  <div style="margin-top:6px; font-weight:800;">The apply quick-action returned a non-zero exit code; review the log tail below and try again from a terminal if the WebUI cannot resolve it.</div>',
+                '</div>'
+            ].join('\n');
+        }
+
+        var rebootBlock = '';
+        if (ok) {
+            var rebootActions = [];
+            if (fin.supports_quick_action && fin.command) {
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-reboot" data-cmd="' + _esc3(fin.command) + '" data-family="' + _esc3(family) + '">' + _esc3(fin.label) + '</button>');
+            }
+            if (fin.command) {
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-finish-copy" data-cmd="' + _esc3(fin.command) + '">Copy reboot command</button>');
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-finish-open" data-cmd="' + _esc3(fin.command) + '">Open terminal (paste)</button>');
+            }
+
+            var dangerNote = '';
+            if (fin.supports_quick_action) {
+                dangerNote = [
+                    '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); margin-top:10px;">',
+                    '  <div style="font-weight:950;">DANGER ZONE: this action will reboot the machine</div>',
+                    '  <div style="margin-top:6px; font-weight:800;">"Reboot now to finish upgrade" runs <code>' + _esc3(fin.command) + '</code> as a background quick-action with confirmation phrase <code>REBOOTUPGRADE</code>. Save your work first; the reboot kicks off the offline upgrade install which can take a while.</div>',
+                    '</div>'
+                ].join('\n');
+            }
+
+            rebootBlock = [
+                '<div style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03); margin-top: 10px;">',
+                '  <div style="font-weight:950;">Finishing command (' + _esc3(family || 'fixed-cycle distro') + ')</div>',
+                (fin.command
+                    ? '  <div style="margin-top:6px; font-weight:800;"><code>' + _esc3(fin.command) + '</code></div>'
+                    : '  <div style="margin-top:6px; font-weight:800; color: var(--muted);">No automated finishing command for this distro family. Refer to your distro\'s upstream upgrade guide.</div>'),
+                (rebootActions.length ? ('  <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">' + rebootActions.join('\n') + '</div>') : ''),
+                dangerNote,
+                '</div>'
+            ].join('\n');
+        }
+
+        var logBlock = [
+            '<div style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03); margin-top: 10px;">',
+            '  <div style="font-weight:950; margin-bottom: 8px;">Apply log (tail)</div>',
+            '  <pre class="overlay-pre overlay-pre-lg" style="margin-top: 10px;">' + safeLog + '</pre>',
+            '</div>'
+        ].join('\n');
+
+        e.body.innerHTML = [
+            headerBlock,
+            rebootBlock,
+            logBlock
+        ].join('\n');
+
+        _ruSetHeader('Distro upgrade', ok ? 'Complete' : 'Failed', distroName + ' ' + current + ' → ' + target);
+        _suSetButtons({ show_cancel: false, show_back: false, show_next: false, show_install: false, show_close: true, close_disabled: false, footer_center: true });
+        var elsClose = _suEls();
+        if (elsClose.close) {
+            elsClose.close.textContent = 'Close';
+            elsClose.close.onclick = function() { _suShow(false); };
+        }
+
+        // Wire copy/open-terminal buttons (best-effort).
+        try {
+            var fcopy = document.getElementById('ru-distro-finish-copy');
+            if (fcopy) fcopy.addEventListener('click', function(ev) {
+                var c = fcopy.getAttribute('data-cmd') || '';
+                if (typeof _ruPmCopyAndToast === 'function') {
+                    _ruPmCopyAndToast(c, ev, 'Distro upgrade finishing command copied');
+                } else if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(c, fcopy);
+                }
+            });
+            var fopen = document.getElementById('ru-distro-finish-open');
+            if (fopen) fopen.addEventListener('click', function(ev) {
+                var c = fopen.getAttribute('data-cmd') || '';
+                if (typeof _ruPmCopyAndToast === 'function') {
+                    _ruPmCopyAndToast(c, ev, 'Open a terminal and paste');
+                } else if (typeof window.copyCmd === 'function') {
+                    window.copyCmd(c, fopen);
+                }
+            });
+        } catch (eFC0) {}
+
+        // Wire the "Reboot now to finish upgrade" quick-action launcher.
+        try {
+            var rebootBtn = document.getElementById('ru-distro-reboot');
+            if (rebootBtn) {
+                rebootBtn.addEventListener('click', function(ev) {
+                    try { addRipple(rebootBtn, ev.clientX, ev.clientY); } catch (eR0) {}
+                    if (!confirm('Reboot now to finish the distro upgrade?\n\n' +
+                                 'This runs:\n  ' + (rebootBtn.getAttribute('data-cmd') || '') + '\n\n' +
+                                 'The machine WILL reboot into the offline upgrade environment, which can take a while.')) {
+                        return;
+                    }
+                    rebootBtn.disabled = true;
+                    toast('Requesting reboot confirmation…', 'distro-upgrade-reboot quick-action token', 'ok');
+                    _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade-reboot' }) }).then(function(c) {
+                        if (!c || !c.confirm_token) throw new Error('missing confirm_token');
+                        return _api('/api/quick/start', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                action: 'distro-upgrade-reboot',
+                                confirm_token: c.confirm_token,
+                                confirm_phrase: 'REBOOTUPGRADE'
+                            })
+                        });
+                    }).then(function(r) {
+                        if (!r || !r.job_id) throw new Error('missing job_id');
+                        toast('Reboot scheduled', 'distro-upgrade-reboot job ' + r.job_id + ' running. The system will reboot shortly.', 'ok');
+                    }).catch(function(err) {
+                        var msg = (err && err.message) ? err.message : 'failed';
+                        toast('Reboot start failed', msg, 'err');
+                        try { rebootBtn.disabled = false; } catch (eR1) {}
+                    });
+                });
+            }
+        } catch (eRB) {}
+    }
+
+    // Track the apply quick-action job: render a running progress banner,
+    // stream output (with polling fallback) and render the done view on
+    // completion. This is what makes the dashboard show the same big banner
+    // with download progress as the regular Rocket update flow.
+    function _ruDistroUpgradeTrackJob(jobId, ctx) {
+        ctx = ctx || {};
+        var safeJobId = String(jobId || '').trim();
+        if (!safeJobId) {
+            try { _suShow(false); } catch (e0) {}
+            return;
+        }
+
+        // Render the progress UI immediately so the user sees feedback even
+        // before the first stream chunk arrives.
+        _ruDistroUpgradeRenderRunning(ctx);
+        try { _suUpdateProgress('Starting', 1); } catch (eP0) {}
+
+        try {
+            znhTaskSet({
+                type: 'quick-action',
+                job_id: safeJobId,
+                action: 'distro-upgrade',
+                title: 'Distro upgrade'
+            });
+        } catch (eT0) {}
+
+        var stream = null;
+        var streamReady = false;
+        var streamFallbackTimer = null;
+        var pollTimer = null;
+        var pollInFlight = false;
+        var pollFailures = 0;
+        var pollMaxFailures = 10;
+        var pollWarned = false;
+        var lastPct = 0;
+        var done = false;
+
+        function stopAll() {
+            try { if (stream && typeof stream.stop === 'function') stream.stop(); } catch (eS0) {}
+            stream = null;
+            if (streamFallbackTimer) { try { clearTimeout(streamFallbackTimer); } catch (eS1) {} streamFallbackTimer = null; }
+            if (pollTimer) { try { clearTimeout(pollTimer); } catch (eS2) {} pollTimer = null; }
+        }
+
+        function finalize(ok) {
+            if (done) return;
+            done = true;
+            stopAll();
+            var logText = '';
+            try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (eL0) { logText = ''; }
+            try { _suUpdateProgress(ok ? 'Done' : 'Failed', 100); } catch (eL1) {}
+            try { znhTaskDone('quick-action', !!ok); } catch (eL2) {}
+            _ruDistroUpgradeRenderDone(ctx, !!ok, logText);
+            if (ok) {
+                toast('Distro upgrade staged', ctx.distroName + ' ' + ctx.current + ' → ' + ctx.target + ' is ready to reboot.', 'ok');
+            } else {
+                toast('Distro upgrade failed', 'Quick-action returned a non-zero rc; see log.', 'err');
+            }
+        }
+
+        function pollTick() {
+            if (pollInFlight || done) return;
+            pollInFlight = true;
+            return _api('/api/quick/job?job_id=' + encodeURIComponent(safeJobId), { method: 'GET' }).then(function(j) {
+                if (!j) return null;
+                if (pollFailures > 0) {
+                    pollFailures = 0;
+                    if (pollWarned) {
+                        toast('Distro upgrade reconnected', 'Polling resumed', 'ok');
+                        pollWarned = false;
+                    }
+                }
+                lastPct = parseInt(j.progress || 0, 10) || 0;
+                try { _suUpdateProgress(j.stage || 'Running', lastPct); } catch (eP1) {}
+                if (j.output != null) { try { _suSetLog(String(j.output)); } catch (eP2) {} }
+                try { znhTaskUpdateFromJob('quick-action', j); } catch (eP3) {}
+                if (j.done) {
+                    var rc = (j.rc != null) ? parseInt(j.rc, 10) : -1;
+                    finalize(rc === 0);
+                }
+                return j;
+            }).catch(function(err) {
+                pollFailures++;
+                var msg = (err && err.message) ? err.message : 'job poll failed';
+                if (!pollWarned) {
+                    pollWarned = true;
+                    toast('Distro upgrade polling error', msg, 'err');
+                }
+                try { _suUpdateProgress('Reconnecting…', lastPct); } catch (eP4) {}
+                try { _suSetLog('ERROR polling job (' + String(pollFailures) + '/' + String(pollMaxFailures) + '): ' + msg + '\nRetrying…'); } catch (eP5) {}
+                if (pollFailures >= pollMaxFailures) {
+                    finalize(false);
+                }
+                return null;
+            }).finally(function() {
+                pollInFlight = false;
+                if (!done) {
+                    pollTimer = setTimeout(pollTick, 850);
+                }
+            });
+        }
+
+        function startPolling(reason) {
+            if (done) return;
+            try { if (stream && typeof stream.stop === 'function') stream.stop(); } catch (eSP0) {}
+            stream = null;
+            if (streamFallbackTimer) { try { clearTimeout(streamFallbackTimer); } catch (eSP1) {} streamFallbackTimer = null; }
+            try {
+                if (ZNH_DEBUG && typeof window.znhJsHealthLog === 'function') {
+                    window.znhJsHealthLog('debug', 'distro-upgrade: starting polling (' + String(reason || 'fallback') + ')');
+                }
+            } catch (eSP2) {}
+            pollTick();
+        }
+
+        // Prefer streaming for low-latency progress (same path as system-dup).
+        try {
+            stream = _znhApiJobStreamStart('quick-action', safeJobId, {
+                onReset: function(p) {
+                    streamReady = true;
+                    if (streamFallbackTimer) { try { clearTimeout(streamFallbackTimer); } catch (eX0) {} streamFallbackTimer = null; }
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (eX1) {}
+                    try { _znhOverlayLogApplyRaw('su-live-log', String((p && p.text != null) ? p.text : ''), { maxChars: 24000, rawMax: 60000, highlightId: 'su-live-log' }); } catch (eX2) {}
+                    try { znhTaskUpdateFromJob('quick-action', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (eX3) {}
+                },
+                onAppend: function(p) {
+                    streamReady = true;
+                    try { _suUpdateProgress(p.stage || 'Running', parseInt(p.progress || 0, 10) || 0); } catch (eY0) {}
+                    try {
+                        var txt = String((p && p.text != null) ? p.text : '');
+                        if (txt) _znhOverlayLogAppend('su-live-log', txt, { maxChars: 24000, rawMax: 60000 });
+                    } catch (eY1) {}
+                    try { znhTaskUpdateFromJob('quick-action', { stage: p.stage, progress: p.progress, running: true, done: false, rc: null }); } catch (eY2) {}
+                },
+                onDone: function(_pDone) {
+                    streamReady = true;
+                    // Trigger one canonical poll to pick up rc + final stage.
+                    if (!done) pollTick();
+                },
+                onError: function(err) {
+                    if (done) return;
+                    startPolling((err && err.message) ? err.message : 'stream-error');
+                }
+            });
+            streamFallbackTimer = setTimeout(function() {
+                if (streamReady || done) return;
+                startPolling('stream-timeout');
+            }, 1100);
+        } catch (eSS) {
+            startPolling('stream-exception');
+        }
     }
 
     function rocketUpdateWizardOpen(arg) {
@@ -33083,7 +33576,14 @@ generate_dashboard() {
         //  - refreshing
         //  - downloading:PKGS:SIZE:DOWNLOADED:PCT
         //  - complete:DURATION_SEC:DOWNLOADED_PKGS
-        //  - error:network | error:repo | error:solver:RC
+        //  - error:network | error:repo | error:repo:readonly_fs | error:solver:RC
+        //
+        // For error:repo:SUBKIND the SUBKIND field carries a structured
+        // sub-classification (currently only readonly_fs) so the WebUI
+        // Notification Center can render a more useful detail line and
+        // mention the ReadWritePaths= systemd unit field explicitly.
+        // Other parts of the parser stay backward-compatible: when SUBKIND
+        // is absent obj.error_subkind is empty.
         var s = (raw || '').trim();
         if (!s) return { state: 'unknown', pct: 0, detail: '' };
 
@@ -33131,12 +33631,39 @@ generate_dashboard() {
         if (s.indexOf('error:') === 0) {
             var parts3 = s.split(':');
             var kind = parts3[1] || 'unknown';
-            var rc = parts3[2] || '';
+            var third = parts3[2] || '';
+            // For solver errors the 3rd field is the rc number; for repo
+            // errors it is an optional structured subkind (currently only
+            // 'readonly_fs'). Detect numeric vs subkind so existing
+            // error:solver:RC consumers keep working unchanged.
+            var rc = '';
+            var subkind = '';
+            if (kind === 'solver') {
+                rc = third;
+            } else if (kind === 'repo' && third) {
+                subkind = String(third).toLowerCase();
+            }
             var detail = kind;
-            if (kind === 'network') detail = 'Network error while checking repos';
-            else if (kind === 'repo') detail = 'Repository refresh error';
-            else if (kind === 'solver') detail = 'Solver/download error' + (rc ? (' (rc=' + rc + ')') : '');
-            return { state: 'error', pct: 100, detail: detail, error_kind: kind, error_code: rc, raw_status: s };
+            if (kind === 'network') {
+                detail = 'Network error while checking repos';
+            } else if (kind === 'repo') {
+                if (subkind === 'readonly_fs' || subkind === 'readonly-fs') {
+                    detail = 'Read-only sandbox path blocked the prefetch; check ReadWritePaths= on the systemd unit (libdnf5 offline staging dirs likely missing)';
+                } else {
+                    detail = 'Repository refresh error';
+                }
+            } else if (kind === 'solver') {
+                detail = 'Solver/download error' + (rc ? (' (rc=' + rc + ')') : '');
+            }
+            return {
+                state: 'error',
+                pct: 100,
+                detail: detail,
+                error_kind: kind,
+                error_subkind: subkind,
+                error_code: rc,
+                raw_status: s
+            };
         }
 
         if (s === 'idle') return { state: 'idle', pct: 0, detail: '' };
@@ -33153,10 +33680,16 @@ generate_dashboard() {
         return 'medium';
     }
 
-    function _downloaderIncidentId(kind, rc) {
+    function _downloaderIncidentId(kind, rc, subkind) {
         var k = String(kind || 'unknown').toLowerCase().replace(/[^a-z0-9._-]/g, '-');
         var c = String(rc || '').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+        var sk = String(subkind || '').toLowerCase().replace(/[^a-z0-9._-]/g, '-');
         if (k === 'solver' && c) return 'inc-downloader-' + k + '-' + c;
+        // For repo errors with a structured subkind (e.g. readonly_fs) we
+        // want a stable, human-readable incident id so the AI Smart Report
+        // and the Notification Center dedupe on the *real* sub-class
+        // instead of collapsing every repo failure into the same incident.
+        if (k === 'repo' && sk) return 'inc-downloader-' + k + '-' + sk;
         return 'inc-downloader-' + k;
     }
 
@@ -33170,7 +33703,8 @@ generate_dashboard() {
 
         var kind = String((obj && obj.error_kind) ? obj.error_kind : 'unknown').toLowerCase();
         var rc = String((obj && obj.error_code) ? obj.error_code : '').trim();
-        var incidentId = _downloaderIncidentId(kind, rc);
+        var subkind = String((obj && obj.error_subkind) ? obj.error_subkind : '').toLowerCase();
+        var incidentId = _downloaderIncidentId(kind, rc, subkind);
         var severity = _downloaderErrorSeverity(kind);
         var raw = String(rawStatus || '').trim();
         var sig = incidentId + '|' + raw;
@@ -35839,13 +36373,16 @@ fi
 log_debug "[10c/${TOTAL_CHECKS}] Checking downloader unit ReadWritePaths (cross-distro)..."
 local DL_UNIT_FILE dl_expected_rw dl_changed dl_existing
 DL_UNIT_FILE="/etc/systemd/system/zypper-autodownload.service"
-dl_expected_rw="ReadWritePaths=/var/log/zypper-auto -/var/cache/zypp -/var/cache/zypp/packages -/var/cache/dnf -/var/cache/libdnf5 -/var/cache/apt -/var/cache/apt/archives -/var/cache/pacman/pkg -/var/lib/dnf -/var/lib/apt -/var/lib/apt/lists -/var/lib/pacman -/var/lib/dpkg -/var/lib/zypp -/var/lib/zypper -/var/lib/zypper-auto"
+dl_expected_rw="ReadWritePaths=/var/log/zypper-auto -/var/cache/zypp -/var/cache/zypp/packages -/var/cache/dnf -/var/cache/libdnf5 -/var/cache/apt -/var/cache/apt/archives -/var/cache/pacman/pkg -/var/lib/dnf -/var/lib/apt -/var/lib/apt/lists -/var/lib/pacman -/var/lib/dpkg -/var/lib/zypp -/var/lib/zypper -/var/lib/zypper-auto -/usr/lib/sysimage/libdnf5 -/usr/lib/sysimage/libdnf5/offline"
 dl_changed=0
 if [ -f "${DL_UNIT_FILE}" ]; then
     if grep -q '^ReadWritePaths=' "${DL_UNIT_FILE}" 2>/dev/null; then
         dl_existing="$(grep -m1 '^ReadWritePaths=' "${DL_UNIT_FILE}" 2>/dev/null || true)"
-        # Trigger a rewrite if any cross-distro path is listed without the '-' optional prefix.
-        if printf '%s\n' "${dl_existing}" | grep -Eq '(^| )(/var/cache/(apt|dnf|libdnf5|pacman/pkg)|/var/lib/(apt|apt/lists|dnf|pacman|dpkg))(\s|$)'; then
+        # Trigger a rewrite if any cross-distro path is listed without the '-' optional prefix
+        # OR if the libdnf5 offline staging dirs are missing (needed for `dnf system-upgrade
+        # download` distro-upgrade prefetch under ProtectSystem=full sandboxing).
+        if printf '%s\n' "${dl_existing}" | grep -Eq '(^| )(/var/cache/(apt|dnf|libdnf5|pacman/pkg)|/var/lib/(apt|apt/lists|dnf|pacman|dpkg))(\s|$)' \
+            || ! printf '%s\n' "${dl_existing}" | grep -qF '/usr/lib/sysimage/libdnf5'; then
             execute_guarded "Patch downloader unit (ReadWritePaths cross-distro tolerant)" \
                 sed -i "s|^ReadWritePaths=.*$|${dl_expected_rw}|" "${DL_UNIT_FILE}" || true
             dl_changed=1
@@ -47851,6 +48388,73 @@ znh_pm_is_network_output_file() {
     grep -qiE 'could not resolve host|temporary failure resolving|failed to retrieve new repository metadata|curl error|connection timed out|failed to synchronize cache|could not connect|name or service not known|network is unreachable' "${out_file}" 2>/dev/null
 }
 
+# Detect read-only / EROFS-style failures coming from sandboxed package-manager
+# runs (e.g. `dnf system-upgrade download` failing with
+# "filesystem error: cannot create directories: Read-only file system
+# [/usr/lib/sysimage/libdnf5/offline]" when the systemd unit's ReadWritePaths
+# does not include the libdnf5 offline staging directory).
+#
+# Patterns are kept additive: the original libdnf5 "cannot create directories:
+# Read-only" wording stays first so older reports continue to match, and the
+# extended set picks up additional dnf5 / libdnf5 / kernel wordings such as
+# `mkstemp(...): Read-only`, `mkdir(...): Read-only`, `permission denied`
+# variants on a read-only path, and the lower-case `read-only filesystem`
+# spelling some tools emit. Errno strings (EROFS / errno=30) are kept too
+# because some dnf5 plugins log the raw errno alongside the stack.
+#
+# This is NOT a solver/conflict error and must not be reported as one.
+znh_pm_is_readonly_fs_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    grep -qiE 'read-only file system|read-only filesystem|EROFS|errno=30|operation not permitted: cannot create|sandbox.*read-only|cannot create directories: Read-only|mkstemp.*read-only|mkdir.*read-only|failed to create.*read-only|unable to create.*read-only|cannot create temp.*read-only|permission denied.*read-only|transaction error.*read-only|failed to lock.*read-only' "${out_file}" 2>/dev/null
+}
+
+# Treat the err_file as a "benign / no-op" download exit when it only contains
+# package-manager noise like "Nothing to do", "All packages are up to date",
+# pacman "there is nothing to do", or apt "0 newly installed, 0 to remove".
+# Used by the downloader fallback path so a non-zero rc that really means
+# "there are no upgrades to download" is not falsely surfaced as a hard
+# solver error in the WebUI / Notification Center.
+#
+# A file is considered benign when EITHER of the following is true:
+#  - the file is empty (no stderr captured at all), OR
+#  - the file matches one of the recognised "nothing to do" patterns AND
+#    contains NO solver/conflict/repo/network failure markers.
+znh_pm_is_benign_no_updates_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    # Empty stderr → benign no-op exit on most package managers.
+    if [ ! -s "${out_file}" ]; then
+        return 0
+    fi
+
+    # If the err_file has any obvious failure markers, never treat as benign.
+    if grep -qiE 'conflict|conflicts|conflicting requests|problem:|has inferior architecture|nothing provides|solver|signature verification failed|gpg|repo refresh failed|metadata download failed|404|not found|forbidden|bad gateway|unable to find a match|no match for argument|cannot prepare internal mirrorlist|error: failed' "${out_file}" 2>/dev/null; then
+        return 1
+    fi
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        dnf)
+            grep -qiE 'nothing to do|no packages marked for update|package(s)? already installed|all packages are up to date|nothing provides|transaction is empty' "${out_file}" 2>/dev/null && return 0
+            ;;
+        apt)
+            grep -qiE '0 upgraded, 0 newly installed, 0 to remove|0 to upgrade, 0 to newly install|nothing to fetch|nothing to install|nothing to remove' "${out_file}" 2>/dev/null && return 0
+            ;;
+        pacman)
+            grep -qiE 'there is nothing to do|nothing to do| up to date|target not found' "${out_file}" 2>/dev/null && return 0
+            ;;
+        zypper)
+            grep -qiE 'nothing to do|no update candidates found|already the newest version' "${out_file}" 2>/dev/null && return 0
+            ;;
+    esac
+    return 1
+}
+
 znh_pm_downloader_refresh_run() {
     znh_pm_ensure_detected
     case "${SYSTEM_PKG_MANAGER}" in
@@ -48504,14 +49108,18 @@ znh_downloader_incident_id_for_status() {
     fi
 }
 znh_downloader_emit_event() {
-    local level="${1:-debug}" event="${2:-status}" status="${3:-unknown}" message="${4:-}" code="${5:-none}"
+    local level="${1:-debug}" event="${2:-status}" status="${3:-unknown}" message="${4:-}" code="${5:-none}" error_kind="${6:-none}"
     local ts safe_message incident_id line
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     safe_message="${message//$'\n'/ }"
     safe_message="${safe_message//$'\r'/ }"
     safe_message="${safe_message//\"/\'}"
     incident_id="$(znh_downloader_incident_id_for_status "${level}" "${event}" "${status}" "${code}")"
-    line="DOWNLOADER_EVENT ts=${ts} level=${level} pm=${SYSTEM_PKG_MANAGER} event=${event} status=${status} code=${code} incident_id=${incident_id} message=\"${safe_message}\""
+    # error_kind is a structured taxonomy (benign|network|repo|readonly_fs|
+    # solver|none) so the AI Smart Report's repair-plan catalog can key off
+    # it directly without re-parsing free-form `status=` strings. The legacy
+    # status= and code= fields stay intact for backward compatibility.
+    line="DOWNLOADER_EVENT ts=${ts} level=${level} pm=${SYSTEM_PKG_MANAGER} event=${event} status=${status} code=${code} error_kind=${error_kind} incident_id=${incident_id} message=\"${safe_message}\""
 
     printf '%s\n' "$line" >> "$DOWNLOADER_EVENT_LOG" 2>/dev/null || true
     chmod 644 "$DOWNLOADER_EVENT_LOG" 2>/dev/null || true
@@ -48524,9 +49132,42 @@ znh_downloader_emit_event() {
     fi
 }
 
+# Map a status string into the structured error_kind taxonomy emitted into
+# downloader-events.log (and consumed by the AI Smart Report's repair-plan
+# catalog). The classifier `znh_downloader_classify_download_failure` writes
+# explicit subkinds (e.g. `error:repo:readonly_fs` for sandbox EROFS), and
+# this helper just recognises them. Anything that does not match a known
+# subkind falls back to the 2nd colon-segment, then `none`.
+znh_downloader_status_to_error_kind() {
+    local status="${1:-}"
+    case "${status}" in
+        error:repo:readonly_fs|error:repo:readonly-fs)
+            printf '%s' 'readonly_fs'
+            ;;
+        error:network*)
+            printf '%s' 'network'
+            ;;
+        error:repo*)
+            printf '%s' 'repo'
+            ;;
+        error:solver*)
+            printf '%s' 'solver'
+            ;;
+        complete:*)
+            printf '%s' 'benign'
+            ;;
+        idle|refreshing|downloading:*)
+            printf '%s' 'none'
+            ;;
+        *)
+            printf '%s' 'none'
+            ;;
+    esac
+}
+
 znh_downloader_write_status() {
     local status="$1" message="${2:-}"
-    local level="debug" event="status"
+    local level="debug" event="status" error_kind="none"
     write_status "${status}"
 
     case "${status}" in
@@ -48552,7 +49193,8 @@ znh_downloader_write_status() {
             ;;
     esac
 
-    znh_downloader_emit_event "${level}" "${event}" "${status}" "${message}" "${status#*:}"
+    error_kind="$(znh_downloader_status_to_error_kind "${status}")"
+    znh_downloader_emit_event "${level}" "${event}" "${status}" "${message}" "${status#*:}" "${error_kind}"
 }
 
 znh_downloader_handle_stage_failure() {
@@ -48630,8 +49272,20 @@ znh_downloader_detect_only_complete() {
     trigger_notifier
 }
 
+# Run the package-manager prefetch download and capture both rc and the
+# stderr file path so the caller can classify the failure (lock vs network
+# vs read-only sandbox vs benign "nothing to do" vs real solver/conflict).
+#
+# Args:
+#   1) out_var_name        - shell variable name to receive the rc value
+#   2) out_err_var_name    - (optional) shell variable name to receive the
+#                            err_file path. When set, the function will NOT
+#                            delete the err_file; the caller is responsible
+#                            for cleanup. When unset, the err_file is
+#                            deleted (legacy behaviour).
 znh_downloader_run_prefetch_download() {
     local out_var_name="$1"
+    local out_err_var_name="${2:-}"
     local dl_err zyp_ret=0
     dl_err="$(mktemp)"
     set +e
@@ -48639,12 +49293,100 @@ znh_downloader_run_prefetch_download() {
     zyp_ret=$?
     set -e
     if [ "${zyp_ret}" -ne 0 ]; then
+        # Lock-related failures already exit 0 from inside this helper.
         handle_lock_or_fail "${zyp_ret}" "${dl_err}"
     fi
     if [ -n "${out_var_name}" ]; then
         printf -v "${out_var_name}" '%s' "${zyp_ret}"
     fi
-    rm -f "${dl_err}"
+    if [ -n "${out_err_var_name}" ]; then
+        # Hand the err_file off to the caller; do not delete it here.
+        printf -v "${out_err_var_name}" '%s' "${dl_err}"
+    else
+        rm -f "${dl_err}"
+    fi
+    return 0
+}
+
+# Classify a non-zero download rc into the correct download-status.txt value.
+# Args: stage_label rc err_file
+#
+# Returns: 0 in all cases (the function always writes a status). Sets the
+# status file to one of:
+#   - complete:0:0          (benign "nothing to do" / empty stderr)
+#   - error:network         (DNS/connect/repo metadata fetch failures)
+#   - error:repo            (read-only sandbox / repo metadata corruption /
+#                            generic non-solver repo errors)
+#   - error:solver:RC       (only when the err_file shows real conflict /
+#                            solver / unresolvable-package patterns)
+#
+# This replaces the legacy "blanket error:solver:RC on any non-zero rc"
+# behaviour, which mis-classified read-only sandbox failures from
+# `dnf system-upgrade download` and benign dnf rc=1 "Nothing to do" exits
+# as solver errors in the WebUI / Notification Center.
+znh_downloader_classify_download_failure() {
+    local stage="${1:-prefetch}" rc="${2:-1}" err_file="${3:-}"
+
+    # 1) Benign "there are no upgrades to download" exits.
+    #    Some package managers (notably dnf5) can return rc=1 when the staged
+    #    transaction is empty. Don't surface those as hard errors.
+    if znh_pm_is_benign_no_updates_output_file "${err_file}"; then
+        znh_downloader_write_status "complete:0:0" "${stage} returned rc=${rc} but stderr indicates no updates were pending; treating as benign"
+        dlog "${stage} treated as benign no-op (rc=${rc}, pm=${SYSTEM_PKG_MANAGER})"
+        return 0
+    fi
+
+    # 2) Read-only sandbox / EROFS errors (e.g. dnf system-upgrade download
+    #    blocked by ProtectSystem=full + missing /usr/lib/sysimage/libdnf5).
+    #    This is a deployment/unit configuration issue, not a solver failure.
+    #
+    # We surface a structured subkind (`error:repo:readonly_fs`) instead of
+    # the bare `error:repo` value so the WebUI's Notification Center body
+    # explicitly mentions `ReadWritePaths=` and so the AI Smart Report's
+    # repair-plan catalog can key off `error_kind=readonly_fs` directly.
+    # Older consumers that only check the 2nd colon-segment (`repo`) keep
+    # working unchanged.
+    if znh_pm_is_readonly_fs_output_file "${err_file}"; then
+        znh_downloader_write_status "error:repo:readonly_fs" "${stage} blocked by read-only sandbox path (rc=${rc}); check ReadWritePaths= on the systemd unit (likely /usr/lib/sysimage/libdnf5/offline missing)"
+        derr "${stage} blocked by read-only filesystem (pm=${SYSTEM_PKG_MANAGER}, rc=${rc}); ReadWritePaths= on the unit needs to include libdnf5 staging dirs"
+        if [ -n "${err_file}" ] && [ -f "${err_file}" ]; then
+            cat "${err_file}" >&2 || true
+        fi
+        return 0
+    fi
+
+    # 3) Network-class errors.
+    if znh_pm_is_network_output_file "${err_file}"; then
+        if is_metered_cached 1; then
+            znh_downloader_write_status "idle" "${stage} failed due to network but connection is metered; treating as idle"
+        else
+            znh_downloader_write_status "error:network" "${stage} failed due to network (rc=${rc})"
+        fi
+        if [ -n "${err_file}" ] && [ -f "${err_file}" ]; then
+            cat "${err_file}" >&2 || true
+        fi
+        return 0
+    fi
+
+    # 4) Real solver / conflict patterns.
+    if [ -n "${err_file}" ] && [ -f "${err_file}" ] \
+        && grep -qiE 'conflict|conflicts|conflicting requests|nothing provides|has inferior architecture|unresolvable|problem with installed package|solver problem|cannot install both|requires.*but it cannot be installed' "${err_file}" 2>/dev/null; then
+        znh_downloader_write_status "error:solver:${rc}" "${stage} solver/conflict failure (rc=${rc})"
+        derr "${stage} solver/conflict failure (pm=${SYSTEM_PKG_MANAGER}, rc=${rc})"
+        if [ -n "${err_file}" ] && [ -f "${err_file}" ]; then
+            cat "${err_file}" >&2 || true
+        fi
+        return 0
+    fi
+
+    # 5) Default: treat as a generic repo/runtime error rather than blaming
+    #    the solver. The Notification Center / dashboard will surface this
+    #    as "error:repo" with the rc embedded in the message.
+    znh_downloader_write_status "error:repo" "${stage} returned rc=${rc} (no solver/network/sandbox markers in stderr)"
+    derr "${stage} returned rc=${rc} without recognised error class (pm=${SYSTEM_PKG_MANAGER}); reporting as error:repo"
+    if [ -n "${err_file}" ] && [ -f "${err_file}" ]; then
+        cat "${err_file}" >&2 || true
+    fi
     return 0
 }
 
@@ -48769,9 +49511,10 @@ znh_downloader_distro_upgrade_prefetch() {
         znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} prefetch ready (run: sudo ${dnf_bin} system-upgrade reboot)"
         dlog "Distro-upgrade prefetch complete (Fedora ${version_id} -> ${target}); reboot via: sudo ${dnf_bin} system-upgrade reboot"
     else
-        znh_downloader_write_status "error:solver:${du_rc}" "distro-upgrade prefetch returned rc=${du_rc} (manual review required)"
-        derr "Distro-upgrade prefetch failed (rc=${du_rc}); see ${du_err}"
-        cat "${du_err}" >&2 || true
+        # Use the shared classifier so read-only sandbox failures (e.g. missing
+        # /usr/lib/sysimage/libdnf5/offline in ReadWritePaths) and benign empty
+        # transactions are not falsely surfaced as solver/conflict errors.
+        znh_downloader_classify_download_failure "distro-upgrade prefetch (Fedora ${version_id:-?} -> ${target})" "${du_rc}" "${du_err}" || true
     fi
     rm -f "${du_err}"
     return 0
@@ -48810,7 +49553,8 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
         exit 0
     fi
     ZYP_RET=0
-    znh_downloader_run_prefetch_download ZYP_RET
+    DL_ERR_FILE=""
+    znh_downloader_run_prefetch_download ZYP_RET DL_ERR_FILE
 
     START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
     END_TIME=$(date +%s)
@@ -48821,9 +49565,11 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
         dlog "Download complete (pm=${SYSTEM_PKG_MANAGER}): queued=${PKG_COUNT} duration=${DURATION}s"
         trigger_notifier
     else
-        znh_downloader_write_status "error:solver:$ZYP_RET" "prefetch download returned solver/error code"
-        derr "Download pass returned rc=${ZYP_RET} (pm=${SYSTEM_PKG_MANAGER})"
+        # Classify rather than blanket-marking as solver. dnf rc=1 can mean
+        # "Nothing to do", a network blip, or a sandboxed read-only path.
+        znh_downloader_classify_download_failure "prefetch download" "${ZYP_RET}" "${DL_ERR_FILE}" || true
     fi
+    rm -f "${DL_ERR_FILE}" 2>/dev/null || true
 
     # Cross-distro: also stage the next distro upgrade in the background
     # (Fedora today; other families just refresh state for the WebUI).
@@ -48968,7 +49714,8 @@ wait_for_cache_event_or_timeout() {
 TRACKER_PID=$!
 
 ZYP_RET=0
-znh_downloader_run_prefetch_download ZYP_RET
+DL_ERR_FILE=""
+znh_downloader_run_prefetch_download ZYP_RET DL_ERR_FILE
 
 # Kill the progress tracker
 kill $TRACKER_PID 2>/dev/null || true
@@ -49002,13 +49749,16 @@ if [ $ACTUAL_DOWNLOADED -gt 0 ]; then
     dlog "Download complete: downloaded=${ACTUAL_DOWNLOADED} duration=${DURATION}s"
     trigger_notifier
 elif [ $ZYP_RET -ne 0 ]; then
-    znh_downloader_write_status "error:solver:$ZYP_RET" "prefetch download returned solver/error code"
-    derr "Download-only returned rc=${ZYP_RET} (solver/manual intervention may be required)"
+    # Classify rather than blanket-marking as solver. zypper download-only rc!=0
+    # can mean "already up to date", a metered/network issue, or a sandboxed
+    # read-only filesystem error (e.g. ProtectSystem=full + libdnf5 path missing).
+    znh_downloader_classify_download_failure "prefetch download" "${ZYP_RET}" "${DL_ERR_FILE}" || true
 else
     znh_downloader_write_status "complete:$DURATION:0" "prefetch download completed with no newly cached packages"
     dlog "Download complete: downloaded=0 duration=${DURATION}s"
     trigger_notifier
 fi
+rm -f "${DL_ERR_FILE}" 2>/dev/null || true
 
 # Cross-distro: pre-stage the next distro upgrade as well (Fedora today;
 # other families just refresh distro-upgrade.json for the WebUI).
@@ -49064,7 +49814,7 @@ NoNewPrivileges=yes
 # Prefix every distro-specific path with '-' so missing paths are tolerated
 # (per systemd.exec(5)). /var/log/zypper-auto is always present (we create
 # it earlier in the installer) so it stays unprefixed.
-ReadWritePaths=/var/log/zypper-auto -/var/cache/zypp -/var/cache/zypp/packages -/var/cache/dnf -/var/cache/libdnf5 -/var/cache/apt -/var/cache/apt/archives -/var/cache/pacman/pkg -/var/lib/dnf -/var/lib/apt -/var/lib/apt/lists -/var/lib/pacman -/var/lib/dpkg -/var/lib/zypp -/var/lib/zypper -/var/lib/zypper-auto
+ReadWritePaths=/var/log/zypper-auto -/var/cache/zypp -/var/cache/zypp/packages -/var/cache/dnf -/var/cache/libdnf5 -/var/cache/apt -/var/cache/apt/archives -/var/cache/pacman/pkg -/var/lib/dnf -/var/lib/apt -/var/lib/apt/lists -/var/lib/pacman -/var/lib/dpkg -/var/lib/zypp -/var/lib/zypper -/var/lib/zypper-auto -/usr/lib/sysimage/libdnf5 -/usr/lib/sysimage/libdnf5/offline
 EOF
 log_success "Downloader service file created"
 chmod 644 "${DL_SERVICE_FILE}" 2>/dev/null || true
@@ -51628,13 +52378,89 @@ def check_disk_space() -> tuple[bool, str]:
         log_debug(f"Disk space check failed: {e}")
         return True, "Could not check disk space"
 
+def _root_filesystem_type() -> str:
+    """Best-effort detection of the root filesystem type.
+
+    Returns the FS type as reported by `findmnt`/`stat` (lowercase) or
+    empty string when detection is not possible. Used to gate
+    Snapper-specific notifications cross-distro: Snapper is only
+    meaningful on btrfs roots, so we silently skip the warning on
+    ext4/xfs/zfs/etc. instead of telling Fedora/Ubuntu/Arch users that
+    "Snapper not installed".
+    """
+    try:
+        if shutil.which("findmnt"):
+            res = subprocess.run(
+                ["findmnt", "-n", "-o", "FSTYPE", "/"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if res.returncode == 0:
+                fstype = (res.stdout or "").strip().lower()
+                if fstype:
+                    return fstype
+    except Exception as e:
+        log_debug(f"findmnt root fstype detection failed: {e}")
+
+    # Fallback: parse /proc/mounts for the root entry.
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "/":
+                    return parts[2].lower()
+    except Exception as e:
+        log_debug(f"/proc/mounts root fstype detection failed: {e}")
+
+    return ""
+
+
+def _snapper_is_relevant() -> bool:
+    """Return True only when Snapper makes sense on this system.
+
+    Snapper is btrfs-specific in practice. On non-btrfs roots (ext4,
+    xfs, zfs, f2fs, btrfs-on-luks-but-not-root, etc.) the user usually
+    relies on a different snapshot mechanism (timeshift, zfs snapshot,
+    LVM, none) so emitting a "Snapper not installed" warning is noise.
+
+    Cross-distro behaviour:
+      - zypper + btrfs root => relevant (typical Tumbleweed/Leap layout)
+      - dnf/apt/pacman + btrfs root => relevant (snapper IS used there)
+      - any PM + non-btrfs root => not relevant; suppress the warning
+    """
+    fstype = _root_filesystem_type()
+    if not fstype:
+        # Could not detect the root FS; default to "relevant" only when
+        # the package manager is zypper, since that's where Snapper is
+        # most strongly expected. Avoids false warnings on cross-distro
+        # systems where detection failed.
+        return SYSTEM_PKG_MANAGER == "zypper"
+    return fstype == "btrfs"
+
+
 def check_snapshots() -> tuple[bool, str]:
     """Check if snapper is installed and whether configs/snapshots exist.
 
     Returns: (has_snapshots, message)
-    - has_snapshots=True  => at least one snapshot exists
-    - has_snapshots=False => snapper not installed, not configured, or zero snapshots
+    - has_snapshots=True  => at least one snapshot exists, OR Snapper is
+                              not relevant on this system (cross-distro
+                              skip => caller suppresses the warning)
+    - has_snapshots=False => snapper not installed, not configured, or
+                              zero snapshots, AND Snapper IS relevant
     """
+    # Cross-distro guard: skip the entire Snapper check on systems where
+    # Snapper is not relevant (non-btrfs root). Returning an empty
+    # message means the notifier won't display a misleading
+    # "Snapper not installed" warning on Fedora/Ubuntu/Arch with
+    # ext4/xfs/etc. roots.
+    if not _snapper_is_relevant():
+        log_debug(
+            f"Snapper relevance check: skipped (pm={SYSTEM_PKG_MANAGER}, "
+            f"root_fstype={_root_filesystem_type() or 'unknown'})"
+        )
+        return True, ""
+
     # First, see if snapper is installed and if there is a root config
     try:
         cfg_result = subprocess.run(
@@ -57979,6 +58805,22 @@ def _quick_action_table() -> dict:
             "explain": "Stages the next major version of your distribution (Fedora: runs `dnf system-upgrade download --refresh --releasever=N` so you can `sudo dnf system-upgrade reboot` when ready; Ubuntu/Mint short-circuits because do-release-upgrade is interactive; Debian/openSUSE Leap/RHEL print the manual upstream guide). Rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/...) are intentionally skipped; this card never shows up there.",
             "warning": "Major-version upgrades are slow and disruptive. Only run when you have a recent backup. The apply itself does NOT reboot; you must run the family-specific finishing command afterwards (e.g. `sudo dnf system-upgrade reboot` on Fedora).",
         },
+        # Distro upgrade FINISH path (Fedora today): runs the family-specific
+        # finishing command after the apply path successfully staged the
+        # download. For Fedora/Nobara this is `dnf system-upgrade reboot`,
+        # which reboots the machine into the offline upgrade environment
+        # (i.e. the actual install + reboot step). The WebUI surfaces this
+        # button only after the apply quick-action job finished with rc=0
+        # so users get a one-click "Reboot now to finish upgrade" flow.
+        "distro-upgrade-reboot": {
+            "title": "Reboot to finish distro upgrade",
+            "cmd": [HELPER_BIN, "--distro-upgrade", "finish", "--yes"],
+            "timeout_s": 5 * 60,
+            "needs_confirm": True,
+            "phrase": "REBOOTUPGRADE",
+            "explain": "Runs the family-specific finishing command after the staged distro-upgrade download is complete. On Fedora/Nobara this calls `dnf system-upgrade reboot`, which immediately reboots the machine into the offline upgrade environment so the upgrade can be applied. Other families either reboot themselves (Ubuntu/Mint via do-release-upgrade) or print manual guidance (Debian/Leap/RHEL).",
+            "warning": "This action WILL reboot the machine. Save your work first. The reboot kicks off the offline upgrade install which can take a while.",
+        },
     }
 
 
@@ -61961,6 +62803,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not l:
                     return "generic"
                 if ("downloader_event" in l) or ("inc-downloader-" in l) or ("downloader prefetch" in l):
+                    # Read-only sandbox / EROFS failures (libdnf5 offline
+                    # staging blocked by ProtectSystem=full +
+                    # missing ReadWritePaths=) are a deployment/unit config
+                    # issue, NOT a solver/network problem. The shell-side
+                    # classifier emits these with the structured
+                    # error_kind=readonly_fs field and the
+                    # status=error:repo:readonly_fs status string.
+                    if ("error_kind=readonly_fs" in l) \
+                            or ("status=error:repo:readonly_fs" in l) \
+                            or ("inc-downloader-repo-readonly" in l) \
+                            or ("readwritepaths=" in l):
+                        return "downloader-readonly-fs"
                     if ("status=error:solver" in l) or ("error:solver" in l):
                         return "downloader-solver"
                     if ("status=error:network" in l) or ("status=error:repo" in l) or ("error:network" in l) or ("error:repo" in l):
@@ -62076,6 +62930,7 @@ class Handler(BaseHTTPRequestHandler):
                     "update-conflict": 74,
                     "downloader-solver": 80,
                     "downloader-network": 72,
+                    "downloader-readonly-fs": 78,
                     "downloader-event": 62,
                     "notifier-syntax": 64,
                     "history-db": 62,
@@ -62241,6 +63096,34 @@ class Handler(BaseHTTPRequestHandler):
                             "inc-downloader-network",
                             "inc-downloader-repo",
                             "downloader prefetch reported an error",
+                        ],
+                    },
+                    {
+                        # Read-only sandbox / EROFS failures from the
+                        # downloader prefetch (libdnf5 offline staging blocked
+                        # by the systemd unit's ProtectSystem=full +
+                        # missing ReadWritePaths=). The classifier emits the
+                        # structured `error_kind=readonly_fs` field and the
+                        # `error:repo:readonly_fs` status string, and the
+                        # WebUI dedupes the bell on the `inc-downloader-repo-
+                        # readonly-fs` incident id. The fix is unit-config:
+                        # `sudo zypper-auto-helper --verify` rewrites
+                        # ReadWritePaths=, runs daemon-reload + reset-failed,
+                        # and restarts the downloader timer.
+                        "id": "downloader-readonly-fs",
+                        "action": "verify",
+                        "reason": "Downloader prefetch blocked by a read-only sandbox path (ReadWritePaths= on the systemd unit needs to include the libdnf5 offline staging dir); run full verify to auto-repair.",
+                        "priority": 115,
+                        "incident_kinds": ["downloader-readonly-fs"],
+                        "patterns": [
+                            "error_kind=readonly_fs",
+                            "status=error:repo:readonly_fs",
+                            "inc-downloader-repo-readonly",
+                            "readwritepaths=",
+                            "read-only file system",
+                            "read-only filesystem",
+                            "cannot create directories: read-only",
+                            "libdnf5/offline",
                         ],
                     },
                     {

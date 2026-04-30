@@ -95,9 +95,15 @@ require_contains "${source_text}" "if ! znh_downloader_preview_step \"\$DRY_OUTP
 require_contains "${source_text}" "znh_downloader_run_prefetch_download ZYP_RET" "Cross-distro path is not invoking shared prefetch download helper"
 require_contains "${source_text}" "znh_downloader_incident_id_for_status() {" "Missing downloader stable-incident-id helper"
 require_contains "${source_text}" "incident_id=\"\$(znh_downloader_incident_id_for_status \"" "Downloader event emitter is not using stable incident-id helper"
-require_contains "${source_text}" "line=\"DOWNLOADER_EVENT ts=\${ts} level=\${level} pm=\${SYSTEM_PKG_MANAGER} event=\${event} status=\${status} code=\${code} incident_id=\${incident_id} message=" "Downloader event log line missing structured incident metadata"
+require_contains "${source_text}" "line=\"DOWNLOADER_EVENT ts=\${ts} level=\${level} pm=\${SYSTEM_PKG_MANAGER} event=\${event} status=\${status} code=\${code} error_kind=\${error_kind} incident_id=\${incident_id} message=" "Downloader event log line missing structured incident metadata (legacy code= must coexist with the new error_kind= taxonomy slot)"
 require_contains "${source_text}" "znh_downloader_write_status \"complete:\$DURATION:0\" \"prefetch download completed with no newly cached packages\"" "Missing zero-download complete status for shared downloader semantics"
-require_contains "${source_text}" "znh_downloader_write_status \"error:solver:\$ZYP_RET\" \"prefetch download returned solver/error code\"" "Missing solver error status propagation for downloader telemetry"
+# Solver/error propagation moved into znh_downloader_classify_download_failure
+# (cross-distro downloader prefetch path). The classifier now writes
+# error:solver:${rc} only when stderr actually shows solver/conflict markers,
+# and falls back to error:repo / error:network / complete:0:0 otherwise.
+# See test_downloader_prefetch_error_classification_regression.sh for the
+# full classifier contract.
+require_contains "${source_text}" "znh_downloader_classify_download_failure \"prefetch download\" \"\${ZYP_RET}\" \"\${DL_ERR_FILE}\"" "Missing solver error status propagation for downloader telemetry (cross-distro path must route prefetch failures through znh_downloader_classify_download_failure)"
 
 require_contains "${source_text}" "znh_pm_install_upgrade_streaming \"\${LOG_FILE}\" \"\${tmp_out}\"" "Missing install helper runtime upgrade dispatch call"
 require_contains "${source_text}" "znh_pm_capture_package_snapshot \"\${PKG_PRE_FILE}\"" "Missing install helper pre-update package snapshot dispatch call"
@@ -138,10 +144,21 @@ require_contains "${source_text}" "=== RESTART CHECK (needs-restarting -s) ===" 
 require_contains "${source_text}" "=== RESTART CHECK (reboot-required markers) ===" "Rocket start worker missing apt restart-check marker"
 require_contains "${source_text}" "=== RESTART CHECK (pacman marker scan) ===" "Rocket start worker missing pacman restart-check marker"
 # WebUI downloader notification + parse contract for bell telemetry.
-require_contains "${source_text}" "return { state: 'error', pct: 100, detail: detail, error_kind: kind, error_code: rc, raw_status: s };" "Downloader status parser missing structured error metadata fields"
+# parseDownloadStatus() now also surfaces error_subkind for error:repo:SUBKIND
+# (currently only readonly_fs) so the WebUI Notification Center body can
+# mention ReadWritePaths= when the shell-side classifier flags a read-only
+# sandbox failure. The legacy fields (error_kind, error_code, raw_status)
+# remain present.
+require_contains "${source_text}" "error_subkind: subkind," "Downloader status parser missing structured error_subkind metadata field for error:repo:readonly_fs"
+require_contains "${source_text}" "error_kind: kind," "Downloader status parser missing structured error_kind metadata field"
+require_contains "${source_text}" "error_code: rc," "Downloader status parser missing structured error_code metadata field"
+require_contains "${source_text}" "raw_status: s" "Downloader status parser missing structured raw_status metadata field"
 require_contains "${source_text}" "var _downloaderNotifyLastState = '';" "WebUI downloader notification dedupe state is missing"
 require_contains "${source_text}" "var _downloaderNotifyLastErrorSig = '';" "WebUI downloader error signature dedupe state is missing"
-require_contains "${source_text}" "function _downloaderIncidentId(kind, rc) {" "WebUI downloader incident-id helper is missing"
+# _downloaderIncidentId now takes an optional 3rd `subkind` argument so the
+# WebUI dedupes the bell on `inc-downloader-repo-readonly-fs` (instead of
+# collapsing every error:repo failure into the same incident).
+require_contains "${source_text}" "function _downloaderIncidentId(kind, rc, subkind) {" "WebUI downloader incident-id helper is missing the subkind parameter"
 require_contains "${source_text}" "if (sig === _downloaderNotifyLastErrorSig) {" "WebUI downloader notification dedupe guard is missing"
 require_contains "${source_text}" "window.znhNotifyAdd({" "WebUI downloader bell notification emitter is missing"
 require_contains "${source_text}" "Incident: ' + incidentId + '\\\\n'" "WebUI downloader notification body missing incident metadata"
