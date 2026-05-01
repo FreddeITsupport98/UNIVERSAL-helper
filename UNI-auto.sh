@@ -867,33 +867,83 @@ znh_distro_upgrade_run_finish() {
                 printf '%s\n' "dnf/dnf5 not found; cannot run system-upgrade reboot." >&2
                 return 1
             fi
+
+            # Try multiple paths because dnf5 versions differ:
+            #   - dnf5 system-upgrade reboot  (dnf5-plugin-system-upgrade)
+            #   - dnf5 offline reboot         (built-in on newer dnf5)
+            #   - dnf  system-upgrade reboot  (classic dnf4 plugin)
+            # If the dnf command claims success but doesn't actually
+            # reboot (race / missing plugin), fall back to systemctl.
+            local reboot_ok=0
+
             printf 'Running: %s system-upgrade reboot\n' "${dnf_bin}"
-            "${dnf_bin}" system-upgrade reboot
-            return $?
+            if "${dnf_bin}" system-upgrade reboot 2>&1; then
+                reboot_ok=1
+            else
+                printf 'system-upgrade reboot failed (rc=%s); trying offline reboot…\n' "$?"
+            fi
+
+            if [ "${reboot_ok}" -ne 1 ] 2>/dev/null && [ "${dnf_bin}" = "dnf5" ]; then
+                printf 'Running: dnf5 offline reboot\n'
+                if dnf5 offline reboot 2>&1; then
+                    reboot_ok=1
+                else
+                    printf 'dnf5 offline reboot failed (rc=%s)\n' "$?"
+                fi
+            fi
+
+            # Fallback: if neither dnf command rebooted (or the command
+            # returned success but the machine is still running after a
+            # short grace period), issue a direct systemctl reboot.
+            if [ "${reboot_ok}" -ne 1 ] 2>/dev/null; then
+                printf 'Falling back to systemctl reboot…\n'
+            else
+                # Give the dnf-initiated reboot a few seconds to take effect.
+                printf 'Reboot initiated via %s; waiting for shutdown…\n' "${dnf_bin}"
+                sleep 5
+                # If we're still here, dnf said OK but didn't actually reboot.
+                printf 'Machine still running; forcing reboot via systemctl…\n'
+            fi
+            systemctl reboot || reboot || true
+            # If we reach here the reboot is in progress (systemctl reboot
+            # is async). Give the kernel time to shut down.
+            sleep 30
+            return 0
             ;;
         ubuntu|mint)
-            printf '%s\n' "Ubuntu/Mint upgrades reboot themselves through do-release-upgrade."
-            printf '%s\n' "If do-release-upgrade did not reboot, run: sudo systemctl reboot"
+            printf '%s\n' "Ubuntu/Mint: rebooting to finish the upgrade…"
+            systemctl reboot || reboot || true
+            sleep 30
             return 0
             ;;
         debian)
-            printf '%s\n' "Debian distro upgrades require manual review; no automated reboot step."
-            printf '%s\n' "After 'apt full-upgrade' completes, run: sudo systemctl reboot"
-            return 2
+            printf '%s\n' "Debian: rebooting to apply the upgraded packages…"
+            systemctl reboot || reboot || true
+            sleep 30
+            return 0
             ;;
         leap)
-            printf '%s\n' "openSUSE Leap upgrades require a manual repository swap; no automated reboot step."
-            printf '%s\n' "See: https://en.opensuse.org/SDB:System_upgrade"
-            return 2
+            printf '%s\n' "openSUSE Leap: rebooting to finish the upgrade…"
+            systemctl reboot || reboot || true
+            sleep 30
+            return 0
             ;;
         rhel)
-            printf '%s\n' "RHEL/CentOS-style distros use leapp; follow the upstream guide for the reboot step."
-            printf '%s\n' "See: https://access.redhat.com/articles/4263361"
-            return 2
+            # RHEL/CentOS/Rocky/Alma with leapp: `leapp upgrade` stages an
+            # offline transaction similar to Fedora. The finish step is just
+            # a reboot into that environment.
+            printf '%s\n' "RHEL-family: rebooting to apply the staged upgrade…"
+            systemctl reboot || reboot || true
+            sleep 30
+            return 0
             ;;
         *)
-            printf '%s\n' "Distro-upgrade finish is not implemented for distro family '${ZNH_DISTRO_UPGRADE_FAMILY}'." >&2
-            return 1
+            # Unknown family: still attempt a reboot since the user explicitly
+            # confirmed through the REBOOTUPGRADE phrase.
+            printf '%s\n' "Unknown distro family '${ZNH_DISTRO_UPGRADE_FAMILY}'; attempting reboot…"
+            systemctl reboot || reboot || true
+            sleep 30
+            return 0
             ;;
     esac
 }
@@ -968,6 +1018,7 @@ if [[ $# -gt 0 ]]; then
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
         --show-logs|--show-loggs|--snapshot-state|--diag-bundle|--diag-logs-runner|--test-notify|--status|\
         --check-distro-upgrade|--distro-upgrade|--distro-upgrade-status|--distro-upgrade-check|\
+        --deploy-pm-runtime|\
         --analyze|--health|--debug)
             # Known commands/options; continue into main logic
             :
@@ -47854,6 +47905,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --dash-api-off          Stop the localhost dashboard Settings API (root)"
     echo "  --dash-api-status       Show status of the dashboard Settings API (root)"
     echo "  --send-webhook          Send a one-shot webhook notification (for testing)"
+    echo "  --deploy-pm-runtime     Deploy/re-deploy the shared package-manager runtime helper"
+    echo "                          (auto-invoked when the PM runtime is missing; root required)"
     echo "  --check-distro-upgrade  Check whether a major distro version upgrade is available"
     echo "                          (Fedora ~6 month cycle, Ubuntu/Mint via do-release-upgrade,"
     echo "                          Debian/Leap surfaced as 'manual'; rolling distros are left alone)."
@@ -47917,6 +47970,30 @@ elif [[ "${1:-}" == "--self-update-rollback" ]]; then
     log_info "Self-update rollback mode requested"
     run_self_update_rollback_only
     exit $?
+elif [[ "${1:-}" == "--deploy-pm-runtime" ]]; then
+    # Lightweight flag: (re-)deploy only the shared PM runtime helper file.
+    # Used by consumer scripts (zypper-run-install, downloader) to auto-heal
+    # a missing PM runtime without running the full install flow.
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        echo "--deploy-pm-runtime requires root. Re-run with sudo." >&2
+        exit 1
+    fi
+    _PM_RT_DIR="/usr/local/lib/zypper-auto"
+    _PM_RT_PATH="${_PM_RT_DIR}/package-manager-runtime.sh"
+    mkdir -p "${_PM_RT_DIR}" 2>/dev/null || true
+    # Extract the embedded PM runtime content from this script using markers.
+    if sed -n '/^# __ZNH_PM_RUNTIME_EMBEDDED_START__$/,/^# __ZNH_PM_RUNTIME_EMBEDDED_END__$/p' "$0" \
+         | sed '1d;$d' > "${_PM_RT_PATH}.tmp.$$" 2>/dev/null; then
+        if [ -s "${_PM_RT_PATH}.tmp.$$" ]; then
+            mv -f "${_PM_RT_PATH}.tmp.$$" "${_PM_RT_PATH}"
+            chmod 755 "${_PM_RT_PATH}" 2>/dev/null || true
+            echo "PM runtime helper deployed: ${_PM_RT_PATH}"
+            exit 0
+        fi
+    fi
+    rm -f "${_PM_RT_PATH}.tmp.$$" 2>/dev/null || true
+    echo "Failed to extract PM runtime from $0" >&2
+    exit 1
 elif [[ "${1:-}" == "--check-distro-upgrade" || "${1:-}" == "--distro-upgrade-check" ]]; then
     log_info "Distro-upgrade detection mode requested"
     znh_distro_upgrade_cli_dispatch check
@@ -48594,6 +48671,7 @@ log_info ">>> Creating shared package-manager runtime helper: ${PM_RUNTIME_HELPE
 update_status "Creating shared package-manager helper..."
 execute_guarded "Ensure shared PM helper directory exists" mkdir -p "${PM_RUNTIME_HELPER_DIR}"
 write_atomic "${PM_RUNTIME_HELPER_PATH}" << 'EOF'
+# __ZNH_PM_RUNTIME_EMBEDDED_START__
 #!/usr/bin/env bash
 # Shared package-manager runtime helper.
 # - Sourced by generated shell helpers (downloader/install/view)
@@ -49284,6 +49362,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         exit 0
     fi
 fi
+# __ZNH_PM_RUNTIME_EMBEDDED_END__
 EOF
 execute_guarded "Set shared PM helper permissions" chmod 755 "${PM_RUNTIME_HELPER_PATH}"
 log_success "Shared package-manager runtime helper created"
@@ -49390,7 +49469,20 @@ if [ -r "${PM_RUNTIME_HELPER}" ]; then
     # shellcheck disable=SC1091
     . "${PM_RUNTIME_HELPER}"
 else
-    dlog "WARNING: PM runtime helper missing (${PM_RUNTIME_HELPER}); using inline cross-distro fallback"
+    # Auto-deploy: the downloader runs as root, so try to (re-)create the PM runtime directly.
+    dlog "PM runtime helper missing (${PM_RUNTIME_HELPER}); attempting auto-deploy..."
+    if [ -x /usr/local/bin/zypper-auto-helper ]; then
+        /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1 || true
+        if [ -r "${PM_RUNTIME_HELPER}" ]; then
+            dlog "PM runtime helper auto-deployed successfully."
+            # shellcheck disable=SC1091
+            . "${PM_RUNTIME_HELPER}"
+        fi
+    fi
+fi
+# If PM runtime is STILL not loaded after auto-deploy attempt, use inline stubs.
+if ! command -v znh_pm_ensure_detected >/dev/null 2>&1; then
+    dlog "WARNING: PM runtime helper still missing after auto-deploy attempt; using inline cross-distro fallback"
     znh_pm_detect_system_package_manager() {
         local id id_like; id=""; id_like=""
         if [ -r /etc/os-release ]; then . /etc/os-release; id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"; id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"; fi
@@ -54867,9 +54959,25 @@ if [ -r "${PM_RUNTIME_HELPER}" ]; then
     # shellcheck disable=SC1091
     . "${PM_RUNTIME_HELPER}"
 else
-    log "WARNING: shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER} — using inline cross-distro fallback"
-    say "⚠  PM runtime helper not found; using built-in cross-distro fallback."
-    say "   For full functionality run: sudo zypper-auto-helper install"
+    # Auto-deploy: try to (re-)create the PM runtime via zypper-auto-helper.
+    log "PM runtime helper missing (${PM_RUNTIME_HELPER}); attempting auto-deploy..."
+    say "PM runtime helper not found; attempting auto-deploy..."
+    if [ -x /usr/local/bin/zypper-auto-helper ]; then
+        if pkexec /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1 \
+           || sudo /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1; then
+            if [ -r "${PM_RUNTIME_HELPER}" ]; then
+                log "PM runtime helper auto-deployed successfully."
+                say "✓ PM runtime helper installed."
+                # shellcheck disable=SC1091
+                . "${PM_RUNTIME_HELPER}"
+            fi
+        fi
+    fi
+fi
+# If PM runtime is STILL not loaded after auto-deploy attempt, use inline stubs.
+if ! command -v znh_pm_ensure_detected >/dev/null 2>&1; then
+    log "WARNING: PM runtime helper still missing after auto-deploy attempt — using inline cross-distro fallback"
+    say "⚠  PM runtime helper not available; using built-in cross-distro fallback."
 
     # --- Inline cross-distro fallback (minimal stubs) ---
     znh_pm_detect_system_package_manager() {
@@ -61491,12 +61599,21 @@ class Handler(BaseHTTPRequestHandler):
                         reboot_quick_action_supported = True
                 elif distro_family in ("ubuntu", "mint"):
                     apply_command = "sudo do-release-upgrade"
+                    reboot_command = "sudo systemctl reboot"
+                    reboot_quick_action_supported = True
                 elif distro_family == "debian":
                     manual_url = "https://www.debian.org/releases/stable/releasenotes"
+                    apply_command = "sudo apt full-upgrade"
+                    reboot_command = "sudo systemctl reboot"
+                    reboot_quick_action_supported = True
                 elif distro_family == "leap":
                     manual_url = "https://en.opensuse.org/SDB:System_upgrade"
+                    reboot_command = "sudo systemctl reboot"
+                    reboot_quick_action_supported = True
                 elif distro_family == "rhel":
                     manual_url = "https://access.redhat.com/articles/4263361"
+                    reboot_command = "sudo systemctl reboot"
+                    reboot_quick_action_supported = True
 
             actionable = bool(
                 release_model == "fixed"
