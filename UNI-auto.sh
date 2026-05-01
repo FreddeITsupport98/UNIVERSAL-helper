@@ -622,6 +622,7 @@ znh_distro_upgrade_send_notification() {
                 if [ "${has_action}" -eq 1 ] 2>/dev/null; then
                     # Run in background so actions are handled without blocking.
                     (
+                        # shellcheck disable=SC2030  # intentional: export scoped to this background subshell
                         export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus"
                         sudo -u "${target_user}" \
                             DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS}" \
@@ -726,7 +727,7 @@ znh_distro_upgrade_run_apply() {
                 printf 'System upgrade packages for Fedora %s are already downloaded and staged.\n' "${target}"
                 printf 'Skipping re-download.\n\n'
                 znh_distro_upgrade_state_write_file "downloaded" "${target}" \
-                    "Fedora ${current} -> ${target} downloaded; ready to reboot" || true
+                    "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${target} downloaded; ready to reboot" || true
                 printf 'To apply the upgrade and reboot, run:\n'
                 printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
                 return 0
@@ -755,7 +756,7 @@ znh_distro_upgrade_run_apply() {
             if "${dnf_bin}" system-upgrade download --refresh --releasever="${target}" -y; then
                 printf '\nDownload complete. All steps finished successfully.\n'
                 znh_distro_upgrade_state_write_file "downloaded" "${target}" \
-                    "Fedora ${current} -> ${target} downloaded; ready to reboot" || true
+                    "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${target} downloaded; ready to reboot" || true
                 printf 'To apply the upgrade and reboot, run:\n'
                 printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
                 return 0
@@ -35506,7 +35507,9 @@ open_folder_in_desktop_session() {
         xauth="$(__znh_env_from_dump XAUTHORITY)";         xauth="${xauth:-${XAUTHORITY:-}}"
         desktop="$(__znh_env_from_dump XDG_CURRENT_DESKTOP)"; desktop="${desktop:-${XDG_CURRENT_DESKTOP:-}}"
         session_name="$(__znh_env_from_dump DESKTOP_SESSION)"; session_name="${session_name:-${DESKTOP_SESSION:-}}"
-        dbus="$(__znh_env_from_dump DBUS_SESSION_BUS_ADDRESS)"; dbus="${dbus:-${bus:-${DBUS_SESSION_BUS_ADDRESS:-}}}"
+        dbus="$(__znh_env_from_dump DBUS_SESSION_BUS_ADDRESS)"
+        # shellcheck disable=SC2031  # intentional: reads outer/env scope, not the subshell at line 625
+        dbus="${dbus:-${bus:-${DBUS_SESSION_BUS_ADDRESS:-}}}"
 
         # Heuristics: when invoked from a pure root/sudo context, DISPLAY/WAYLAND_DISPLAY
         # might be missing even though a desktop session is active.
