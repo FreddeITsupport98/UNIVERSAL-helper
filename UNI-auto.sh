@@ -729,7 +729,11 @@ znh_distro_upgrade_run_apply() {
                 znh_distro_upgrade_state_write_file "downloaded" "${target}" \
                     "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${target} downloaded; ready to reboot" || true
                 printf 'To apply the upgrade and reboot, run:\n'
-                printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
+                if [ "${dnf_bin}" = "dnf5" ]; then
+                    printf '  sudo dnf5 offline reboot\n'
+                else
+                    printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
+                fi
                 return 0
             fi
 
@@ -758,7 +762,11 @@ znh_distro_upgrade_run_apply() {
                 znh_distro_upgrade_state_write_file "downloaded" "${target}" \
                     "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${target} downloaded; ready to reboot" || true
                 printf 'To apply the upgrade and reboot, run:\n'
-                printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
+                if [ "${dnf_bin}" = "dnf5" ]; then
+                    printf '  sudo dnf5 offline reboot\n'
+                else
+                    printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
+                fi
                 return 0
             fi
             return 1
@@ -869,26 +877,34 @@ znh_distro_upgrade_run_finish() {
             fi
 
             # Try multiple paths because dnf5 versions differ:
-            #   - dnf5 system-upgrade reboot  (dnf5-plugin-system-upgrade)
-            #   - dnf5 offline reboot         (built-in on newer dnf5)
+            #   - dnf5 offline reboot         (built-in on newer dnf5; PREFERRED)
+            #   - dnf5 system-upgrade reboot  (dnf5-plugin-system-upgrade; legacy)
             #   - dnf  system-upgrade reboot  (classic dnf4 plugin)
+            # On modern Fedora with dnf5, `dnf5 offline reboot` is the
+            # canonical command to enter the offline upgrade environment.
+            # `system-upgrade reboot` may return 0 without actually staging
+            # the offline transaction on some dnf5 versions, causing a plain
+            # reboot instead of the upgrade reboot. So we try `offline reboot`
+            # FIRST when dnf5 is detected.
             # If the dnf command claims success but doesn't actually
             # reboot (race / missing plugin), fall back to systemctl.
             local reboot_ok=0
 
-            printf 'Running: %s system-upgrade reboot\n' "${dnf_bin}"
-            if "${dnf_bin}" system-upgrade reboot 2>&1; then
-                reboot_ok=1
-            else
-                printf 'system-upgrade reboot failed (rc=%s); trying offline reboot…\n' "$?"
-            fi
-
-            if [ "${reboot_ok}" -ne 1 ] 2>/dev/null && [ "${dnf_bin}" = "dnf5" ]; then
+            if [ "${dnf_bin}" = "dnf5" ]; then
                 printf 'Running: dnf5 offline reboot\n'
                 if dnf5 offline reboot 2>&1; then
                     reboot_ok=1
                 else
-                    printf 'dnf5 offline reboot failed (rc=%s)\n' "$?"
+                    printf 'dnf5 offline reboot failed (rc=%s); trying system-upgrade reboot…\n' "$?"
+                fi
+            fi
+
+            if [ "${reboot_ok}" -ne 1 ] 2>/dev/null; then
+                printf 'Running: %s system-upgrade reboot\n' "${dnf_bin}"
+                if "${dnf_bin}" system-upgrade reboot 2>&1; then
+                    reboot_ok=1
+                else
+                    printf 'system-upgrade reboot failed (rc=%s)\n' "$?"
                 fi
             fi
 
@@ -31255,12 +31271,13 @@ generate_dashboard() {
                         if (!r || !r.job_id) throw new Error('missing job_id');
                         toast('Distro upgrade running…', 'Tracking via quick-action job ' + r.job_id, 'ok');
                         try {
-                            _ruDistroUpgradeTrackJob(String(r.job_id), {
+                        _ruDistroUpgradeTrackJob(String(r.job_id), {
                                 distroName: distroName,
                                 current: current,
                                 target: target,
                                 family: family,
-                                apply_command: apply_command
+                                apply_command: apply_command,
+                                reboot_command: (state && state.reboot_command) || ''
                             });
                         } catch (eTrack) {
                             try { _suShow(false); } catch (e1) {}
@@ -31280,11 +31297,11 @@ generate_dashboard() {
     // { command, supports_quick_action, label } where supports_quick_action
     // is true only for families where the WebUI can drive the reboot via the
     // distro-upgrade-reboot quick action (Fedora/Nobara today).
-    function _ruDistroUpgradeFinishingCommand(family) {
+    function _ruDistroUpgradeFinishingCommand(family, rebootCmdOverride) {
         var fam = String(family || '').toLowerCase();
         if (fam === 'fedora' || fam === 'nobara') {
             return {
-                command: 'sudo dnf system-upgrade reboot',
+                command: (rebootCmdOverride || 'sudo dnf5 offline reboot'),
                 supports_quick_action: true,
                 label: 'Reboot now to finish upgrade'
             };
@@ -31364,7 +31381,7 @@ generate_dashboard() {
         var target = String(ctx.target || '?');
         var family = String(ctx.family || '').toLowerCase();
         function _esc3(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
-        var fin = _ruDistroUpgradeFinishingCommand(family);
+        var fin = _ruDistroUpgradeFinishingCommand(family, (ctx && ctx.reboot_command) || '');
         var safeLog = _esc3(logText || '(no output)');
 
         var headerBlock;
@@ -50072,7 +50089,7 @@ znh_downloader_distro_upgrade_prefetch() {
 
     # Check if packages are already downloaded and staged.
     if znh_fedora_upgrade_already_staged "${dnf_bin}" "${target}"; then
-        znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} already staged (run: sudo ${dnf_bin} system-upgrade reboot)"
+        znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} already staged (run: sudo ${dnf_bin} $( [ "${dnf_bin}" = "dnf5" ] && printf 'offline reboot' || printf 'system-upgrade reboot'))"
         dlog "Distro-upgrade prefetch: packages already staged for Fedora ${version_id} -> ${target}; skipping re-download"
         # Ensure state file reflects downloaded status.
         local state_file_du="/var/lib/zypper-auto/distro-upgrade.json"
@@ -50108,8 +50125,8 @@ znh_downloader_distro_upgrade_prefetch() {
     du_rc=$?
     set -e
     if [ "${du_rc}" -eq 0 ]; then
-        znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} prefetch ready (run: sudo ${dnf_bin} system-upgrade reboot)"
-        dlog "Distro-upgrade prefetch complete (Fedora ${version_id} -> ${target}); reboot via: sudo ${dnf_bin} system-upgrade reboot"
+        znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} prefetch ready (run: sudo ${dnf_bin} $( [ "${dnf_bin}" = "dnf5" ] && printf 'offline reboot' || printf 'system-upgrade reboot'))"
+        dlog "Distro-upgrade prefetch complete (Fedora ${version_id} -> ${target}); reboot via: sudo ${dnf_bin} $( [ "${dnf_bin}" = "dnf5" ] && printf 'offline reboot' || printf 'system-upgrade reboot')"
     else
         # Log the distro-upgrade failure as an event for diagnostics, but do
         # NOT overwrite download-status.txt when the primary prefetch already
@@ -59595,8 +59612,8 @@ def _quick_action_table() -> dict:
             "timeout_s": 90 * 60,
             "needs_confirm": True,
             "phrase": "DISTROUPGRADE",
-            "explain": "Stages the next major version of your distribution (Fedora: runs `dnf system-upgrade download --refresh --releasever=N` so you can `sudo dnf system-upgrade reboot` when ready; Ubuntu/Mint short-circuits because do-release-upgrade is interactive; Debian/openSUSE Leap/RHEL print the manual upstream guide). Rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/...) are intentionally skipped; this card never shows up there.",
-            "warning": "Major-version upgrades are slow and disruptive. Only run when you have a recent backup. The apply itself does NOT reboot; you must run the family-specific finishing command afterwards (e.g. `sudo dnf system-upgrade reboot` on Fedora).",
+            "explain": "Stages the next major version of your distribution (Fedora: runs `dnf system-upgrade download --refresh --releasever=N` so you can `sudo dnf5 offline reboot` or `sudo dnf system-upgrade reboot` when ready; Ubuntu/Mint short-circuits because do-release-upgrade is interactive; Debian/openSUSE Leap/RHEL print the manual upstream guide). Rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/...) are intentionally skipped; this card never shows up there.",
+            "warning": "Major-version upgrades are slow and disruptive. Only run when you have a recent backup. The apply itself does NOT reboot; you must run the family-specific finishing command afterwards (e.g. `sudo dnf5 offline reboot` on Fedora with dnf5, or `sudo dnf system-upgrade reboot` on dnf4).",
         },
         # Distro upgrade FINISH path (Fedora today): runs the family-specific
         # finishing command after the apply path successfully staged the
@@ -59611,7 +59628,7 @@ def _quick_action_table() -> dict:
             "timeout_s": 5 * 60,
             "needs_confirm": True,
             "phrase": "REBOOTUPGRADE",
-            "explain": "Runs the family-specific finishing command after the staged distro-upgrade download is complete. On Fedora/Nobara this calls `dnf system-upgrade reboot`, which immediately reboots the machine into the offline upgrade environment so the upgrade can be applied. Other families either reboot themselves (Ubuntu/Mint via do-release-upgrade) or print manual guidance (Debian/Leap/RHEL).",
+            "explain": "Runs the family-specific finishing command after the staged distro-upgrade download is complete. On Fedora/Nobara this calls `dnf5 offline reboot` (preferred) or `dnf system-upgrade reboot` (legacy), which immediately reboots the machine into the offline upgrade environment so the upgrade can be applied. Other families either reboot themselves (Ubuntu/Mint via do-release-upgrade) or print manual guidance (Debian/Leap/RHEL).",
             "warning": "This action WILL reboot the machine. Save your work first. The reboot kicks off the offline upgrade install which can take a while.",
         },
     }
@@ -61595,7 +61612,11 @@ class Handler(BaseHTTPRequestHandler):
                         apply_command = "sudo zypper-auto-helper --distro-upgrade apply --yes"
                         apply_supported = True
                         apply_quick_action = "distro-upgrade"
-                        reboot_command = "sudo dnf system-upgrade reboot"
+                        # dnf5 uses `offline reboot`; legacy dnf4 uses `system-upgrade reboot`
+                        if shutil.which("dnf5"):
+                            reboot_command = "sudo dnf5 offline reboot"
+                        else:
+                            reboot_command = "sudo dnf system-upgrade reboot"
                         reboot_quick_action_supported = True
                 elif distro_family in ("ubuntu", "mint"):
                     apply_command = "sudo do-release-upgrade"
