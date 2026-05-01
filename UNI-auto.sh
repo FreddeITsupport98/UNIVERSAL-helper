@@ -333,7 +333,8 @@ znh_distro_upgrade_state_write_file() {
         printf '  "target_version": "%s",\n'   "$(__znh_distro_upgrade_json_escape "${target}")"
         printf '  "reason": "%s",\n'           "$(__znh_distro_upgrade_json_escape "${reason}")"
         printf '  "checked_at": "%s",\n'       "$(__znh_distro_upgrade_json_escape "${now}")"
-        printf '  "package_manager": "%s"\n'   "$(__znh_distro_upgrade_json_escape "${pm}")"
+        printf '  "package_manager": "%s",\n'  "$(__znh_distro_upgrade_json_escape "${pm}")"
+        printf '  "release_notes_url": "%s"\n'  "$(__znh_distro_upgrade_json_escape "$(znh_distro_upgrade_release_notes_url "${family}" "${target}" "${current}" 2>/dev/null || echo "")")"
         printf '}\n'
     } > "${tmp}" 2>/dev/null || { rm -f "${tmp}" 2>/dev/null || true; return 1; }
     mv -f "${tmp}" "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null || { rm -f "${tmp}" 2>/dev/null || true; return 1; }
@@ -515,13 +516,59 @@ znh_distro_upgrade_check() {
     return 0
 }
 
+znh_distro_upgrade_release_notes_url() {
+    # Returns the release-notes / changelog URL for the distro family + target.
+    # Used by the desktop notification, WebUI card, and API response.
+    local family="${1:-${ZNH_DISTRO_UPGRADE_FAMILY:-unknown}}"
+    local target="${2:-${ZNH_DISTRO_UPGRADE_TARGET:-}}"
+    local current="${3:-${ZNH_DISTRO_UPGRADE_CURRENT:-}}"
+    case "${family}" in
+        fedora)
+            if [ -n "${target}" ]; then
+                printf '%s' "https://docs.fedoraproject.org/en-US/releases/f${target}/"
+            else
+                printf '%s' "https://docs.fedoraproject.org/en-US/releases/"
+            fi
+            ;;
+        ubuntu)
+            if [ -n "${target}" ]; then
+                printf '%s' "https://wiki.ubuntu.com/${target}/ReleaseNotes"
+            else
+                printf '%s' "https://wiki.ubuntu.com/Releases"
+            fi
+            ;;
+        mint)
+            printf '%s' "https://blog.linuxmint.com/"
+            ;;
+        debian)
+            printf '%s' "https://www.debian.org/releases/stable/releasenotes"
+            ;;
+        leap)
+            printf '%s' "https://doc.opensuse.org/release-notes/"
+            ;;
+        rhel)
+            printf '%s' "https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/"
+            ;;
+        *)
+            printf '%s' ""
+            ;;
+    esac
+}
+
 znh_distro_upgrade_send_notification() {
     # Args: title body urgency
-    # Best-effort desktop + journald notification. Never fatal.
+    # Best-effort desktop + journald notification with action buttons.
+    # On fixed-cycle distros, the notification includes "Open Dashboard" and
+    # "View Changelog" buttons when the notification daemon supports actions.
+    # Rolling distros never reach here (caller gates on ZNH_DISTRO_UPGRADE_AVAILABLE).
     local title body urgency target_user user_uid
     title="${1:-Distro upgrade ready to install}"
     body="${2:-A new release is available for your distribution.}"
     urgency="${3:-normal}"
+
+    local release_url helper_bin
+    release_url="$(znh_distro_upgrade_release_notes_url 2>/dev/null || echo "")"
+    helper_bin="/usr/local/bin/zypper-auto-helper"
 
     if command -v notify-send >/dev/null 2>&1; then
         target_user="${SUDO_USER:-${USER:-}}"
@@ -529,19 +576,74 @@ znh_distro_upgrade_send_notification() {
             target_user="$(id -un 2>/dev/null || echo "")"
         fi
 
+        # Check if notify-send supports --action (libnotify 0.8+).
+        # When supported, add interactive buttons; the response is handled
+        # in the background so the caller never blocks.
+        local has_action=0
+        if notify-send --help 2>&1 | grep -q -- '--action' 2>/dev/null; then
+            has_action=1
+        fi
+
+        # Build the notify-send command as an array so quoting is safe.
+        local -a ns_cmd=(notify-send -u "${urgency}" -t 30000 -i "system-software-update")
+        if [ "${has_action}" -eq 1 ] 2>/dev/null; then
+            ns_cmd+=(--action="dashboard=Open Dashboard")
+            if [ -n "${release_url}" ]; then
+                ns_cmd+=(--action="changelog=View Changelog")
+            fi
+        fi
+        ns_cmd+=("${title}" "${body}")
+
+        # Wrapper that runs notify-send and reacts to button clicks.
+        __znh_run_notify_actions() {
+            local action user_home
+            user_home="$(eval echo ~"${1}" 2>/dev/null || echo "")"
+            action="$("${ns_cmd[@]}" 2>/dev/null || echo "")"
+            case "${action}" in
+                dashboard)
+                    # Open the WebUI dashboard.
+                    if [ -x "${helper_bin}" ]; then
+                        "${helper_bin}" --dash-open >/dev/null 2>&1 || true
+                    elif command -v xdg-open >/dev/null 2>&1; then
+                        xdg-open "http://127.0.0.1:8765/status.html?live=1" >/dev/null 2>&1 || true
+                    fi
+                    ;;
+                changelog)
+                    if [ -n "${release_url}" ] && command -v xdg-open >/dev/null 2>&1; then
+                        xdg-open "${release_url}" >/dev/null 2>&1 || true
+                    fi
+                    ;;
+            esac
+        }
+
         if [ -n "${target_user}" ] && [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null; then
             user_uid="$(id -u "${target_user}" 2>/dev/null || echo "")"
             if [ -n "${user_uid}" ]; then
-                sudo -u "${target_user}" \
-                    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
-                    notify-send -u "${urgency}" -t 20000 \
-                        -i "system-software-update" \
-                        "${title}" "${body}" 2>/dev/null || true
+                if [ "${has_action}" -eq 1 ] 2>/dev/null; then
+                    # Run in background so actions are handled without blocking.
+                    (
+                        export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus"
+                        sudo -u "${target_user}" \
+                            DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS}" \
+                            bash -c "$(declare -f __znh_run_notify_actions); $(declare -p ns_cmd helper_bin release_url); __znh_run_notify_actions '${target_user}'" \
+                            >/dev/null 2>&1 || true
+                    ) &
+                else
+                    sudo -u "${target_user}" \
+                        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${user_uid}/bus" \
+                        notify-send -u "${urgency}" -t 20000 \
+                            -i "system-software-update" \
+                            "${title}" "${body}" 2>/dev/null || true
+                fi
             fi
         else
-            notify-send -u "${urgency}" -t 20000 \
-                -i "system-software-update" \
-                "${title}" "${body}" 2>/dev/null || true
+            if [ "${has_action}" -eq 1 ] 2>/dev/null; then
+                ( __znh_run_notify_actions "${USER:-}" ) &
+            else
+                notify-send -u "${urgency}" -t 20000 \
+                    -i "system-software-update" \
+                    "${title}" "${body}" 2>/dev/null || true
+            fi
         fi
     fi
 
@@ -630,11 +732,28 @@ znh_distro_upgrade_run_apply() {
                 return 0
             fi
 
+            # --- Step 1: Fully update all current packages before distro upgrade ---
+            # Ensures the system is on the latest package set within the current
+            # release before jumping to the next one. This avoids dependency
+            # mismatches and is recommended by Fedora's upgrade guide.
+            printf '\n=== Step 1/3: Updating all packages on current release ===\n'
+            printf 'Running: %s upgrade --refresh -y\n' "${dnf_bin}"
+            if ! "${dnf_bin}" upgrade --refresh -y; then
+                printf 'Warning: some package updates failed (rc=%s). Continuing with distro upgrade.\n' "$?"
+            else
+                printf 'All packages updated to latest on current release.\n'
+            fi
+
+            # --- Step 2: Install the system-upgrade plugin ---
+            printf '\n=== Step 2/3: Ensuring system-upgrade plugin is installed ===\n'
             printf 'Running: %s install -y %s-plugin-system-upgrade\n' "${dnf_bin}" "${dnf_bin}"
             "${dnf_bin}" install -y "${dnf_bin}-plugin-system-upgrade" 2>/dev/null || true
+
+            # --- Step 3: Download the full distro upgrade ---
+            printf '\n=== Step 3/3: Downloading distro upgrade packages ===\n'
             printf 'Running: %s system-upgrade download --refresh --releasever=%s -y\n' "${dnf_bin}" "${target}"
             if "${dnf_bin}" system-upgrade download --refresh --releasever="${target}" -y; then
-                printf '\nDownload complete.\n'
+                printf '\nDownload complete. All steps finished successfully.\n'
                 znh_distro_upgrade_state_write_file "downloaded" "${target}" \
                     "Fedora ${current} -> ${target} downloaded; ready to reboot" || true
                 printf 'To apply the upgrade and reboot, run:\n'
@@ -644,12 +763,28 @@ znh_distro_upgrade_run_apply() {
             return 1
             ;;
         ubuntu|mint)
-            if command -v do-release-upgrade >/dev/null 2>&1; then
-                do-release-upgrade
-                return $?
+            if ! command -v do-release-upgrade >/dev/null 2>&1; then
+                printf '%s\n' "do-release-upgrade is not installed. Install 'update-manager-core' first." >&2
+                return 1
             fi
-            printf '%s\n' "do-release-upgrade is not installed. Install 'update-manager-core' first." >&2
-            return 1
+
+            # --- Step 1: Fully update all current packages before release upgrade ---
+            # Keeps the system on the latest package set within the current
+            # release; required by do-release-upgrade for a clean jump.
+            printf '\n=== Step 1/2: Updating all packages on current release ===\n'
+            printf 'Running: apt-get update\n'
+            env DEBIAN_FRONTEND=noninteractive apt-get update -y 2>&1 || true
+            printf 'Running: apt-get full-upgrade -y\n'
+            if ! env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y; then
+                printf 'Warning: some package updates failed (rc=%s). Continuing with release upgrade.\n' "$?"
+            else
+                printf 'All packages updated to latest on current release.\n'
+            fi
+
+            # --- Step 2: Run the release upgrade ---
+            printf '\n=== Step 2/2: Running release upgrade ===\n'
+            do-release-upgrade
+            return $?
             ;;
         debian)
             printf '%s\n' "Debian distro upgrades require manual review."
@@ -13790,6 +13925,7 @@ generate_dashboard() {
           <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
             <button class="pill" type="button" id="znh-distro-upgrade-open-btn" title="Open the distro upgrade flow inside the Rocket Update Manager">Open in Rocket</button>
             <button class="pill" type="button" id="znh-distro-upgrade-copy-btn" style="border-color: rgba(255,255,255,0.14);" title="Copy the apply command to the clipboard">Copy command</button>
+            <button class="pill" type="button" id="znh-distro-upgrade-changelog-btn" style="border-color: rgba(255,255,255,0.14); display:none;" title="View release notes / changelog for the new version">Changelog</button>
             <button class="pill" type="button" id="znh-distro-upgrade-refresh-btn" style="border-color: rgba(255,255,255,0.14);" title="Re-run the distro-upgrade detection probe">Re-check</button>
             <button class="pill" type="button" id="znh-distro-upgrade-dismiss-btn" style="border-color: rgba(255,255,255,0.14);">Dismiss</button>
           </div>
@@ -29463,6 +29599,20 @@ generate_dashboard() {
             if (copyBtn) copyBtn.title = state.apply_command || 'No automated command for this family';
         } catch (e0) {}
 
+        // Show/hide the Changelog button based on whether a release notes URL is available.
+        try {
+            var changelogBtn = document.getElementById('znh-distro-upgrade-changelog-btn');
+            if (changelogBtn) {
+                var notesUrl = String(state.release_notes_url || '').trim();
+                if (notesUrl) {
+                    changelogBtn.style.display = '';
+                    changelogBtn.title = 'View release notes: ' + notesUrl;
+                } else {
+                    changelogBtn.style.display = 'none';
+                }
+            }
+        } catch (e1) {}
+
         card.style.display = '';
     }
 
@@ -29533,6 +29683,23 @@ generate_dashboard() {
             setTimeout(function() {
                 try { znhDistroUpgradeFetch({ refresh: false }); } catch (e1) {}
             }, 4500);
+        });
+
+        var changelogBtn = document.getElementById('znh-distro-upgrade-changelog-btn');
+        if (changelogBtn) changelogBtn.addEventListener('click', function(ev) {
+            var url = '';
+            try { url = String((_znhDistroUpgradeState && _znhDistroUpgradeState.release_notes_url) || '').trim(); } catch (e0) { url = ''; }
+            if (!url) {
+                toast('No release notes URL', 'Release notes are not available for this distro family.', 'err');
+                return;
+            }
+            try { addRipple(changelogBtn, ev.clientX, ev.clientY); } catch (e1) {}
+            try {
+                window.open(url, '_blank', 'noopener,noreferrer');
+                toast('Opening release notes', url, 'ok');
+            } catch (e2) {
+                toast('Cannot open URL', url, 'err');
+            }
         });
 
         if (dismissBtn) dismissBtn.addEventListener('click', function() {
@@ -49826,6 +49993,15 @@ znh_downloader_distro_upgrade_prefetch() {
     # Best-effort: install the system-upgrade plugin (idempotent).
     "${dnf_bin}" install -y "${dnf_bin}-plugin-system-upgrade" >/dev/null 2>&1 || true
 
+    # Save the current download status BEFORE attempting the distro-upgrade so
+    # a failure here does not overwrite a successful regular-prefetch status.
+    # The distro-upgrade is an optional secondary step; the dashboard should
+    # keep showing the primary prefetch result when this step fails.
+    local saved_dl_status=""
+    if [ -f "${STATUS_FILE}" ]; then
+        saved_dl_status="$(cat "${STATUS_FILE}" 2>/dev/null || echo "")"
+    fi
+
     znh_downloader_write_status "downloading:0:unknown:0:0" "distro-upgrade prefetch (${dnf_bin} system-upgrade download --releasever=${target})"
     dlog "Distro-upgrade prefetch: ${dnf_bin} system-upgrade download --refresh --releasever=${target} -y"
 
@@ -49840,10 +50016,47 @@ znh_downloader_distro_upgrade_prefetch() {
         znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} prefetch ready (run: sudo ${dnf_bin} system-upgrade reboot)"
         dlog "Distro-upgrade prefetch complete (Fedora ${version_id} -> ${target}); reboot via: sudo ${dnf_bin} system-upgrade reboot"
     else
-        # Use the shared classifier so read-only sandbox failures (e.g. missing
-        # /usr/lib/sysimage/libdnf5/offline in ReadWritePaths) and benign empty
-        # transactions are not falsely surfaced as solver/conflict errors.
-        znh_downloader_classify_download_failure "distro-upgrade prefetch (Fedora ${version_id:-?} -> ${target})" "${du_rc}" "${du_err}" || true
+        # Log the distro-upgrade failure as an event for diagnostics, but do
+        # NOT overwrite download-status.txt when the primary prefetch already
+        # succeeded. The distro-upgrade is a secondary optional step; clobbering
+        # a good "complete" status with "error:solver:1" causes a false alarm
+        # on the dashboard's DOWNLOADER STATUS card.
+        local du_stage_label="distro-upgrade prefetch (Fedora ${version_id:-?} -> ${target})"
+        local du_error_kind="none"
+        # Classify the failure for the event log without writing to status file.
+        if znh_pm_is_benign_no_updates_output_file "${du_err}"; then
+            du_error_kind="benign"
+            dlog "${du_stage_label} treated as benign no-op (rc=${du_rc}, pm=${SYSTEM_PKG_MANAGER})"
+        elif znh_pm_is_readonly_fs_output_file "${du_err}"; then
+            du_error_kind="readonly_fs"
+            derr "${du_stage_label} blocked by read-only filesystem (pm=${SYSTEM_PKG_MANAGER}, rc=${du_rc})"
+        elif znh_pm_is_network_output_file "${du_err}"; then
+            du_error_kind="network"
+            derr "${du_stage_label} failed due to network (pm=${SYSTEM_PKG_MANAGER}, rc=${du_rc})"
+        elif [ -n "${du_err}" ] && [ -f "${du_err}" ] \
+            && grep -qiE 'conflict|conflicts|conflicting requests|nothing provides|has inferior architecture|unresolvable|problem with installed package|solver problem|cannot install both|requires.*but it cannot be installed' "${du_err}" 2>/dev/null; then
+            du_error_kind="solver"
+            derr "${du_stage_label} solver/conflict failure (pm=${SYSTEM_PKG_MANAGER}, rc=${du_rc})"
+        else
+            du_error_kind="repo"
+            derr "${du_stage_label} returned rc=${du_rc} without recognised error class (pm=${SYSTEM_PKG_MANAGER})"
+        fi
+        # Emit a structured event so diagnostics/AI reports still see the failure.
+        znh_downloader_emit_event "error" "error" "error:distro-upgrade:${du_rc}" \
+            "${du_stage_label} solver/conflict failure (rc=${du_rc})" \
+            "distro-upgrade:${du_rc}" "${du_error_kind}"
+
+        # Restore the previous download status so the dashboard keeps showing
+        # the successful primary prefetch result instead of the distro-upgrade error.
+        if [ -n "${saved_dl_status}" ]; then
+            write_status "${saved_dl_status}"
+            dlog "Distro-upgrade prefetch failed (rc=${du_rc}); restored previous download status: ${saved_dl_status}"
+        else
+            dlog "Distro-upgrade prefetch failed (rc=${du_rc}); no previous status to restore"
+        fi
+        if [ -n "${du_err}" ] && [ -f "${du_err}" ]; then
+            cat "${du_err}" >&2 || true
+        fi
     fi
     rm -f "${du_err}"
     return 0
@@ -61171,6 +61384,7 @@ class Handler(BaseHTTPRequestHandler):
                 "reboot_command": reboot_command,
                 "reboot_quick_action_supported": bool(reboot_quick_action_supported),
                 "reboot_quick_action_key": "distro-upgrade-reboot" if reboot_quick_action_supported else "",
+                "release_notes_url": str(state.get("release_notes_url", "") or "").strip(),
             }
             return _json_response(self, 200, payload, origin)
         if path == "/api/system/conflict-guidance":
@@ -61318,6 +61532,7 @@ class Handler(BaseHTTPRequestHandler):
                 "reboot_command": reboot_command,
                 "reboot_quick_action_supported": bool(reboot_quick_action_supported),
                 "reboot_quick_action_key": "distro-upgrade-reboot" if reboot_quick_action_supported else "",
+                "release_notes_url": str(state.get("release_notes_url", "") or "").strip(),
             }
             return _json_response(self, 200, payload, origin)
         if path == "/api/snapper/timers":
