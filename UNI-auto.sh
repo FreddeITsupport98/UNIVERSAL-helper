@@ -13206,6 +13206,42 @@ generate_dashboard() {
     }
     .znh-task-bubble.hidden { display: none; }
 
+    /* Distro-upgrade floating bubble (auto-check on dashboard open;
+       visible when a fixed-cycle distro upgrade is available). */
+    .znh-upgrade-bubble {
+        position: fixed;
+        left: 18px;
+        bottom: 18px;
+        z-index: 15000;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.88);
+        color: #fff;
+        border: 1px solid rgba(96,165,250,0.35);
+        box-shadow: 0 18px 40px rgba(0,0,0,0.35);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        cursor: pointer;
+        user-select: none;
+        max-width: min(440px, calc(100vw - 36px));
+        transition: transform 180ms ease, border-color 240ms ease;
+    }
+    .znh-upgrade-bubble:hover { transform: translateY(-2px); border-color: rgba(96,165,250,0.65); }
+    .znh-upgrade-bubble.hidden { display: none; }
+    .znh-upgrade-bubble .znh-upg-icon { font-size: 1.3rem; flex-shrink: 0; }
+    .znh-upgrade-bubble .znh-upg-title { font-weight: 950; font-size: 0.88rem; line-height: 1.3; }
+    .znh-upgrade-bubble .znh-upg-sub { font-weight: 800; font-size: 0.78rem; opacity: 0.82; line-height: 1.3; }
+    @keyframes znhUpgGlow {
+        0%   { box-shadow: 0 18px 40px rgba(0,0,0,0.35), 0 0 0 0 rgba(96,165,250,0.0); }
+        100% { box-shadow: 0 18px 40px rgba(0,0,0,0.35), 0 0 0 7px rgba(96,165,250,0.18); }
+    }
+    .znh-upgrade-bubble.glow {
+        animation: znhUpgGlow 1100ms ease-in-out infinite alternate;
+    }
+
     /* Notification center (small bell icon + glow when new notifications exist) */
     .znh-notify-btn {
         position: fixed;
@@ -14633,6 +14669,15 @@ generate_dashboard() {
     <div class="znh-task-text">
       <div class="znh-task-title" id="znh-task-title">Update</div>
       <div class="znh-task-sub" id="znh-task-sub">Running…</div>
+    </div>
+  </div>
+
+  <!-- Distro-upgrade floating bubble (auto-checks on dashboard open; click opens Rocket wizard) -->
+  <div id="znh-upgrade-bubble" class="znh-upgrade-bubble hidden" role="button" tabindex="0" aria-label="Distro upgrade available">
+    <div class="znh-upg-icon" aria-hidden="true">🚀</div>
+    <div>
+      <div class="znh-upg-title" id="znh-upgrade-bubble-title">Distro upgrade available</div>
+      <div class="znh-upg-sub" id="znh-upgrade-bubble-sub">Checking…</div>
     </div>
   </div>
 
@@ -32892,30 +32937,107 @@ generate_dashboard() {
         try {
             if (typeof _wireDistroUpgradeBannerUI === 'function') _wireDistroUpgradeBannerUI();
         } catch (eDU0) {}
+
+        // ---- Distro-upgrade floating bubble (auto-check on open) ----
+        // On dashboard open, probe for available upgrades with refresh=1 so the
+        // bash helper re-checks the package manager. If an upgrade is available,
+        // show a floating bubble (bottom-left) that opens the Rocket wizard on click.
+        // This runs once; subsequent refreshes come from visibilitychange / data-update.
+        function _znhUpgradeBubbleRender(state) {
+            var bubble = document.getElementById('znh-upgrade-bubble');
+            if (!bubble) return;
+            var d = state || _znhDistroUpgradeState || {};
+            var releaseModel = String(d.release_model || '').toLowerCase();
+            var status = String(d.status || '').toLowerCase();
+            var actionable = releaseModel === 'fixed' && (status === 'available' || status === 'downloaded');
+
+            if (!actionable) {
+                bubble.classList.add('hidden');
+                bubble.classList.remove('glow');
+                return;
+            }
+
+            var distroName = String(d.distro_name || d.distro_id || 'Linux');
+            var current = String(d.current_version || '?');
+            var target = String(d.target_version || '?');
+            var titleEl = document.getElementById('znh-upgrade-bubble-title');
+            var subEl = document.getElementById('znh-upgrade-bubble-sub');
+
+            if (titleEl) {
+                if (status === 'downloaded') {
+                    titleEl.textContent = distroName + ' ' + target + ' ready to reboot';
+                } else {
+                    titleEl.textContent = distroName + ' ' + current + ' → ' + target;
+                }
+            }
+            if (subEl) subEl.textContent = 'Click to open upgrade wizard';
+
+            bubble.classList.remove('hidden');
+            bubble.classList.add('glow');
+        }
+
+        // Wire bubble click → open Rocket distro-upgrade wizard.
         try {
-            if (typeof znhDistroUpgradeFetch === 'function') znhDistroUpgradeFetch({ refresh: false });
+            var upgBubble = document.getElementById('znh-upgrade-bubble');
+            if (upgBubble) {
+                upgBubble.addEventListener('click', function(ev) {
+                    try { addRipple(upgBubble, ev.clientX, ev.clientY); } catch (eR) {}
+                    try {
+                        if (typeof rocketUpdateWizardOpen === 'function') {
+                            rocketUpdateWizardOpen({ distro_upgrade: true, distro_state: _znhDistroUpgradeState });
+                        } else {
+                            toast('Update wizard not ready', 'Reload dashboard after reinstall', 'err');
+                        }
+                    } catch (eW) {
+                        toast('Rocket action failed', (eW && eW.message) || 'failed', 'err');
+                    }
+                });
+                // Also allow keyboard activation (Enter/Space).
+                upgBubble.addEventListener('keydown', function(ev) {
+                    if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault();
+                        upgBubble.click();
+                    }
+                });
+            }
+        } catch (eBW) {}
+
+        // Initial fetch with refresh=1 so the bash probe runs and the bubble
+        // reflects the latest state right when the dashboard opens.
+        try {
+            if (typeof znhDistroUpgradeFetch === 'function') {
+                znhDistroUpgradeFetch({ refresh: true }).then(function(r) {
+                    try { _znhUpgradeBubbleRender(r); } catch (eUB0) {}
+                }).catch(function() {});
+            }
         } catch (eDU1) {}
 
         // Refresh distro-upgrade state when the user comes back to the tab so
-        // the banner reflects external CLI runs (e.g. zypper-auto-helper
+        // the banner + bubble reflect external CLI runs (e.g. zypper-auto-helper
         // --check-distro-upgrade) without a hard reload.
         try {
             document.addEventListener('visibilitychange', function() {
                 try {
                     if (document.visibilityState === 'visible' && typeof znhDistroUpgradeFetch === 'function') {
-                        znhDistroUpgradeFetch({ refresh: false });
+                        znhDistroUpgradeFetch({ refresh: false }).then(function(r) {
+                            try { _znhUpgradeBubbleRender(r); } catch (eUB1) {}
+                        }).catch(function() {});
                     }
                 } catch (eDU2) {}
             });
         } catch (eDU3) {}
 
         // Also re-render when the dashboard fires its standard data-update event
-        // (status-data.json polling cycle), so the banner picks up freshly
+        // (status-data.json polling cycle), so the banner + bubble pick up freshly
         // probed JSON without a manual refresh button click.
         try {
             window.addEventListener('znh-data-updated', function() {
                 try {
-                    if (typeof znhDistroUpgradeFetch === 'function') znhDistroUpgradeFetch({ refresh: false });
+                    if (typeof znhDistroUpgradeFetch === 'function') {
+                        znhDistroUpgradeFetch({ refresh: false }).then(function(r) {
+                            try { _znhUpgradeBubbleRender(r); } catch (eUB2) {}
+                        }).catch(function() {});
+                    }
                 } catch (eDU4) {}
             });
         } catch (eDU5) {}
