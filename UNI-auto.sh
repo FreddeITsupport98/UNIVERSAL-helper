@@ -19878,6 +19878,19 @@ generate_dashboard() {
         // Keep bubble visible while running.
         _znhTaskBubbleSetText(title, sub);
         _znhTaskBubbleSetVisible(true);
+
+        // Persist last-known progress into localStorage so reopening the
+        // dashboard after a browser close shows the cached state immediately
+        // (before the first API poll completes).
+        try {
+            var t = _znhTaskLoad();
+            if (t && t.type === taskType) {
+                t.last_stage = st;
+                t.last_progress = pct;
+                t.last_update_ts = Date.now();
+                _znhTaskSave(t);
+            }
+        } catch (eP) {}
     }
 
     function znhTaskDone(taskType, ok) {
@@ -19928,16 +19941,64 @@ generate_dashboard() {
             } catch (eS0) {}
         }
 
+        // Quick-action and scrub-ghost share the main overlay but need their
+        // running view re-rendered when the user clicks the bubble after
+        // minimizing (or after the tab was backgrounded).
+        if (t.type === 'quick-action') {
+            try {
+                if (typeof _qaRenderRunning === 'function' && (_qa && _qa.running)) {
+                    _qaRenderRunning(t);
+                }
+            } catch (eQA0) {}
+        } else if (t.type === 'scrub-ghost') {
+            try {
+                if (typeof _sgRenderRunning === 'function' && (_sg && _sg.running)) {
+                    _sgRenderRunning(t);
+                }
+            } catch (eSG0) {}
+        }
+
         try { _suShow(true); } catch (e) {}
     }
 
+    // Max age (ms) for a persisted task before we assume it is stale.
+    // Server-side jobs can take a long time (distro upgrades, large dup), so
+    // use a generous 6 hour window.  If a task is older than this and no
+    // last_update_ts within the window exists, we discard it.
+    var ZNH_TASK_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
     function znhTaskResumeInit() {
-        // If the user reloaded the page while an update job is running, resume polling.
+        // If the user reloaded / reopened the page while a background job is
+        // still running (or recently finished), resume polling so the WebUI
+        // continues from where the user left off.
         var t = _znhTaskLoad();
         if (!t) return;
 
-        // Show bubble immediately.
+        // Stale task guard: if the task has been sitting for too long without
+        // any progress update, it almost certainly finished or crashed while
+        // the browser was closed.  Discard it so the user doesn't see a
+        // zombie bubble.
+        try {
+            var refTs = parseInt(t.last_update_ts || 0, 10) || 0;
+            if (!refTs && t.started_iso) {
+                refTs = new Date(t.started_iso).getTime() || 0;
+            }
+            if (refTs && (Date.now() - refTs) > ZNH_TASK_MAX_AGE_MS) {
+                _znhTaskClear();
+                return;
+            }
+        } catch (eStale) {}
+
+        // Show bubble immediately with cached progress (avoids "0%" flash).
         znhTaskSet(t);
+        if (t.last_stage || t.last_progress) {
+            try {
+                _znhTaskBubbleSetText(
+                    document.getElementById('znh-task-title') ? document.getElementById('znh-task-title').textContent : 'Task',
+                    (t.last_stage || 'Resuming') + (t.last_progress > 0 ? ' \u2022 ' + String(t.last_progress) + '%' : '')
+                );
+            } catch (eC) {}
+        }
 
         // Resume hidden polling (so bubble stays accurate) without forcing the overlay open.
         try { _suReset(); } catch (e0) {}
@@ -20002,6 +20063,61 @@ generate_dashboard() {
                 znhTaskOpenOverlayFromBubble();
             }
         });
+    })();
+
+    // --- Task persistence: save checkpoint on browser close / hide so
+    //     reopening the dashboard restores last-known progress instantly.
+    (function() {
+        function _znhTaskCheckpoint() {
+            // Persist current in-memory progress snapshot into localStorage.
+            // Called on beforeunload/pagehide so the next page open sees the
+            // last-known values instead of 0%.
+            try {
+                var t = _znhTaskLoad();
+                if (!t) return;
+                t.last_update_ts = Date.now();
+                _znhTaskSave(t);
+            } catch (e) {}
+        }
+        try { window.addEventListener('beforeunload', _znhTaskCheckpoint); } catch (e0) {}
+        try { window.addEventListener('pagehide', _znhTaskCheckpoint); } catch (e1) {}
+    })();
+
+    // --- Task persistence: resume / refresh when tab becomes visible again.
+    //     This handles the scenario where the user switches away from the
+    //     dashboard tab for a while and then comes back.
+    (function() {
+        var _znhTaskVisResumePending = false;
+        function _znhTaskOnVisible() {
+            if (_znhTaskVisResumePending) return;
+            _znhTaskVisResumePending = true;
+            // Small delay so other visibilitychange handlers (live poll,
+            // perf, etc.) fire first.
+            setTimeout(function() {
+                _znhTaskVisResumePending = false;
+                try {
+                    var t = _znhTaskLoad();
+                    if (!t) {
+                        // Task cleared (job finished while tab was hidden).
+                        _znhTaskBubbleSetVisible(false);
+                        return;
+                    }
+                    // Re-show bubble with cached progress.
+                    znhTaskSet(t);
+                    if (t.last_stage || t.last_progress) {
+                        _znhTaskBubbleSetText(
+                            document.getElementById('znh-task-title') ? document.getElementById('znh-task-title').textContent : 'Task',
+                            (t.last_stage || 'Resuming') + (t.last_progress > 0 ? ' \u2022 ' + String(t.last_progress) + '%' : '')
+                        );
+                    }
+                } catch (eVis) {}
+            }, 350);
+        }
+        try {
+            document.addEventListener('visibilitychange', function() {
+                if (!document.hidden) _znhTaskOnVisible();
+            });
+        } catch (e0) {}
     })();
 
     // --- Settings drawer (localhost API) ---
