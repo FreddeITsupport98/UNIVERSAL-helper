@@ -341,6 +341,33 @@ znh_distro_upgrade_state_write_file() {
     return 0
 }
 
+znh_fedora_upgrade_already_staged() {
+    # Returns 0 if a system-upgrade offline transaction is already staged
+    # (i.e. packages have been downloaded and are ready for reboot).
+    # Args: dnf_bin target_version
+    # Checks dnf5 offline status first, then falls back to filesystem probes
+    # at the common offline transaction directories.
+    local dnf_bin="${1:-dnf}" target="${2:-}"
+
+    # Method 1: dnf5 offline status (most reliable on modern Fedora).
+    if [ "${dnf_bin}" = "dnf5" ]; then
+        if "${dnf_bin}" offline status 2>/dev/null | grep -qi "system-upgrade"; then
+            return 0
+        fi
+    fi
+
+    # Method 2: check known offline transaction directories populated by
+    # dnf system-upgrade download (dnf5 and dnf4 use different paths).
+    local d
+    for d in /usr/lib/sysimage/libdnf5/offline /var/lib/dnf/system-upgrade; do
+        if [ -d "${d}" ] && [ -n "$(ls -A "${d}" 2>/dev/null)" ]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 znh_distro_upgrade_check_fedora() {
     # Fedora has a ~6 month cycle; the canonical "newer release exists" test
     # is whether a higher releasever resolves the fedora-release package.
@@ -592,11 +619,25 @@ znh_distro_upgrade_run_apply() {
             else
                 dnf_bin="dnf"
             fi
+            # Check if packages are already downloaded and staged.
+            if znh_fedora_upgrade_already_staged "${dnf_bin}" "${target}"; then
+                printf 'System upgrade packages for Fedora %s are already downloaded and staged.\n' "${target}"
+                printf 'Skipping re-download.\n\n'
+                znh_distro_upgrade_state_write_file "downloaded" "${target}" \
+                    "Fedora ${current} -> ${target} downloaded; ready to reboot" || true
+                printf 'To apply the upgrade and reboot, run:\n'
+                printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
+                return 0
+            fi
+
             printf 'Running: %s install -y %s-plugin-system-upgrade\n' "${dnf_bin}" "${dnf_bin}"
             "${dnf_bin}" install -y "${dnf_bin}-plugin-system-upgrade" 2>/dev/null || true
             printf 'Running: %s system-upgrade download --refresh --releasever=%s -y\n' "${dnf_bin}" "${target}"
             if "${dnf_bin}" system-upgrade download --refresh --releasever="${target}" -y; then
-                printf '\nDownload complete. To apply the upgrade and reboot, run:\n'
+                printf '\nDownload complete.\n'
+                znh_distro_upgrade_state_write_file "downloaded" "${target}" \
+                    "Fedora ${current} -> ${target} downloaded; ready to reboot" || true
+                printf 'To apply the upgrade and reboot, run:\n'
                 printf '  sudo %s system-upgrade reboot\n' "${dnf_bin}"
                 return 0
             fi
@@ -3233,6 +3274,64 @@ __znh_is_truthy() {
     esac
 }
 
+# Decode an exit code into a human-readable reason string.
+# Common POSIX/bash meanings: 126=permission denied, 127=command not found,
+# 128+N=killed by signal N (e.g. 137=SIGKILL, 139=SIGSEGV, 143=SIGTERM).
+__znh_exit_code_reason() {
+    local rc="${1:-0}"
+    case "${rc}" in
+        0)   echo "success" ;;
+        1)   echo "general error" ;;
+        2)   echo "misuse of shell builtin / invalid argument" ;;
+        126) echo "PERMISSION DENIED (command found but not executable)" ;;
+        127) echo "COMMAND NOT FOUND (binary missing from PATH)" ;;
+        130) echo "terminated by SIGINT (Ctrl-C)" ;;
+        137) echo "killed by SIGKILL (OOM-killer or forced kill)" ;;
+        139) echo "segmentation fault (SIGSEGV)" ;;
+        141) echo "broken pipe (SIGPIPE)" ;;
+        143) echo "terminated by SIGTERM" ;;
+        *)
+            if [ "${rc}" -gt 128 ] 2>/dev/null; then
+                local sig_num=$((rc - 128))
+                local sig_name
+                sig_name=$(kill -l "${sig_num}" 2>/dev/null || echo "SIG${sig_num}")
+                echo "killed by signal ${sig_num} (${sig_name})"
+            else
+                echo "non-zero exit"
+            fi
+            ;;
+    esac
+}
+
+# Dump diagnostic environment context into a log file.
+# Used by execute_guarded and the Rocket worker on failures.
+__znh_dump_debug_env() {
+    local target_log="${1:-${LOG_FILE}}"
+    local cmd_bin="${2:-}"
+    {
+        echo "  [DEBUG_ENV] --- Diagnostic snapshot ($(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date 2>/dev/null || echo 'unknown')) ---"
+        echo "  [DEBUG_ENV] PATH=${PATH:-<unset>}"
+        echo "  [DEBUG_ENV] SHELL=${SHELL:-<unset>}"
+        echo "  [DEBUG_ENV] USER=${USER:-<unset>}  EUID=${EUID:-<unset>}  HOME=${HOME:-<unset>}"
+        echo "  [DEBUG_ENV] PWD=$(pwd 2>/dev/null || echo '<unknown>')"
+        echo "  [DEBUG_ENV] SYSTEM_PKG_MANAGER=${SYSTEM_PKG_MANAGER:-<unset>}"
+        if [ -n "${cmd_bin}" ]; then
+            local which_result type_result
+            which_result=$(command -v "${cmd_bin}" 2>/dev/null || echo "<not found>")
+            type_result=$(type "${cmd_bin}" 2>/dev/null || echo "<not found>")
+            echo "  [DEBUG_ENV] command -v '${cmd_bin}' => ${which_result}"
+            echo "  [DEBUG_ENV] type '${cmd_bin}' => ${type_result}"
+            if [ -f "${which_result}" ] 2>/dev/null; then
+                echo "  [DEBUG_ENV] ls -la '${which_result}' => $(ls -la "${which_result}" 2>/dev/null || echo '<failed>')"
+                echo "  [DEBUG_ENV] file '${which_result}' => $(file "${which_result}" 2>/dev/null || echo '<failed>')"
+            fi
+        fi
+        echo "  [DEBUG_ENV] id => $(id 2>/dev/null || echo '<failed>')"
+        echo "  [DEBUG_ENV] uname -a => $(uname -a 2>/dev/null || echo '<failed>')"
+        echo "  [DEBUG_ENV] --- End diagnostic snapshot ---"
+    } >>"${target_log}" 2>/dev/null || true
+}
+
 # Execute a command with full capturing.
 # Usage: execute_guarded "Description of task" command arg1 arg2 ...
 #
@@ -3240,18 +3339,22 @@ __znh_is_truthy() {
 # - Always captures stdout/stderr.
 # - On success: logs a SUCCESS line. Command output is only persisted when
 #   DEBUG_MODE=1 or ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT=1.
-# - On failure: dumps full captured output to stderr and the install log.
+# - On failure: dumps full captured output to stderr and the install log,
+#   including exit code interpretation (127=cmd not found, 126=permission
+#   denied, signal kills), PATH/environment diagnostics on rc=127, and
+#   timestamps for each failure event.
 execute_guarded() {
     local desc="$1"
     shift
 
-    local tmp_out cmd_str
+    local tmp_out tmp_err cmd_str fail_ts
     tmp_out="$(mktemp)"
+    tmp_err="$(mktemp)"
     cmd_str="$(_format_cmd "$@")"
 
     log_debug "EXEC: [${desc}] -> ${cmd_str}"
 
-    if "$@" >"$tmp_out" 2>&1; then
+    if "$@" >"$tmp_out" 2>"$tmp_err"; then
         log_success "${desc}"
 
         # Persist successful command output only when explicitly requested.
@@ -3262,24 +3365,57 @@ execute_guarded() {
                     sed 's/^/[CMD_OUT] /' "$tmp_out" >>"${TRACE_LOG}" 2>/dev/null || true
                 fi
             fi
+            if [ -s "$tmp_err" ] 2>/dev/null; then
+                sed 's/^/  [CMD_ERR] /' "$tmp_err" >>"${LOG_FILE}" 2>/dev/null || true
+            fi
         fi
 
-        rm -f "$tmp_out" 2>/dev/null || true
+        rm -f "$tmp_out" "$tmp_err" 2>/dev/null || true
         return 0
     else
         local rc=$?
-        log_error "FAILED: ${desc} (Exit Code: ${rc})"
-        log_error "Command was: ${cmd_str}"
-        log_error "⬇⬇⬇ COMMAND OUTPUT ⬇⬇⬇"
+        fail_ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date 2>/dev/null || echo 'unknown')"
+        local reason
+        reason="$(__znh_exit_code_reason "${rc}")"
 
-        # Prefix output lines so they're easy to grep in large install logs.
-        sed 's/^/  [CMD_OUT] /' "$tmp_out" | tee -a "${LOG_FILE}" >&2
+        log_error "╔══ EXECUTE_GUARDED FAILURE ══════════════════════════════════╗"
+        log_error "║ Task        : ${desc}"
+        log_error "║ Exit Code   : ${rc}  (${reason})"
+        log_error "║ Timestamp   : ${fail_ts}"
+        log_error "║ Command     : ${cmd_str}"
+        log_error "╚════════════════════════════════════════════════════════════╝"
+
+        # Merge stdout+stderr for the output dump (preserving interleave order).
+        # Also show stderr separately so errors stand out.
+        log_error "⬇⬇⬇ COMMAND STDOUT ⬇⬇⬇"
+        if [ -s "$tmp_out" ] 2>/dev/null; then
+            sed 's/^/  [CMD_OUT] /' "$tmp_out" | tee -a "${LOG_FILE}" >&2
+        else
+            echo "  [CMD_OUT] (no stdout output captured)" | tee -a "${LOG_FILE}" >&2
+        fi
+        log_error "⬆⬆⬆ END STDOUT ⬆⬆⬆"
+
+        log_error "⬇⬇⬇ COMMAND STDERR ⬇⬇⬇"
+        if [ -s "$tmp_err" ] 2>/dev/null; then
+            sed 's/^/  [CMD_ERR] /' "$tmp_err" | tee -a "${LOG_FILE}" >&2
+        else
+            echo "  [CMD_ERR] (no stderr output captured)" | tee -a "${LOG_FILE}" >&2
+        fi
+        log_error "⬆⬆⬆ END STDERR ⬆⬆⬆"
+
         if [ -n "${TRACE_LOG:-}" ]; then
             sed 's/^/[CMD_OUT] /' "$tmp_out" >>"${TRACE_LOG}" 2>/dev/null || true
+            sed 's/^/[CMD_ERR] /' "$tmp_err" >>"${TRACE_LOG}" 2>/dev/null || true
         fi
 
-        log_error "⬆⬆⬆ END COMMAND OUTPUT ⬆⬆⬆"
-        rm -f "$tmp_out" 2>/dev/null || true
+        # On rc=127 (command not found) or rc=126 (permission denied), dump
+        # environment diagnostics to help identify why the binary is missing.
+        if [ "${rc}" -eq 127 ] 2>/dev/null || [ "${rc}" -eq 126 ] 2>/dev/null; then
+            log_error "[DIAG] rc=${rc} triggers environment diagnostic dump:"
+            __znh_dump_debug_env "${LOG_FILE}" "$1"
+        fi
+
+        rm -f "$tmp_out" "$tmp_err" 2>/dev/null || true
         return $rc
     fi
 }
@@ -29164,7 +29300,8 @@ generate_dashboard() {
         var releaseModel = String(state.release_model || '').toLowerCase();
         var status = String(state.status || '').toLowerCase();
         var family = String(state.distro_family || '').toLowerCase();
-        var actionable = !!state.actionable && releaseModel === 'fixed' && status === 'available';
+        var actionable = !!state.actionable && releaseModel === 'fixed' && (status === 'available' || status === 'downloaded');
+        var rebootReady = !!state.reboot_ready && status === 'downloaded';
 
         // Hide on rolling/uptodate/manual/unknown distros AND when the user
         // dismissed the banner this session.
@@ -29190,7 +29327,13 @@ generate_dashboard() {
 
         var msgEl = document.getElementById('znh-distro-upgrade-text');
         var detailEl = document.getElementById('znh-distro-upgrade-detail');
-        if (msgEl) msgEl.textContent = distroName + ' ' + current + ' → ' + target + ' is ready to install.';
+        if (msgEl) {
+            if (rebootReady) {
+                msgEl.textContent = distroName + ' ' + current + ' → ' + target + ' downloaded — ready to reboot!';
+            } else {
+                msgEl.textContent = distroName + ' ' + current + ' → ' + target + ' is ready to install.';
+            }
+        }
         if (detailEl) {
             var detailParts = [familyLabel];
             if (pm) detailParts.push('Package manager: ' + pm);
@@ -48957,13 +49100,68 @@ DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
 # separate distro upgrade event.
 DOWNLOADER_INCLUDE_DISTRO_UPGRADE="${DOWNLOADER_INCLUDE_DISTRO_UPGRADE:-true}"
 PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
-if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
-    derr "Shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}"
-    write_status "error:repo"
-    exit 0
+if [ -r "${PM_RUNTIME_HELPER}" ]; then
+    # shellcheck disable=SC1091
+    . "${PM_RUNTIME_HELPER}"
+else
+    dlog "WARNING: PM runtime helper missing (${PM_RUNTIME_HELPER}); using inline cross-distro fallback"
+    znh_pm_detect_system_package_manager() {
+        local id id_like; id=""; id_like=""
+        if [ -r /etc/os-release ]; then . /etc/os-release; id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"; id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"; fi
+        case "${id}" in opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper";; ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt";; fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf";; arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman";; esac
+        if [ -z "${SYSTEM_PKG_MANAGER}" ]; then case "${id_like}" in *suse*) SYSTEM_PKG_MANAGER="zypper";; *debian*) SYSTEM_PKG_MANAGER="apt";; *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf";; *arch*) SYSTEM_PKG_MANAGER="pacman";; esac; fi
+        if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+            if command -v zypper >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="zypper"; elif command -v dnf >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="dnf"; elif command -v apt-get >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="apt"; elif command -v pacman >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="pacman"; fi
+        fi
+        [ -n "${SYSTEM_PKG_MANAGER}" ] || SYSTEM_PKG_MANAGER="zypper"
+    }
+    znh_pm_ensure_detected() { [ -n "${SYSTEM_PKG_MANAGER:-}" ] || znh_pm_detect_system_package_manager; }
+    znh_pm_downloader_refresh_run() {
+        znh_pm_ensure_detected
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)  /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh ;;
+            apt)     /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get update ;;
+            dnf)     /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y makecache --refresh ;;
+            pacman)  /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Sy ;;
+            *) return 1 ;;
+        esac
+    }
+    znh_pm_downloader_preview_run() {
+        local out_file="$1" err_file="$2" rc; znh_pm_ensure_detected
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)  /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "${out_file}" 2> "${err_file}"; return $? ;;
+            apt)     /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade > "${out_file}" 2> "${err_file}"; return $? ;;
+            dnf)     /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -q check-update > "${out_file}" 2> "${err_file}"; rc=$?; [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ] && return 0; return "${rc}" ;;
+            pacman)  /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Qu > "${out_file}" 2> "${err_file}"; rc=$?; [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ] && return 0; return "${rc}" ;;
+            *) return 1 ;;
+        esac
+    }
+    znh_pm_downloader_download_run() {
+        local err_file="$1" dup_extra_flags_raw="${2:-}"; local -a dup_extra_flags_arr=(); znh_pm_ensure_detected
+        [ -n "${dup_extra_flags_raw}" ] && dup_extra_flags_arr=( ${dup_extra_flags_raw} )
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)  /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only "${dup_extra_flags_arr[@]}" >/dev/null 2>"${err_file}" ;;
+            apt)     /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -y -d dist-upgrade >/dev/null 2>"${err_file}" ;;
+            dnf)     /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y upgrade --downloadonly >/dev/null 2>"${err_file}" ;;
+            pacman)  /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Syuw --noconfirm >/dev/null 2>"${err_file}" ;;
+            *) return 1 ;;
+        esac
+    }
+    znh_pm_lock_active_pid() { return 1; }
+    znh_pm_lock_is_active() { return 1; }
+    znh_pm_is_lock_failure() { return 1; }
+    znh_pm_is_lock_output_file() { return 1; }
+    znh_pm_is_network_output_file() { local f="${1:-}"; [ -n "${f}" ] && [ -f "${f}" ] || return 1; grep -qiE 'could not resolve host|temporary failure resolving|connection timed out|network is unreachable' "${f}" 2>/dev/null; }
+    znh_pm_is_readonly_fs_output_file() { local f="${1:-}"; [ -n "${f}" ] && [ -f "${f}" ] || return 1; grep -qiE 'read-only file system|EROFS' "${f}" 2>/dev/null; }
+    znh_pm_is_benign_no_updates_output_file() { local f="${1:-}"; [ -n "${f}" ] && [ -f "${f}" ] || return 1; [ ! -s "${f}" ] && return 0; grep -qiE 'nothing to do|all packages are up to date|0 upgraded, 0 newly installed' "${f}" 2>/dev/null; }
+    znh_pm_extract_package_count_from_preview() { echo 0; }
+    znh_pm_extract_download_size_from_preview() { echo unknown; }
+    znh_pm_extract_snapshot_from_preview() { echo ""; }
+    znh_pm_extract_preview_packages_from_preview() { echo ""; }
+    znh_pm_summarize_preview() { local f="$1"; [ -f "${f}" ] || return 1; printf 'PACKAGE_COUNT=0\nSNAPSHOT=\nPREVIEW=\n'; }
+    znh_pm_cleanup_stale_locks() { printf '0\n'; }
+    znh_pm_wait_for_lock_clear() { return 0; }
 fi
-# shellcheck disable=SC1091
-. "${PM_RUNTIME_HELPER}"
 znh_pm_ensure_detected
 SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
 
@@ -49491,6 +49689,21 @@ znh_downloader_distro_upgrade_prefetch() {
     fi
     if [ -n "${version_id}" ] && [ "${target}" = "${version_id}" ]; then
         dlog "Distro-upgrade prefetch: already at target=${target}; skipping"
+        return 0
+    fi
+
+    # Check if packages are already downloaded and staged.
+    if znh_fedora_upgrade_already_staged "${dnf_bin}" "${target}"; then
+        znh_downloader_write_status "complete:0:0" "distro-upgrade ${target} already staged (run: sudo ${dnf_bin} system-upgrade reboot)"
+        dlog "Distro-upgrade prefetch: packages already staged for Fedora ${version_id} -> ${target}; skipping re-download"
+        # Ensure state file reflects downloaded status.
+        local state_file_du="/var/lib/zypper-auto/distro-upgrade.json"
+        if [ -r "${state_file_du}" ]; then
+            local helper_bin_du="/usr/local/bin/zypper-auto-helper"
+            if [ -x "${helper_bin_du}" ]; then
+                "${helper_bin_du}" --check-distro-upgrade >/dev/null 2>&1 || true
+            fi
+        fi
         return 0
     fi
 
@@ -50027,13 +50240,23 @@ if [ -r "$CONFIG_FILE" ]; then
 fi
 SYSTEM_PKG_MANAGER=""
 PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
-if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
-    echo "ERROR: shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}" >&2
-    echo "Please re-run the installer: sudo zypper-auto-helper install" >&2
-    exit 1
+if [ -r "${PM_RUNTIME_HELPER}" ]; then
+    # shellcheck disable=SC1091
+    . "${PM_RUNTIME_HELPER}"
+else
+    echo "WARNING: PM runtime helper missing (${PM_RUNTIME_HELPER}); using inline cross-distro fallback." >&2
+    znh_pm_detect_system_package_manager() {
+        local id id_like; id=""; id_like=""
+        if [ -r /etc/os-release ]; then . /etc/os-release; id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"; id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"; fi
+        case "${id}" in opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper";; ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt";; fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf";; arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman";; esac
+        if [ -z "${SYSTEM_PKG_MANAGER}" ]; then case "${id_like}" in *suse*) SYSTEM_PKG_MANAGER="zypper";; *debian*) SYSTEM_PKG_MANAGER="apt";; *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf";; *arch*) SYSTEM_PKG_MANAGER="pacman";; esac; fi
+        if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+            if command -v zypper >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="zypper"; elif command -v dnf >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="dnf"; elif command -v apt-get >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="apt"; elif command -v pacman >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="pacman"; fi
+        fi
+        [ -n "${SYSTEM_PKG_MANAGER}" ] || SYSTEM_PKG_MANAGER="zypper"
+    }
+    znh_pm_ensure_detected() { [ -n "${SYSTEM_PKG_MANAGER:-}" ] || znh_pm_detect_system_package_manager; }
 fi
-# shellcheck disable=SC1091
-. "${PM_RUNTIME_HELPER}"
 znh_pm_ensure_detected
 SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
 
@@ -54308,14 +54531,144 @@ if [ -r "$CONFIG_FILE" ]; then
 fi
 SYSTEM_PKG_MANAGER=""
 PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
-if [ ! -r "${PM_RUNTIME_HELPER}" ]; then
-    log "ERROR: shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER}"
-    say "⚠️  Shared package-manager helper is missing (${PM_RUNTIME_HELPER})."
-    say "Please re-run the installer: sudo zypper-auto-helper install"
-    exit 1
+if [ -r "${PM_RUNTIME_HELPER}" ]; then
+    # shellcheck disable=SC1091
+    . "${PM_RUNTIME_HELPER}"
+else
+    log "WARNING: shared package-manager runtime helper missing: ${PM_RUNTIME_HELPER} — using inline cross-distro fallback"
+    say "⚠  PM runtime helper not found; using built-in cross-distro fallback."
+    say "   For full functionality run: sudo zypper-auto-helper install"
+
+    # --- Inline cross-distro fallback (minimal stubs) ---
+    znh_pm_detect_system_package_manager() {
+        local id id_like
+        id="" ; id_like=""
+        if [ -r /etc/os-release ]; then
+            # shellcheck disable=SC1091
+            . /etc/os-release
+            id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+            id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+        fi
+        case "${id}" in
+            opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+            ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+            fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+            arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+        esac
+        if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+            case "${id_like}" in
+                *suse*)   SYSTEM_PKG_MANAGER="zypper" ;;
+                *debian*) SYSTEM_PKG_MANAGER="apt" ;;
+                *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
+                *arch*)   SYSTEM_PKG_MANAGER="pacman" ;;
+            esac
+        fi
+        if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+            if command -v zypper >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="zypper"
+            elif command -v dnf >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="dnf"
+            elif command -v apt-get >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="apt"
+            elif command -v pacman >/dev/null 2>&1; then SYSTEM_PKG_MANAGER="pacman"
+            fi
+        fi
+        [ -n "${SYSTEM_PKG_MANAGER}" ] || SYSTEM_PKG_MANAGER="zypper"
+    }
+    znh_pm_ensure_detected() {
+        [ -n "${SYSTEM_PKG_MANAGER:-}" ] || znh_pm_detect_system_package_manager
+    }
+    znh_pm_lock_active_pid() {
+        znh_pm_ensure_detected
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)
+                local lf pid
+                for lf in /run/zypp.pid /var/run/zypp.pid; do
+                    [ -f "${lf}" ] || continue
+                    pid=$(cat "${lf}" 2>/dev/null || echo "")
+                    if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                        printf '%s\n' "${pid}"; return 0
+                    fi
+                done ;;
+            apt)
+                local ap; for ap in $(pgrep -f -x 'apt-get|apt|dpkg' 2>/dev/null || true); do
+                    if [[ "${ap:-}" =~ ^[0-9]+$ ]] && kill -0 "${ap}" 2>/dev/null; then
+                        printf '%s\n' "${ap}"; return 0
+                    fi
+                done ;;
+            dnf)
+                local dp; for dp in $(pgrep -f -x 'dnf|yum|rpm' 2>/dev/null || true); do
+                    if [[ "${dp:-}" =~ ^[0-9]+$ ]] && kill -0 "${dp}" 2>/dev/null; then
+                        printf '%s\n' "${dp}"; return 0
+                    fi
+                done ;;
+            pacman)
+                if [ -f /var/lib/pacman/db.lck ] && pgrep -x pacman >/dev/null 2>&1; then
+                    local pp; pp=$(pgrep -x pacman | head -n 1 || true)
+                    if [[ "${pp:-}" =~ ^[0-9]+$ ]] && kill -0 "${pp}" 2>/dev/null; then
+                        printf '%s\n' "${pp}"; return 0
+                    fi
+                fi ;;
+        esac
+        return 1
+    }
+    znh_pm_lock_is_active() {
+        local pid; pid="$(znh_pm_lock_active_pid 2>/dev/null || true)"
+        [ -n "${pid:-}" ]
+    }
+    znh_pm_wait_for_lock_clear() {
+        local timeout_seconds="${1:-0}" poll_seconds="${2:-2}" start now elapsed
+        [[ "${timeout_seconds:-}" =~ ^[0-9]+$ ]] || timeout_seconds=0
+        [[ "${poll_seconds:-}"     =~ ^[0-9]+$ ]] || poll_seconds=2
+        [ "${poll_seconds}" -lt 1 ] 2>/dev/null && poll_seconds=1
+        if [ "${timeout_seconds}" -le 0 ] 2>/dev/null; then
+            znh_pm_lock_is_active && return 1; return 0
+        fi
+        start="$(date +%s 2>/dev/null || echo 0)"
+        while znh_pm_lock_is_active; do
+            now="$(date +%s 2>/dev/null || echo 0)"; elapsed=0
+            [[ "${start:-}" =~ ^[0-9]+$ ]] && [[ "${now:-}" =~ ^[0-9]+$ ]] && elapsed=$((now - start))
+            [ "${elapsed}" -ge "${timeout_seconds}" ] 2>/dev/null && return 1
+            sleep "${poll_seconds}"
+        done; return 0
+    }
+    znh_pm_is_lock_output_file() {
+        local f="${1:-}"; [ -n "${f}" ] && [ -f "${f}" ] || return 1
+        znh_pm_ensure_detected
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper) grep -qiE 'system management is locked|locked by the application with pid' "${f}" 2>/dev/null ;;
+            apt)    grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock' "${f}" 2>/dev/null ;;
+            dnf)    grep -qiE 'failed to obtain the transaction lock|another app is currently holding the dnf lock' "${f}" 2>/dev/null ;;
+            pacman) grep -qiE 'unable to lock database|failed to init transaction' "${f}" 2>/dev/null ;;
+            *) return 1 ;;
+        esac
+    }
+    znh_pm_install_upgrade_streaming() {
+        local log_file="$1" out_file="$2"
+        znh_pm_ensure_detected
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)  pkexec zypper dup 2>&1 | tee -a "${log_file}" | tee "${out_file}"; return "${PIPESTATUS[0]}" ;;
+            apt)     pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${log_file}" | tee "${out_file}"; return "${PIPESTATUS[0]}" ;;
+            dnf)     pkexec dnf -y upgrade 2>&1 | tee -a "${log_file}" | tee "${out_file}"; return "${PIPESTATUS[0]}" ;;
+            pacman)  pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${log_file}" | tee "${out_file}"; return "${PIPESTATUS[0]}" ;;
+            *) echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${log_file}" | tee "${out_file}"; return 1 ;;
+        esac
+    }
+    znh_pm_capture_package_snapshot() {
+        local out_file="$1"
+        znh_pm_ensure_detected
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper|dnf) rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}" ;;
+            apt)     dpkg-query -W -f='\${binary:Package}=\${Version}\n' 2>/dev/null | sort > "${out_file}" ;;
+            pacman)  pacman -Q 2>/dev/null | sort > "${out_file}" ;;
+            *)       : > "${out_file}" ;;
+        esac
+    }
+    znh_pm_is_lock_failure() {
+        local exit_code="${1:-0}" out_file="${2:-}"
+        znh_pm_ensure_detected
+        [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${exit_code}" -eq 7 ] 2>/dev/null && return 0
+        znh_pm_is_lock_output_file "${out_file}"
+    }
+    znh_pm_cleanup_stale_locks() { printf '0\n'; }
 fi
-# shellcheck disable=SC1091
-. "${PM_RUNTIME_HELPER}"
 znh_pm_ensure_detected
 SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
 log "Detected package manager: ${SYSTEM_PKG_MANAGER}"
@@ -60648,14 +61001,19 @@ class Handler(BaseHTTPRequestHandler):
             # distros so the dashboard banner never shows up on Tumbleweed /
             # Slowroll / Arch / Manjaro / EndeavourOS / Garuda / etc., even
             # if the JSON file is stale.
-            actionable = bool(release_model == "fixed" and status == "available")
+            actionable = bool(release_model == "fixed" and status in ("available", "downloaded"))
+            reboot_ready = bool(release_model == "fixed" and status == "downloaded")
 
             apply_command = ""
             manual_url = ""
             quick_action_supported = False
+            reboot_command = ""
+            reboot_quick_action_supported = False
             if family in ("fedora",):
                 apply_command = "sudo zypper-auto-helper --distro-upgrade apply --yes"
                 quick_action_supported = True
+                reboot_command = "sudo dnf system-upgrade reboot"
+                reboot_quick_action_supported = True
             elif family in ("ubuntu", "mint"):
                 apply_command = "sudo do-release-upgrade"
                 # do-release-upgrade is interactive; the WebUI cannot drive it.
@@ -60689,10 +61047,14 @@ class Handler(BaseHTTPRequestHandler):
                 "checked_at": checked_at,
                 "package_manager": package_manager,
                 "actionable": bool(actionable),
+                "reboot_ready": bool(reboot_ready),
                 "apply_command": apply_command,
                 "manual_url": manual_url,
                 "quick_action_supported": bool(quick_action_supported),
                 "quick_action_key": "distro-upgrade" if quick_action_supported else "",
+                "reboot_command": reboot_command,
+                "reboot_quick_action_supported": bool(reboot_quick_action_supported),
+                "reboot_quick_action_key": "distro-upgrade-reboot" if reboot_quick_action_supported else "",
             }
             return _json_response(self, 200, payload, origin)
         if path == "/api/system/conflict-guidance":
@@ -60782,12 +61144,18 @@ class Handler(BaseHTTPRequestHandler):
             apply_supported = False
             apply_quick_action = ""
 
-            if release_model == "fixed" and status in ("available", "manual"):
+            reboot_ready = bool(release_model == "fixed" and status == "downloaded")
+            reboot_command = ""
+            reboot_quick_action_supported = False
+
+            if release_model == "fixed" and status in ("available", "manual", "downloaded"):
                 if distro_family == "fedora":
-                    if status == "available" and target_version:
+                    if status in ("available", "downloaded") and target_version:
                         apply_command = "sudo zypper-auto-helper --distro-upgrade apply --yes"
                         apply_supported = True
                         apply_quick_action = "distro-upgrade"
+                        reboot_command = "sudo dnf system-upgrade reboot"
+                        reboot_quick_action_supported = True
                 elif distro_family in ("ubuntu", "mint"):
                     apply_command = "sudo do-release-upgrade"
                 elif distro_family == "debian":
@@ -60799,13 +61167,13 @@ class Handler(BaseHTTPRequestHandler):
 
             actionable = bool(
                 release_model == "fixed"
-                and status == "available"
+                and status in ("available", "downloaded")
                 and current_version
                 and target_version
             )
             visible_for_webui = bool(
                 release_model == "fixed"
-                and status in ("available", "manual")
+                and status in ("available", "downloaded", "manual")
             )
 
             payload = {
@@ -60825,11 +61193,15 @@ class Handler(BaseHTTPRequestHandler):
                 "checked_at": checked_at,
                 "package_manager": package_manager,
                 "actionable": bool(actionable),
+                "reboot_ready": bool(reboot_ready),
                 "visible_for_webui": bool(visible_for_webui),
                 "apply_command": apply_command,
                 "apply_supported": bool(apply_supported),
                 "apply_quick_action": apply_quick_action,
                 "manual_url": manual_url,
+                "reboot_command": reboot_command,
+                "reboot_quick_action_supported": bool(reboot_quick_action_supported),
+                "reboot_quick_action_key": "distro-upgrade-reboot" if reboot_quick_action_supported else "",
             }
             return _json_response(self, 200, payload, origin)
         if path == "/api/snapper/timers":
@@ -64391,6 +64763,58 @@ class Handler(BaseHTTPRequestHandler):
                     f'SIMULATE={"1" if simulate else "0"}',
                     f'PM_NAME={shlex.quote(pm_name)}',
                     'STARTED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"',
+                    '',
+                    '# --- Debug preamble: dump environment so failures are never silent ---',
+                    'echo "[webui] === Rocket Update Worker started at ${STARTED_AT} ===" >>"$LOG" || true',
+                    'echo "[webui] PID=$$ PPID=$PPID" >>"$LOG" || true',
+                    'echo "[webui] PM_NAME=${PM_NAME} SIMULATE=${SIMULATE}" >>"$LOG" || true',
+                    'echo "[webui] PATH=${PATH}" >>"$LOG" || true',
+                    'echo "[webui] USER=$(id -un 2>/dev/null || echo unknown) EUID=$(id -u 2>/dev/null || echo unknown)" >>"$LOG" || true',
+                    'echo "[webui] uname=$(uname -a 2>/dev/null || echo unknown)" >>"$LOG" || true',
+                    '',
+                    '# --- Exit code decoder for human-readable failure reasons ---',
+                    '__znh_rc_reason() {',
+                    '  local c="$1"',
+                    '  case "${c}" in',
+                    '    0) echo "success" ;; 1) echo "general error" ;; 2) echo "shell misuse" ;;',
+                    '    126) echo "PERMISSION DENIED (command found but not executable)" ;;',
+                    '    127) echo "COMMAND NOT FOUND (binary missing from PATH)" ;;',
+                    '    130) echo "SIGINT" ;; 137) echo "SIGKILL (OOM-killer?)" ;;',
+                    '    139) echo "SIGSEGV" ;; 143) echo "SIGTERM" ;;',
+                    '    *) if [ "${c}" -gt 128 ] 2>/dev/null; then',
+                    '         local sn=$((c - 128)); echo "signal ${sn} ($(kill -l ${sn} 2>/dev/null || echo SIG${sn}))"',
+                    '       else echo "non-zero exit"; fi ;;',
+                    '  esac',
+                    '}',
+                    '',
+                    '# --- Dump diagnostic env on critical failures ---',
+                    '__znh_dump_worker_diag() {',
+                    '  local fail_rc="$1" fail_cmd="${2:-unknown}"',
+                    '  {',
+                    '    echo "[webui] === DIAGNOSTIC DUMP (rc=${fail_rc}: $(__znh_rc_reason ${fail_rc})) ==="',
+                    '    echo "[webui] Failed command: ${fail_cmd}"',
+                    '    echo "[webui] PATH=${PATH}"',
+                    '    echo "[webui] PM_NAME=${PM_NAME}"',
+                    '    local pm_bin=""',
+                    '    case "${PM_NAME}" in',
+                    '      zypper) pm_bin="zypper" ;; dnf) pm_bin="dnf" ;; apt) pm_bin="apt-get" ;; pacman) pm_bin="pacman" ;;',
+                    '    esac',
+                    '    if [ -n "${pm_bin}" ]; then',
+                    '      echo "[webui] command -v ${pm_bin}: $(command -v ${pm_bin} 2>/dev/null || echo NOT FOUND)"',
+                    '      echo "[webui] type ${pm_bin}: $(type ${pm_bin} 2>&1 || echo NOT FOUND)"',
+                    '      local wh=$(command -v ${pm_bin} 2>/dev/null || true)',
+                    '      if [ -n "${wh}" ] && [ -f "${wh}" ]; then',
+                    '        echo "[webui] ls -la ${wh}: $(ls -la ${wh} 2>/dev/null || echo failed)"',
+                    '        echo "[webui] file ${wh}: $(file ${wh} 2>/dev/null || echo failed)"',
+                    '      fi',
+                    '    fi',
+                    '    echo "[webui] id: $(id 2>/dev/null || echo unknown)"',
+                    '    echo "[webui] /etc/os-release ID: $(grep ^ID= /etc/os-release 2>/dev/null | head -1 || echo unknown)"',
+                    '    echo "[webui] df /: $(df -h / 2>/dev/null | tail -1 || echo unknown)"',
+                    '    echo "[webui] === END DIAGNOSTIC DUMP ==="',
+                    '  } >>"$LOG" 2>/dev/null || true',
+                    '}',
+                    '',
                     'write_status() {',
                     '  local done="$1"; local rc="$2"; local stage="$3"',
                     '  local tmp="${STATUS}.tmp.$$"',
@@ -64482,6 +64906,24 @@ class Handler(BaseHTTPRequestHandler):
                     'echo "" >>"$LOG"',
                     'echo "[webui] stage: running-package-manager" >>"$LOG" || true',
                     'write_status 0 0 running-package-manager',
+
+                    # Pre-flight: verify the PM binary exists in PATH before running it.
+                    # This catches rc=127 "command not found" BEFORE the tee pipeline,
+                    # ensuring the failure reason is always written to $LOG (fixes the
+                    # "(no output)" issue in the WebUI Install log tail).
+                    f'PM_BIN_CHECK={shlex.quote(cmd_argv[0] if cmd_argv else pm_name)}',
+                    'if ! command -v "${PM_BIN_CHECK}" >/dev/null 2>&1; then',
+                    '  echo "" >>"$LOG"',
+                    '  echo "[webui] ╔══ FATAL: PACKAGE MANAGER BINARY NOT FOUND ══════════════════╗" >>"$LOG"',
+                    '  echo "[webui] ║ Binary: ${PM_BIN_CHECK}" >>"$LOG"',
+                    '  echo "[webui] ║ PM_NAME: ${PM_NAME}" >>"$LOG"',
+                    '  echo "[webui] ║ This is why the update failed with rc=127 (command not found)." >>"$LOG"',
+                    '  echo "[webui] ╚════════════════════════════════════════════════════════════╝" >>"$LOG"',
+                    '  __znh_dump_worker_diag 127 "${PM_BIN_CHECK}"',
+                    '  write_status 1 127 failed',
+                    '  exit 127',
+                    'fi',
+                    'echo "[webui] Pre-flight: ${PM_BIN_CHECK} found at $(command -v ${PM_BIN_CHECK} 2>/dev/null)" >>"$LOG" || true',
 
                     # Run package-manager update command and stream output live into $LOG.
                     # We also keep a temporary copy so we can detect "Nothing to do." reliably.

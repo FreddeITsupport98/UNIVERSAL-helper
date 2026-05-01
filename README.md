@@ -14,6 +14,7 @@ This repository provides a robust `systemd` architecture and CLI that:
 - Ships a WebUI onboarding flow: first open shows a welcome guide, and version upgrades show a thank-you + release-notes screen.
 - Keeps advanced WebUI panels (`Snapper Manager` + `Recent Activity Log`) hidden by default behind a master `Enable Dev Mode / Logs` toggle while `Service Health` stays visible.
 
+- **Cross-distro resilience:** all generated helper scripts (zypper-run-install, zypper-with-ps, downloader) include inline fallback PM detection so they work on Fedora/Ubuntu/Arch/Debian even when the shared runtime helper is missing.
 If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
 
 -----
