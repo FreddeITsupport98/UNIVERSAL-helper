@@ -351,8 +351,11 @@ znh_fedora_upgrade_already_staged() {
     local dnf_bin="${1:-dnf}" target="${2:-}"
 
     # Method 1: dnf5 offline status (most reliable on modern Fedora).
+    # Force LC_ALL=C so the output is always English regardless of the
+    # user's locale (e.g. Swedish "systemuppgradering" would not match
+    # the English grep pattern).
     if [ "${dnf_bin}" = "dnf5" ]; then
-        if "${dnf_bin}" offline status 2>/dev/null | grep -qi "system-upgrade"; then
+        if LC_ALL=C "${dnf_bin}" offline status 2>/dev/null | grep -qi "system-upgrade"; then
             return 0
         fi
     fi
@@ -402,6 +405,27 @@ znh_distro_upgrade_check_fedora() {
         ZNH_DISTRO_UPGRADE_TARGET="${target}"
         return 0
     fi
+
+    # Fallback: repoquery didn't find a newer release, but packages may
+    # already be staged from a previous download (e.g. the user rebooted
+    # normally instead of via `dnf5 offline reboot`, so the upgrade was
+    # never applied). Detect this and recover the target version from the
+    # existing state file so the WebUI still shows the upgrade card.
+    if znh_fedora_upgrade_already_staged "${dnf_bin}" ""; then
+        local staged_target=""
+        if [ -f "${ZNH_DISTRO_UPGRADE_STATE_FILE}" ]; then
+            staged_target="$(sed -n 's/.*"target_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null | head -n 1)"
+        fi
+        # If no target in state file, try to infer next version
+        if [ -z "${staged_target}" ]; then
+            staged_target=$((current + 1))
+        fi
+        ZNH_DISTRO_UPGRADE_AVAILABLE=1
+        ZNH_DISTRO_UPGRADE_TARGET="${staged_target}"
+        return 0
+    fi
+
     ZNH_DISTRO_UPGRADE_AVAILABLE=0
     ZNH_DISTRO_UPGRADE_TARGET=""
     return 1
@@ -476,8 +500,17 @@ znh_distro_upgrade_check() {
     case "${ZNH_DISTRO_UPGRADE_FAMILY}" in
         fedora)
             if znh_distro_upgrade_check_fedora; then
-                znh_distro_upgrade_state_write_file "available" "${ZNH_DISTRO_UPGRADE_TARGET}" \
-                    "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${ZNH_DISTRO_UPGRADE_TARGET} ready to install" || true
+                # Determine if packages are already staged (downloaded)
+                # vs. just detected as available from the repos.
+                local _fedora_dnf_bin="dnf"
+                if command -v dnf5 >/dev/null 2>&1; then _fedora_dnf_bin="dnf5"; fi
+                if znh_fedora_upgrade_already_staged "${_fedora_dnf_bin}" "${ZNH_DISTRO_UPGRADE_TARGET}"; then
+                    znh_distro_upgrade_state_write_file "downloaded" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                        "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${ZNH_DISTRO_UPGRADE_TARGET} downloaded; ready to reboot" || true
+                else
+                    znh_distro_upgrade_state_write_file "available" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                        "Fedora ${ZNH_DISTRO_UPGRADE_CURRENT} -> ${ZNH_DISTRO_UPGRADE_TARGET} ready to install" || true
+                fi
             else
                 znh_distro_upgrade_state_write_file "uptodate" "" \
                     "No newer Fedora release detected." || true
@@ -691,9 +724,30 @@ znh_distro_upgrade_run_apply() {
     fi
 
     if [ "${ZNH_DISTRO_UPGRADE_AVAILABLE:-0}" -ne 1 ]; then
-        printf '%s\n' "No distro upgrade is currently flagged as available."
-        printf '%s\n' "Run 'sudo zypper-auto-helper --check-distro-upgrade' first to refresh state."
-        return 1
+        # Even if the repoquery check didn't flag an upgrade, packages
+        # may be staged from a previous download attempt that failed to
+        # reboot properly. Detect this before giving up.
+        local _apply_dnf="dnf"
+        if command -v dnf5 >/dev/null 2>&1; then _apply_dnf="dnf5"; fi
+        if [ "${ZNH_DISTRO_UPGRADE_FAMILY}" = "fedora" ] \
+           && znh_fedora_upgrade_already_staged "${_apply_dnf}" ""; then
+            printf '%s\n' "Staged distro-upgrade packages detected (previous download still present)."
+            # Recover target from the state file.
+            local _recover_target=""
+            if [ -f "${ZNH_DISTRO_UPGRADE_STATE_FILE}" ]; then
+                _recover_target="$(sed -n 's/.*"target_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+                    "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null | head -n 1)"
+            fi
+            if [ -n "${_recover_target}" ]; then
+                ZNH_DISTRO_UPGRADE_AVAILABLE=1
+                ZNH_DISTRO_UPGRADE_TARGET="${_recover_target}"
+            fi
+        fi
+        if [ "${ZNH_DISTRO_UPGRADE_AVAILABLE:-0}" -ne 1 ]; then
+            printf '%s\n' "No distro upgrade is currently flagged as available."
+            printf '%s\n' "Run 'sudo zypper-auto-helper --check-distro-upgrade' first to refresh state."
+            return 1
+        fi
     fi
 
     if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
@@ -891,8 +945,8 @@ znh_distro_upgrade_run_finish() {
             local reboot_ok=0
 
             if [ "${dnf_bin}" = "dnf5" ]; then
-                printf 'Running: dnf5 offline reboot\n'
-                if dnf5 offline reboot 2>&1; then
+                printf 'Running: dnf5 -y offline reboot\n'
+                if dnf5 -y offline reboot 2>&1; then
                     reboot_ok=1
                 else
                     printf 'dnf5 offline reboot failed (rc=%s); trying system-upgrade reboot…\n' "$?"
@@ -900,8 +954,8 @@ znh_distro_upgrade_run_finish() {
             fi
 
             if [ "${reboot_ok}" -ne 1 ] 2>/dev/null; then
-                printf 'Running: %s system-upgrade reboot\n' "${dnf_bin}"
-                if "${dnf_bin}" system-upgrade reboot 2>&1; then
+                printf 'Running: %s -y system-upgrade reboot\n' "${dnf_bin}"
+                if "${dnf_bin}" -y system-upgrade reboot 2>&1; then
                     reboot_ok=1
                 else
                     printf 'system-upgrade reboot failed (rc=%s)\n' "$?"
