@@ -60687,6 +60687,7 @@ def _quick_action_table() -> dict:
             "timeout_s": 5 * 60,
             "needs_confirm": True,
             "phrase": "REBOOTUPGRADE",
+            "bypass_running_lock": True,  # Reboot actions must not be blocked by stale quick-action locks
             "explain": "Runs the family-specific finishing command after the staged distro-upgrade download is complete. On Fedora/Nobara this calls `dnf5 offline reboot` (preferred) or `dnf system-upgrade reboot` (legacy), which immediately reboots the machine into the offline upgrade environment so the upgrade can be applied. Other families either reboot themselves (Ubuntu/Mint via do-release-upgrade) or print manual guidance (Debian/Leap/RHEL).",
             "warning": "This action WILL reboot the machine. Save your work first. The reboot kicks off the offline upgrade install which can take a while.",
         },
@@ -60882,7 +60883,14 @@ def _quick_any_running() -> dict:
             except Exception:
                 pass
 
-        is_running = (active == "active") or (age < 30 * 60)
+        # Trust systemd unit state when available. Only fall back to
+        # age-based heuristic when the unit state could not be queried
+        # (empty active means systemctl show failed or unit name unknown).
+        if active:
+            is_running = (active == "active")
+        else:
+            # Couldn't query unit; conservative age-based fallback (5 min).
+            is_running = (age < 5 * 60)
         if is_running:
             out["running"] = True
             out["action"] = str(st.get("action", "") or "").strip()
@@ -65671,21 +65679,6 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         if path == "/api/quick/start":
-            # Best-effort concurrency guard: avoid clobbering the single-task bubble UX.
-            try:
-                ri = _quick_any_running()
-                if ri.get("running"):
-                    return _json_response(self, 409, {
-                        "error": "a quick action is already running",
-                        "job_running": True,
-                        "unit": ri.get("unit"),
-                        "status_path": ri.get("status_path"),
-                        "action": ri.get("action"),
-                        "title": ri.get("title"),
-                    }, origin)
-            except Exception:
-                pass
-
             body = _read_json(self)
             action = str(body.get("action", "") or "").strip()
             ai_triggered = _to_boolish(body.get("ai_triggered", False))
@@ -65701,6 +65694,25 @@ class Handler(BaseHTTPRequestHandler):
             meta = tbl.get(action)
             if not meta:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
+
+            # Best-effort concurrency guard: avoid clobbering the single-task bubble UX.
+            # Actions with bypass_running_lock (e.g. distro-upgrade-reboot) skip this
+            # because they will shut down the machine and must not be blocked by a
+            # stale or concurrent quick-action lock.
+            if not bool(meta.get("bypass_running_lock")):
+                try:
+                    ri = _quick_any_running()
+                    if ri.get("running"):
+                        return _json_response(self, 409, {
+                            "error": "a quick action is already running",
+                            "job_running": True,
+                            "unit": ri.get("unit"),
+                            "status_path": ri.get("status_path"),
+                            "action": ri.get("action"),
+                            "title": ri.get("title"),
+                        }, origin)
+                except Exception:
+                    pass
 
             needs_confirm = bool(meta.get("needs_confirm"))
             required_phrase = str(meta.get("phrase", "") or "").strip().upper()
