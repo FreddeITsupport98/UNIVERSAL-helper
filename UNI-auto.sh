@@ -29702,8 +29702,8 @@ generate_dashboard() {
 
     // ---- Distro upgrade (Rocket Update Manager surface) ----
     // Cached state from /api/system/distro-upgrade.
-    // The renderer ONLY reveals the banner when:
-    //   release_model === 'fixed' AND status === 'available'
+    // The renderer reveals the banner when:
+    //   release_model === 'fixed' AND (status === 'available' OR status === 'downloaded')
     // so rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...)
     // never see the card. This matches the bash classifier in
     // znh_distro_release_model_classify().
@@ -29843,13 +29843,26 @@ generate_dashboard() {
 
         if (refreshBtn) refreshBtn.addEventListener('click', function(ev) {
             try { addRipple(refreshBtn, ev.clientX, ev.clientY); } catch (e0) {}
-            toast('Re-checking distro upgrade…', 'Refreshing /var/lib/zypper-auto/distro-upgrade.json', 'ok');
-            // Trigger a non-blocking refresh, then poll the state again after a
-            // short delay so the bash probe has time to write the JSON.
+            toast('Re-checking distro upgrade…', 'Refreshing /var/lib/zypper-auto/distro-upgrade.json (may take 5-15s on slow mirrors)', 'ok');
+            // Trigger a non-blocking refresh, then poll the state multiple
+            // times so the bash probe (which can take 5-15s on slow mirrors)
+            // has enough time to write the updated JSON.
             znhDistroUpgradeFetch({ refresh: true });
             setTimeout(function() {
                 try { znhDistroUpgradeFetch({ refresh: false }); } catch (e1) {}
             }, 4500);
+            setTimeout(function() {
+                try { znhDistroUpgradeFetch({ refresh: false }); } catch (e2) {}
+            }, 9000);
+            setTimeout(function() {
+                try {
+                    znhDistroUpgradeFetch({ refresh: false }).then(function(r) {
+                        if (r && r.status && r.status !== 'unknown') {
+                            toast('Distro upgrade state refreshed', 'Status: ' + String(r.status), 'ok');
+                        }
+                    }).catch(function() {});
+                } catch (e3) {}
+            }, 15000);
         });
 
         var changelogBtn = document.getElementById('znh-distro-upgrade-changelog-btn');
@@ -31214,10 +31227,13 @@ generate_dashboard() {
         var family = String(state.distro_family || '').toLowerCase();
         var releaseModel = String(state.release_model || '').toLowerCase();
         var status = String(state.status || '').toLowerCase();
-        var actionable = !!state.actionable && releaseModel === 'fixed' && status === 'available';
+        var actionable = !!state.actionable && releaseModel === 'fixed' && (status === 'available' || status === 'downloaded');
+        var rebootReady = !!state.reboot_ready && status === 'downloaded';
         var apply_command = String(state.apply_command || '');
+        var rebootCommand = String(state.reboot_command || '');
         var manualUrl = String(state.manual_url || '');
         var qaSupported = !!state.quick_action_supported;
+        var rebootQaSupported = !!state.reboot_quick_action_supported;
 
         function _esc(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
 
@@ -31247,7 +31263,6 @@ generate_dashboard() {
             _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
             return;
         }
-
         var familyLabel = family || 'fixed-cycle distro';
         var familyExplain = '';
         switch (family) {
@@ -31268,7 +31283,81 @@ generate_dashboard() {
                 familyExplain = 'RHEL/CentOS-style distros use <code>leapp</code> for major-version migration. Follow the Red Hat documentation linked below.';
                 break;
             default:
-                familyExplain = 'No automated upgrade path is available for this distro family. Refer to your distro’s upstream upgrade guide.';
+                familyExplain = 'No automated upgrade path is available for this distro family. Refer to your distro's upstream upgrade guide.';
+        }
+
+        // When packages are already downloaded, show a reboot-focused view
+        // instead of the download/apply flow.
+        if (rebootReady) {
+            var rebootActions = [];
+            if (rebootCommand) {
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-reboot-copy" data-cmd="' + _esc(rebootCommand) + '">Copy reboot command</button>');
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-reboot-terminal" data-cmd="' + _esc(rebootCommand) + '">Open terminal (paste)</button>');
+            }
+            if (apply_command) {
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-copy" data-cmd="' + _esc(apply_command) + '" style="opacity:0.7;">Re-download (re-apply)</button>');
+            }
+            if (manualUrl) {
+                rebootActions.push('    <a class="pill" href="' + _esc(manualUrl) + '" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Open upstream guide</a>');
+            }
+
+            var rebootSafetyBlock = '';
+            if (rebootQaSupported && rebootCommand) {
+                rebootSafetyBlock = [
+                    '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08); margin-top:10px;">',
+                    '  <div style="font-weight:950;">REBOOT REQUIRED</div>',
+                    '  <div style="margin-top:6px; font-weight:800;">The upgrade packages are already downloaded. To apply the upgrade, run <code>' + _esc(rebootCommand) + '</code> which will reboot your machine into the offline upgrade environment.</div>',
+                    '</div>'
+                ].join('\n');
+            }
+
+            e.body.innerHTML = [
+                '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(34,197,94,0.55); background: rgba(34,197,94,0.08);">',
+                '  <div style="font-weight:950;">✅ ' + _esc(distroName) + ' ' + _esc(current) + ' → ' + _esc(target) + ' downloaded — ready to reboot</div>',
+                '  <div style="margin-top:6px; font-weight:800;">Family: <code>' + _esc(familyLabel) + '</code> • Status: <code>downloaded</code> • Release model: <code>' + _esc(releaseModel || 'unknown') + '</code></div>',
+                '</div>',
+                '<div style="color: var(--muted); font-size:0.92rem;">' + familyExplain + '</div>',
+                (rebootCommand ? ('<div class="feat-badge"><span class="feat-dot" style="color: var(--accent);">●</span> Reboot command: <code style="font-size:0.85rem;">' + _esc(rebootCommand) + '</code></div>') : ''),
+                (state.reason ? ('<div style="color: var(--muted); font-size:0.86rem;">' + _esc(state.reason) + '</div>') : ''),
+                (rebootActions.length ? ('<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">' + rebootActions.join('\n') + '</div>') : ''),
+                rebootSafetyBlock
+            ].join('\n');
+
+            _ruSetHeader('Distro upgrade', 'Ready to reboot', distroName + ' ' + current + ' → ' + target + ' (downloaded)');
+            _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
+
+            // Wire reboot button handlers.
+            try {
+                var rebootCopyBtn = document.getElementById('ru-distro-reboot-copy');
+                if (rebootCopyBtn) rebootCopyBtn.addEventListener('click', function(ev) {
+                    var c = rebootCopyBtn.getAttribute('data-cmd') || '';
+                    if (typeof _ruPmCopyAndToast === 'function') {
+                        _ruPmCopyAndToast(c, ev, 'Reboot command copied');
+                    } else if (typeof window.copyCmd === 'function') {
+                        window.copyCmd(c, rebootCopyBtn);
+                    }
+                });
+                var rebootTermBtn = document.getElementById('ru-distro-reboot-terminal');
+                if (rebootTermBtn) rebootTermBtn.addEventListener('click', function(ev) {
+                    var c = rebootTermBtn.getAttribute('data-cmd') || '';
+                    if (typeof _ruPmCopyAndToast === 'function') {
+                        _ruPmCopyAndToast(c, ev, 'Open a terminal and paste');
+                    } else if (typeof window.copyCmd === 'function') {
+                        window.copyCmd(c, rebootTermBtn);
+                    }
+                });
+                var reApplyBtn = document.getElementById('ru-distro-copy');
+                if (reApplyBtn) reApplyBtn.addEventListener('click', function(ev) {
+                    var c = reApplyBtn.getAttribute('data-cmd') || '';
+                    if (typeof _ruPmCopyAndToast === 'function') {
+                        _ruPmCopyAndToast(c, ev, 'Re-apply command copied');
+                    } else if (typeof window.copyCmd === 'function') {
+                        window.copyCmd(c, reApplyBtn);
+                    }
+                });
+            } catch (eRB0) {}
+
+            return;
         }
 
         var actions = [];
@@ -31304,6 +31393,7 @@ generate_dashboard() {
             (state.reason ? ('<div style="color: var(--muted); font-size:0.86rem;">' + _esc(state.reason) + '</div>') : ''),
             (actions.length ? ('<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">' + actions.join('\n') + '</div>') : ''),
             safetyBlock
+        ].join('\n');
         ].join('\n');
 
         _ruSetHeader('Distro upgrade', 'Step 1/1', distroName + ' ' + current + ' → ' + target);
@@ -32982,12 +33072,12 @@ generate_dashboard() {
         });
 
         // ---- Distro-upgrade banner (Rocket Update Manager surface) ----
-        // The banner only becomes visible when /api/system/distro-upgrade reports
-        // release_model='fixed' AND status='available'. Rolling distros
-        // (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...) never see it
-        // because the renderer hides the card on release_model!='fixed'. We wire
-        // the click handlers and trigger an initial fetch so the card appears
-        // on page load when applicable.
+        // The banner becomes visible when /api/system/distro-upgrade reports
+        // release_model='fixed' AND (status='available' OR status='downloaded').
+        // Rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...)
+        // never see it because the renderer hides the card on
+        // release_model!='fixed'. We wire the click handlers and trigger an
+        // initial fetch so the card appears on page load when applicable.
         try {
             if (typeof _wireDistroUpgradeBannerUI === 'function') _wireDistroUpgradeBannerUI();
         } catch (eDU0) {}
@@ -55861,13 +55951,20 @@ if [ -r "$CONFIG_FILE" ]; then
 fi
 SYSTEM_PKG_MANAGER=""
 PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
+# User-local cache: written on first run when the system helper is unavailable;
+# avoids future auto-deploy attempts and root authentication prompts.
+PM_RUNTIME_HELPER_USER="$HOME/.local/share/zypper-notify/pm-runtime-cache.sh"
 if [ -r "${PM_RUNTIME_HELPER}" ]; then
     # shellcheck disable=SC1091
     . "${PM_RUNTIME_HELPER}"
+elif [ -r "${PM_RUNTIME_HELPER_USER}" ]; then
+    # User-local cache hit: system helper is missing but we have a local copy.
+    log "PM runtime helper (system path) missing; loading user-local cache: ${PM_RUNTIME_HELPER_USER}"
+    # shellcheck disable=SC1091
+    . "${PM_RUNTIME_HELPER_USER}"
 else
     # Auto-deploy: try to (re-)create the PM runtime via zypper-auto-helper.
     log "PM runtime helper missing (${PM_RUNTIME_HELPER}); attempting auto-deploy..."
-    say "PM runtime helper not found; attempting auto-deploy..."
     _znh_pm_rt_deploy_ok=0
     if [ -x /usr/local/bin/zypper-auto-helper ]; then
         # Try non-interactive sudo first (works when password is cached or NOPASSWD
@@ -55890,10 +55987,9 @@ else
         . "${PM_RUNTIME_HELPER}"
     fi
 fi
-# If PM runtime is STILL not loaded after auto-deploy attempt, use inline stubs.
+# If PM runtime is STILL not loaded after all attempts, activate inline stubs.
 if ! command -v znh_pm_ensure_detected >/dev/null 2>&1; then
-    log "WARNING: PM runtime helper still missing after auto-deploy attempt — using inline cross-distro fallback"
-    say "⚠  PM runtime helper not available; using built-in cross-distro fallback."
+    log "INFO: PM runtime helper not available; activating built-in cross-distro fallback"
 
     # --- Inline cross-distro fallback (minimal stubs) ---
     znh_pm_detect_system_package_manager() {
@@ -56024,6 +56120,28 @@ if ! command -v znh_pm_ensure_detected >/dev/null 2>&1; then
         znh_pm_is_lock_output_file "${out_file}"
     }
     znh_pm_cleanup_stale_locks() { printf '0\n'; }
+    # Write user-local PM runtime cache so subsequent runs load from cache
+    # instead of hitting the auto-deploy attempt. No root required.
+    _pm_rt_user_cache="${PM_RUNTIME_HELPER_USER:-$HOME/.local/share/zypper-notify/pm-runtime-cache.sh}"
+    if [ ! -f "${_pm_rt_user_cache}" ]; then
+        mkdir -p "$(dirname "${_pm_rt_user_cache}")" 2>/dev/null || true
+        {
+            declare -f znh_pm_detect_system_package_manager 2>/dev/null || true
+            declare -f znh_pm_ensure_detected 2>/dev/null || true
+            declare -f znh_pm_lock_active_pid 2>/dev/null || true
+            declare -f znh_pm_lock_is_active 2>/dev/null || true
+            declare -f znh_pm_wait_for_lock_clear 2>/dev/null || true
+            declare -f znh_pm_is_lock_output_file 2>/dev/null || true
+            declare -f znh_pm_install_upgrade_streaming 2>/dev/null || true
+            declare -f znh_pm_capture_package_snapshot 2>/dev/null || true
+            declare -f znh_pm_is_lock_failure 2>/dev/null || true
+            declare -f znh_pm_cleanup_stale_locks 2>/dev/null || true
+        } > "${_pm_rt_user_cache}.tmp.$$" 2>/dev/null \
+          && mv -f "${_pm_rt_user_cache}.tmp.$$" "${_pm_rt_user_cache}" 2>/dev/null \
+          && chmod 600 "${_pm_rt_user_cache}" 2>/dev/null \
+          || rm -f "${_pm_rt_user_cache}.tmp.$$" 2>/dev/null || true
+        log "User-local PM runtime cache written: ${_pm_rt_user_cache}"
+    fi
 fi
 znh_pm_ensure_detected
 SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
@@ -62280,9 +62398,9 @@ class Handler(BaseHTTPRequestHandler):
             # banner. Reads /var/lib/zypper-auto/distro-upgrade.json (written
             # by the bash helper `znh_distro_upgrade_check`) and returns a
             # WebUI-friendly payload with derived fields:
-            #   - actionable: True ONLY for fixed-cycle distros with
-            #     status="available" (so rolling/uptodate/manual/unknown
-            #     keep the banner hidden).
+            #   - actionable: True for fixed-cycle distros with
+            #     status="available" or "downloaded" (so rolling/uptodate/
+            #     manual/unknown keep the banner hidden).
             #   - apply_command: family-specific terminal command users can
             #     copy (Fedora/Nobara -> sudo zypper-auto-helper
             #     --distro-upgrade apply --yes; Ubuntu/Mint -> sudo
