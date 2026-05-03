@@ -62528,7 +62528,11 @@ class Handler(BaseHTTPRequestHandler):
             if family in ("fedora",):
                 apply_command = "sudo zypper-auto-helper --distro-upgrade apply --yes"
                 quick_action_supported = True
-                reboot_command = "sudo dnf system-upgrade reboot"
+                # dnf5 uses `offline reboot`; legacy dnf4 uses `system-upgrade reboot`
+                if shutil.which("dnf5"):
+                    reboot_command = "sudo dnf5 offline reboot"
+                else:
+                    reboot_command = "sudo dnf system-upgrade reboot"
                 reboot_quick_action_supported = True
             elif family in ("ubuntu", "mint"):
                 apply_command = "sudo do-release-upgrade"
