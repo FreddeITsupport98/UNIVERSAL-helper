@@ -17,6 +17,12 @@ This repository provides a robust `systemd` architecture and CLI that:
 - **Cross-distro resilience:** all generated helper scripts (zypper-run-install, zypper-with-ps, downloader) include inline fallback PM detection so they work on Fedora/Ubuntu/Arch/Debian even when the shared runtime helper is missing.
 If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
 
+
+> [!IMPORTANT]
+> 🚀 **PROJECT MOVED & UPDATED!** 🚀
+> This project has evolved! The build formerly known as **ZYPPER-AUTOMATIK-HELPER** is now **UNIVERSAL-HELPER**.
+> 
+> 👉 **I still promese it has same base and works with opensuse tumbleweed as before.**
 -----
 
 <a id="reporting-issues-top"></a>
