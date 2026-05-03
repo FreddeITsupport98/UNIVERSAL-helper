@@ -31290,6 +31290,9 @@ generate_dashboard() {
         // instead of the download/apply flow.
         if (rebootReady) {
             var rebootActions = [];
+            if (rebootQaSupported && rebootCommand) {
+                rebootActions.push('    <button class="pill" type="button" id="ru-distro-reboot-rocket" data-cmd="' + _esc(rebootCommand) + '" data-family="' + _esc(family) + '" style="font-weight:900;">\u26a1 Reboot via Rocket</button>');
+            }
             if (rebootCommand) {
                 rebootActions.push('    <button class="pill" type="button" id="ru-distro-reboot-copy" data-cmd="' + _esc(rebootCommand) + '">Copy reboot command</button>');
                 rebootActions.push('    <button class="pill" type="button" id="ru-distro-reboot-terminal" data-cmd="' + _esc(rebootCommand) + '">Open terminal (paste)</button>');
@@ -31356,6 +31359,45 @@ generate_dashboard() {
                     }
                 });
             } catch (eRB0) {}
+
+            // Wire the "Reboot via Rocket" quick-action launcher.
+            // Uses the same distro-upgrade-reboot action + REBOOTUPGRADE phrase
+            // as the post-download "done" view, but triggered directly from the
+            // reboot-ready overlay when packages are already staged.
+            try {
+                var rocketRebootBtn = document.getElementById('ru-distro-reboot-rocket');
+                if (rocketRebootBtn && rebootQaSupported) {
+                    rocketRebootBtn.addEventListener('click', function(ev) {
+                        try { addRipple(rocketRebootBtn, ev.clientX, ev.clientY); } catch (eR0) {}
+                        var rCmd = rocketRebootBtn.getAttribute('data-cmd') || rebootCommand;
+                        if (!confirm('Reboot now to finish the distro upgrade?\n\n' +
+                                     'This runs:\n  ' + rCmd + '\n\n' +
+                                     'The machine WILL reboot into the offline upgrade environment, which can take a while. Save your work first.')) {
+                            return;
+                        }
+                        rocketRebootBtn.disabled = true;
+                        toast('Requesting reboot confirmation\u2026', 'distro-upgrade-reboot quick-action token', 'ok');
+                        _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade-reboot' }) }).then(function(c) {
+                            if (!c || !c.confirm_token) throw new Error('missing confirm_token');
+                            return _api('/api/quick/start', {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                    action: 'distro-upgrade-reboot',
+                                    confirm_token: c.confirm_token,
+                                    confirm_phrase: 'REBOOTUPGRADE'
+                                })
+                            });
+                        }).then(function(r) {
+                            if (!r || !r.job_id) throw new Error('missing job_id');
+                            toast('Reboot scheduled', 'distro-upgrade-reboot job ' + r.job_id + ' running. The system will reboot shortly.', 'ok');
+                        }).catch(function(err) {
+                            var msg = (err && err.message) ? err.message : 'failed';
+                            toast('Reboot start failed', msg, 'err');
+                            try { rocketRebootBtn.disabled = false; } catch (eR1) {}
+                        });
+                    });
+                }
+            } catch (eRB1) {}
 
             return;
         }
