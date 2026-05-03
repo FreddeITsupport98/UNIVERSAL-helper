@@ -31454,7 +31454,16 @@ generate_dashboard() {
                             });
                         }).then(function(r) {
                             if (!r || !r.job_id) throw new Error('missing job_id');
-                            toast('Reboot scheduled', 'distro-upgrade-reboot job ' + r.job_id + ' running. The system will reboot shortly.', 'ok');
+                            // Track the reboot job with a progress banner so the
+                            // user sees auto-restage progress if the backend needs
+                            // to re-download (incomplete transaction recovery).
+                            _ruDistroUpgradeTrackRebootJob(String(r.job_id), {
+                                distroName: distroName,
+                                current: current,
+                                target: target,
+                                family: family,
+                                reboot_command: rebootCommand
+                            });
                         }).catch(function(err) {
                             var msg = (err && err.message) ? err.message : 'failed';
                             toast('Reboot start failed', msg, 'err');
@@ -31585,6 +31594,153 @@ generate_dashboard() {
                 });
             }
         } catch (eA1) {}
+    }
+
+    // Render progress banner and track a distro-upgrade-reboot quick action
+    // job. Shows re-download progress if the backend detects an incomplete
+    // transaction and auto-restages, and shows a clear reboot/failure state.
+    function _ruDistroUpgradeTrackRebootJob(jobId, ctx) {
+        ctx = ctx || {};
+        var safeJobId = String(jobId || '').trim();
+        if (!safeJobId) { try { _suShow(false); } catch (e0) {} return; }
+
+        var distroName = String(ctx.distroName || 'Linux');
+        var current = String(ctx.current || '?');
+        var target = String(ctx.target || '?');
+        function _escR(s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); }
+
+        // Render the running progress banner.
+        var e = _suEls();
+        if (e.body) {
+            _suSetMinBtnVisible(true);
+            e.body.innerHTML = [
+                '<div class="overlay-alert overlay-alert-warn">',
+                '  <div style="font-weight:950;">\u26a1 ' + _escR(distroName) + ' ' + _escR(current) + ' \u2192 ' + _escR(target) + ' \u2014 preparing offline reboot</div>',
+                '  <div style="margin-top:6px; font-weight:800;">The helper is verifying the offline transaction and may re-download packages if the previous staging was incomplete. This can take a few minutes.</div>',
+                '</div>',
+                '<div class="overlay-progress">',
+                '  <div class="overlay-progress-row"><span id="su-stage">Starting</span><span id="su-percent">0%</span></div>',
+                '  <div class="progress-track"><div class="progress-fill" id="su-progress-bar" style="width:0%;"></div></div>',
+                '</div>',
+                '<pre class="overlay-pre" id="su-live-log" style="max-height: 320px;">(streaming logs\u2026)</pre>'
+            ].join('\n');
+            _ruSetHeader('Distro upgrade', 'Rebooting', distroName + ' ' + current + ' \u2192 ' + target);
+            _suSetButtons({ show_cancel: false, show_close: false, footer_center: true });
+        }
+
+        try { _suUpdateProgress('Starting', 1); } catch (eP0) {}
+        try { znhTaskSet({ type: 'quick-action', job_id: safeJobId, action: 'distro-upgrade-reboot', title: 'Distro upgrade reboot' }); } catch (eT0) {}
+
+        var pollTimer = null;
+        var pollInFlight = false;
+        var pollFailures = 0;
+        var pollMaxFailures = 12;
+        var lastPct = 0;
+        var done = false;
+
+        function finalize(ok) {
+            if (done) return;
+            done = true;
+            if (pollTimer) { try { clearTimeout(pollTimer); } catch (eS) {} pollTimer = null; }
+            var logText = '';
+            try { logText = String(document.getElementById('su-live-log').textContent || ''); } catch (eL) { logText = ''; }
+            try { _suUpdateProgress(ok ? 'Rebooting' : 'Failed', 100); } catch (eP) {}
+            try { znhTaskDone('quick-action', !!ok); } catch (eT) {}
+
+            if (ok) {
+                // Machine should be rebooting — show a waiting message.
+                if (e.body) {
+                    e.body.innerHTML = [
+                        '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(34,197,94,0.55); background: rgba(34,197,94,0.08);">',
+                        '  <div style="font-weight:950;">\u2705 Rebooting into offline upgrade environment\u2026</div>',
+                        '  <div style="margin-top:6px; font-weight:800;">The machine will shut down and apply the ' + _escR(distroName) + ' ' + _escR(target) + ' upgrade offline. This can take 10\u201330 minutes. Do not power off.</div>',
+                        '</div>',
+                        '<pre class="overlay-pre overlay-pre-lg" style="margin-top:10px;">' + _escR(logText || '(no output)') + '</pre>'
+                    ].join('\n');
+                    _ruSetHeader('Distro upgrade', 'Rebooting', distroName + ' ' + current + ' \u2192 ' + target);
+                    _suSetButtons({ show_cancel: false, show_close: false, footer_center: true });
+                }
+                toast('Rebooting', 'Offline upgrade in progress. Do not power off.', 'ok');
+            } else {
+                // Failed — show error + retry button.
+                if (e.body) {
+                    e.body.innerHTML = [
+                        '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(239,68,68,0.55); background: rgba(239,68,68,0.08);">',
+                        '  <div style="font-weight:950;">Distro upgrade reboot failed</div>',
+                        '  <div style="margin-top:6px; font-weight:800;">The reboot quick-action returned a non-zero exit code. Review the log below. You can retry or run the reboot manually from a terminal.</div>',
+                        '</div>',
+                        '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">',
+                        '  <button class="pill" type="button" id="ru-distro-reboot-retry" style="font-weight:900;">\u26a1 Retry reboot</button>',
+                        '  <button class="pill" type="button" id="ru-distro-reboot-reapply" style="opacity:0.8;">Re-download \u0026 retry</button>',
+                        '  <button class="pill" type="button" id="ru-distro-reboot-close">Close</button>',
+                        '</div>',
+                        '<pre class="overlay-pre overlay-pre-lg" style="margin-top:10px;">' + _escR(logText || '(no output)') + '</pre>'
+                    ].join('\n');
+                    _ruSetHeader('Distro upgrade', 'Failed', distroName + ' ' + current + ' \u2192 ' + target);
+                    _suSetButtons({ show_cancel: false, show_close: true, footer_center: true });
+                }
+                // Wire retry buttons.
+                try {
+                    var retryBtn = document.getElementById('ru-distro-reboot-retry');
+                    if (retryBtn) retryBtn.addEventListener('click', function() {
+                        // Re-trigger the reboot quick action (the bash side will auto-heal again).
+                        retryBtn.disabled = true;
+                        toast('Retrying reboot\u2026', '', 'ok');
+                        _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade-reboot' }) }).then(function(c2) {
+                            if (!c2 || !c2.confirm_token) throw new Error('missing confirm_token');
+                            return _api('/api/quick/start', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade-reboot', confirm_token: c2.confirm_token, confirm_phrase: 'REBOOTUPGRADE' }) });
+                        }).then(function(r2) {
+                            if (!r2 || !r2.job_id) throw new Error('missing job_id');
+                            _ruDistroUpgradeTrackRebootJob(String(r2.job_id), ctx);
+                        }).catch(function(err2) {
+                            toast('Retry failed', (err2 && err2.message) || 'unknown', 'err');
+                            try { retryBtn.disabled = false; } catch (eR) {}
+                        });
+                    });
+                    var reapplyBtn = document.getElementById('ru-distro-reboot-reapply');
+                    if (reapplyBtn) reapplyBtn.addEventListener('click', function() {
+                        // Full re-apply: update + download + reboot.
+                        reapplyBtn.disabled = true;
+                        toast('Re-applying distro upgrade\u2026', '', 'ok');
+                        _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade' }) }).then(function(c3) {
+                            if (!c3 || !c3.confirm_token) throw new Error('missing confirm_token');
+                            return _api('/api/quick/start', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade', confirm_token: c3.confirm_token, confirm_phrase: 'DISTROUPGRADE' }) });
+                        }).then(function(r3) {
+                            if (!r3 || !r3.job_id) throw new Error('missing job_id');
+                            _ruDistroUpgradeTrackJob(String(r3.job_id), ctx);
+                        }).catch(function(err3) {
+                            toast('Re-apply failed', (err3 && err3.message) || 'unknown', 'err');
+                            try { reapplyBtn.disabled = false; } catch (eR2) {}
+                        });
+                    });
+                    var closeBtn2 = document.getElementById('ru-distro-reboot-close');
+                    if (closeBtn2) closeBtn2.addEventListener('click', function() { _suShow(false); });
+                } catch (eWire) {}
+                toast('Reboot failed', 'Review the log and retry', 'err');
+            }
+        }
+
+        function pollTick() {
+            if (pollInFlight || done) return;
+            pollInFlight = true;
+            _api('/api/quick/job?job_id=' + encodeURIComponent(safeJobId), { method: 'GET' }).then(function(j) {
+                if (!j) return;
+                if (pollFailures > 0) pollFailures = 0;
+                lastPct = parseInt(j.progress || 0, 10) || 0;
+                try { _suUpdateProgress(j.stage || 'Running', lastPct); } catch (eP1) {}
+                if (j.output != null) { try { _suSetLog(String(j.output)); } catch (eP2) {} }
+                try { znhTaskUpdateFromJob('quick-action', j); } catch (eP3) {}
+                if (j.done) { finalize(parseInt(j.rc, 10) === 0); }
+            }).catch(function() {
+                pollFailures++;
+                if (pollFailures >= pollMaxFailures) finalize(false);
+            }).finally(function() {
+                pollInFlight = false;
+                if (!done) pollTimer = setTimeout(pollTick, 900);
+            });
+        }
+
+        pollTick();
     }
 
     // Compute the family-specific finishing command shown to the user after
@@ -62590,6 +62746,27 @@ class Handler(BaseHTTPRequestHandler):
             # distros so the dashboard banner never shows up on Tumbleweed /
             # Slowroll / Arch / Manjaro / EndeavourOS / Garuda / etc., even
             # if the JSON file is stale.
+            # Real-time sanity check: if the JSON says "downloaded" but the
+            # dnf5 offline transaction TOML says "transaction-incomplete"
+            # (user rebooted normally instead of via dnf5 offline reboot),
+            # downgrade to "available" so the WebUI shows the download flow
+            # instead of the broken reboot view.
+            if status == "downloaded" and family in ("fedora",):
+                try:
+                    _toml_path = "/usr/lib/sysimage/libdnf5/offline/offline-transaction-state.toml"
+                    if os.path.isfile(_toml_path):
+                        with open(_toml_path, "r", encoding="utf-8", errors="replace") as _tf:
+                            for _tl in _tf:
+                                _tl = _tl.strip()
+                                if _tl.startswith("status") and '=' in _tl:
+                                    _tv = _tl.split('=', 1)[1].strip().strip('"').strip("'")
+                                    if _tv == "transaction-incomplete":
+                                        status = "available"
+                                        reason = "Offline transaction incomplete (interrupted); re-download required."
+                                    break
+                except Exception:
+                    pass
+
             actionable = bool(release_model == "fixed" and status in ("available", "downloaded"))
             reboot_ready = bool(release_model == "fixed" and status == "downloaded")
 
