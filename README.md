@@ -22,7 +22,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 > 🚀 **PROJECT MOVED & UPDATED!** 🚀
 > This project has evolved! The build formerly known as **ZYPPER-AUTOMATIK-HELPER** is now **UNIVERSAL-HELPER**.
 > 
-> 👉 **I still promese it has same base and works with opensuse tumbleweed as before.**
+> 👉 **I still promise it has same base and works with opensuse tumbleweed as before.**
 -----
 
 <a id="reporting-issues-top"></a>
