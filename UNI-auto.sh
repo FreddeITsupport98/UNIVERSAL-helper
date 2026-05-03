@@ -35625,6 +35625,713 @@ VIEW_CHANGES_SCRIPT_NAME="zypper-view-changes"
 PM_RUNTIME_HELPER_DIR="/usr/local/lib/zypper-auto"
 PM_RUNTIME_HELPER_PATH="${PM_RUNTIME_HELPER_DIR}/package-manager-runtime.sh"
 
+# Direct PM runtime writer – primary method for --deploy-pm-runtime and
+# a reliable fallback that avoids sed-extraction fragility (e.g. when $0 is
+# an old/missing zypper-auto-helper that pre-dates the embedded markers).
+# Also called from installation step 4b so the content is defined exactly once.
+__znh_create_pm_runtime() {
+    local _pmrt_dest="${1:-}"
+    [ -n "${_pmrt_dest}" ] || return 1
+    mkdir -p "$(dirname "${_pmrt_dest}")" 2>/dev/null || true
+    write_atomic "${_pmrt_dest}" << 'PMEOF'
+# __ZNH_PM_RUNTIME_EMBEDDED_START__
+#!/usr/bin/env bash
+# Shared package-manager runtime helper.
+# - Sourced by generated shell helpers (downloader/install/view)
+# - Executed in query mode by the notifier (Python)
+
+SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-}"
+
+znh_pm_detect_system_package_manager() {
+    local id id_like
+    id=""
+    id_like=""
+
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+        id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+    fi
+
+    case "${id}" in
+        opensuse*|sles|sled) SYSTEM_PKG_MANAGER="zypper" ;;
+        ubuntu|debian|linuxmint|pop|elementary|neon|kali|raspbian) SYSTEM_PKG_MANAGER="apt" ;;
+        fedora|rhel|centos|rocky|almalinux|ol|nobara) SYSTEM_PKG_MANAGER="dnf" ;;
+        arch|manjaro|endeavouros|garuda) SYSTEM_PKG_MANAGER="pacman" ;;
+    esac
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        case "${id_like}" in
+            *suse*) SYSTEM_PKG_MANAGER="zypper" ;;
+            *debian*) SYSTEM_PKG_MANAGER="apt" ;;
+            *rhel*|*fedora*) SYSTEM_PKG_MANAGER="dnf" ;;
+            *arch*) SYSTEM_PKG_MANAGER="pacman" ;;
+        esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        if command -v zypper >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif command -v dnf >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif command -v apt-get >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="apt"
+        elif command -v pacman >/dev/null 2>&1; then
+            SYSTEM_PKG_MANAGER="pacman"
+        fi
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
+znh_pm_ensure_detected() {
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        znh_pm_detect_system_package_manager
+    fi
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        SYSTEM_PKG_MANAGER="zypper"
+    fi
+}
+
+znh_pm_is_lock_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            grep -qiE 'system management is locked|locked by the application with pid' "${out_file}" 2>/dev/null
+            ;;
+        apt)
+            grep -qiE 'could not get lock|unable to acquire the dpkg frontend lock|is another process using it' "${out_file}" 2>/dev/null
+            ;;
+        dnf)
+            grep -qiE 'failed to obtain the transaction lock|waiting for process with pid|another app is currently holding the dnf lock' "${out_file}" 2>/dev/null
+            ;;
+        pacman)
+            grep -qiE 'unable to lock database|could not lock database|failed to init transaction \(unable to lock database\)' "${out_file}" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_is_lock_failure() {
+    local exit_code="${1:-0}"
+    local out_file="${2:-}"
+
+    znh_pm_ensure_detected
+    if [ "${SYSTEM_PKG_MANAGER}" = "zypper" ] && [ "${exit_code}" -eq 7 ] 2>/dev/null; then
+        return 0
+    fi
+    znh_pm_is_lock_output_file "${out_file}"
+}
+
+znh_pm_lock_active_pid() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            local lf pid
+            for lf in /run/zypp.pid /var/run/zypp.pid; do
+                [ -f "${lf}" ] || continue
+                pid=$(cat "${lf}" 2>/dev/null || echo "")
+                if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                    printf '%s\n' "${pid}"
+                    return 0
+                fi
+            done
+            if pgrep -x zypper >/dev/null 2>&1; then
+                pgrep -x zypper | head -n 1
+                return 0
+            fi
+            ;;
+        apt)
+            local apt_pid
+            for apt_pid in $(pgrep -f -x 'apt-get|apt|dpkg' 2>/dev/null || true); do
+                if [[ "${apt_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${apt_pid}" 2>/dev/null; then
+                    printf '%s\n' "${apt_pid}"
+                    return 0
+                fi
+            done
+            ;;
+        dnf)
+            local dnf_pid
+            for dnf_pid in $(pgrep -f -x 'dnf|yum|rpm' 2>/dev/null || true); do
+                if [[ "${dnf_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${dnf_pid}" 2>/dev/null; then
+                    printf '%s\n' "${dnf_pid}"
+                    return 0
+                fi
+            done
+            ;;
+        pacman)
+            local pac_pid
+            if [ -f /var/lib/pacman/db.lck ] && pgrep -x pacman >/dev/null 2>&1; then
+                pac_pid=$(pgrep -x pacman | head -n 1 || true)
+                if [[ "${pac_pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pac_pid}" 2>/dev/null; then
+                    printf '%s\n' "${pac_pid}"
+                    return 0
+                fi
+            fi
+            ;;
+    esac
+    return 1
+}
+
+znh_pm_lock_is_active() {
+    local pid
+    pid="$(znh_pm_lock_active_pid 2>/dev/null || true)"
+    [ -n "${pid:-}" ]
+}
+
+znh_pm_wait_for_lock_clear() {
+    local timeout_seconds="${1:-0}"
+    local poll_seconds="${2:-2}"
+    local start now elapsed
+
+    [[ "${timeout_seconds:-}" =~ ^[0-9]+$ ]] || timeout_seconds=0
+    [[ "${poll_seconds:-}" =~ ^[0-9]+$ ]] || poll_seconds=2
+    if [ "${poll_seconds}" -lt 1 ] 2>/dev/null; then
+        poll_seconds=1
+    fi
+
+    if [ "${timeout_seconds}" -le 0 ] 2>/dev/null; then
+        if znh_pm_lock_is_active; then
+            return 1
+        fi
+        return 0
+    fi
+
+    start="$(date +%s 2>/dev/null || echo 0)"
+    while znh_pm_lock_is_active; do
+        now="$(date +%s 2>/dev/null || echo 0)"
+        elapsed=0
+        if [[ "${start:-}" =~ ^[0-9]+$ ]] && [[ "${now:-}" =~ ^[0-9]+$ ]]; then
+            elapsed=$((now - start))
+        fi
+        if [ "${elapsed}" -ge "${timeout_seconds}" ] 2>/dev/null; then
+            return 1
+        fi
+        sleep "${poll_seconds}"
+    done
+    return 0
+}
+
+znh_pm_cleanup_stale_locks() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            local lf pid removed
+            removed=0
+            for lf in /run/zypp.pid /var/run/zypp.pid; do
+                [ -f "${lf}" ] || continue
+                pid=$(cat "${lf}" 2>/dev/null || echo "")
+                if [[ "${pid:-}" =~ ^[0-9]+$ ]] && kill -0 "${pid}" 2>/dev/null; then
+                    continue
+                fi
+                if pgrep -x zypper >/dev/null 2>&1; then
+                    continue
+                fi
+                if rm -f "${lf}" 2>/dev/null; then
+                    removed=$((removed + 1))
+                fi
+            done
+            printf '%s\n' "${removed}"
+            return 0
+            ;;
+        *)
+            printf '%s\n' "0"
+            return 0
+            ;;
+    esac
+}
+
+znh_pm_is_network_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    grep -qiE 'could not resolve host|temporary failure resolving|failed to retrieve new repository metadata|curl error|connection timed out|failed to synchronize cache|could not connect|name or service not known|network is unreachable' "${out_file}" 2>/dev/null
+}
+
+# Detect read-only / EROFS-style failures coming from sandboxed package-manager
+# runs (e.g. `dnf system-upgrade download` failing with
+# "filesystem error: cannot create directories: Read-only file system
+# [/usr/lib/sysimage/libdnf5/offline]" when the systemd unit's ReadWritePaths
+# does not include the libdnf5 offline staging directory).
+#
+# Patterns are kept additive: the original libdnf5 "cannot create directories:
+# Read-only" wording stays first so older reports continue to match, and the
+# extended set picks up additional dnf5 / libdnf5 / kernel wordings such as
+# `mkstemp(...): Read-only`, `mkdir(...): Read-only`, `permission denied`
+# variants on a read-only path, and the lower-case `read-only filesystem`
+# spelling some tools emit. Errno strings (EROFS / errno=30) are kept too
+# because some dnf5 plugins log the raw errno alongside the stack.
+#
+# This is NOT a solver/conflict error and must not be reported as one.
+znh_pm_is_readonly_fs_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    grep -qiE 'read-only file system|read-only filesystem|EROFS|errno=30|operation not permitted: cannot create|sandbox.*read-only|cannot create directories: Read-only|mkstemp.*read-only|mkdir.*read-only|failed to create.*read-only|unable to create.*read-only|cannot create temp.*read-only|permission denied.*read-only|transaction error.*read-only|failed to lock.*read-only' "${out_file}" 2>/dev/null
+}
+
+# Treat the err_file as a "benign / no-op" download exit when it only contains
+# package-manager noise like "Nothing to do", "All packages are up to date",
+# pacman "there is nothing to do", or apt "0 newly installed, 0 to remove".
+# Used by the downloader fallback path so a non-zero rc that really means
+# "there are no upgrades to download" is not falsely surfaced as a hard
+# solver error in the WebUI / Notification Center.
+#
+# A file is considered benign when EITHER of the following is true:
+#  - the file is empty (no stderr captured at all), OR
+#  - the file matches one of the recognised "nothing to do" patterns AND
+#    contains NO solver/conflict/repo/network failure markers.
+znh_pm_is_benign_no_updates_output_file() {
+    local out_file="${1:-}"
+    [ -n "${out_file}" ] || return 1
+    [ -f "${out_file}" ] || return 1
+
+    # Empty stderr -> benign no-op exit on most package managers.
+    if [ ! -s "${out_file}" ]; then
+        return 0
+    fi
+
+    # If the err_file has any obvious failure markers, never treat as benign.
+    if grep -qiE 'conflict|conflicts|conflicting requests|problem:|has inferior architecture|nothing provides|solver|signature verification failed|gpg|repo refresh failed|metadata download failed|404|not found|forbidden|bad gateway|unable to find a match|no match for argument|cannot prepare internal mirrorlist|error: failed' "${out_file}" 2>/dev/null; then
+        return 1
+    fi
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        dnf)
+            grep -qiE 'nothing to do|no packages marked for update|package(s)? already installed|all packages are up to date|nothing provides|transaction is empty' "${out_file}" 2>/dev/null && return 0
+            ;;
+        apt)
+            grep -qiE '0 upgraded, 0 newly installed, 0 to remove|0 to upgrade, 0 to newly install|nothing to fetch|nothing to install|nothing to remove' "${out_file}" 2>/dev/null && return 0
+            ;;
+        pacman)
+            grep -qiE 'there is nothing to do|nothing to do| up to date|target not found' "${out_file}" 2>/dev/null && return 0
+            ;;
+        zypper)
+            grep -qiE 'nothing to do|no update candidates found|already the newest version' "${out_file}" 2>/dev/null && return 0
+            ;;
+    esac
+    return 1
+}
+
+znh_pm_downloader_refresh_run() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks refresh
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get update
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y makecache --refresh
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Sy
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_downloader_preview_run() {
+    local out_file="$1"
+    local err_file="$2"
+    local rc
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive dup --dry-run > "${out_file}" 2> "${err_file}"
+            return $?
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade > "${out_file}" 2> "${err_file}"
+            return $?
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -q check-update > "${out_file}" 2> "${err_file}"
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Qu > "${out_file}" 2> "${err_file}"
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_downloader_download_run() {
+    local err_file="$1"
+    local dup_extra_flags_raw="${2:-}"
+    local -a dup_extra_flags_arr=()
+
+    znh_pm_ensure_detected
+    if [ -n "${dup_extra_flags_raw}" ]; then
+        # shellcheck disable=SC2206
+        dup_extra_flags_arr=( ${dup_extra_flags_raw} )
+    fi
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 /usr/bin/zypper --non-interactive --no-gpg-checks dup --download-only "${dup_extra_flags_arr[@]}" >/dev/null 2>"${err_file}"
+            ;;
+        apt)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 env DEBIAN_FRONTEND=noninteractive apt-get -y -d dist-upgrade >/dev/null 2>"${err_file}"
+            ;;
+        dnf)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 dnf -y upgrade --downloadonly >/dev/null 2>"${err_file}"
+            ;;
+        pacman)
+            /usr/bin/nice -n 10 /usr/bin/ionice -c2 -n7 pacman -Syuw --noconfirm >/dev/null 2>"${err_file}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_extract_package_count_from_preview() {
+    local preview_file="$1"
+    local count
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            count=$(grep -oP '\d+(?= packages to upgrade)' "${preview_file}" 2>/dev/null | head -1 || true)
+            ;;
+        apt)
+            count=$(grep -cE '^Inst[[:space:]]+' "${preview_file}" 2>/dev/null || true)
+            ;;
+        dnf)
+            count=$(grep -E '^[[:alnum:]_.+-]+[[:space:]]+[[:alnum:]_.:+~-]+' "${preview_file}" 2>/dev/null | grep -vE '^(Last metadata expiration check|Obsoleting Packages|Security:|Bugfix:|Enhancement:)' | wc -l || true)
+            ;;
+        pacman)
+            count=$(grep -cE '^[^[:space:]]+[[:space:]][^[:space:]]+[[:space:]]+->' "${preview_file}" 2>/dev/null || true)
+            ;;
+        *)
+            count=0
+            ;;
+    esac
+
+    if ! [[ "${count:-0}" =~ ^[0-9]+$ ]]; then
+        count=0
+    fi
+    echo "${count}"
+}
+
+znh_pm_extract_download_size_from_preview() {
+    local preview_file="$1"
+    local size
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            size=$(grep -oP 'Overall download size: ([\d.]+ [KMG]iB)' "${preview_file}" 2>/dev/null | grep -oP '[\d.]+ [KMG]iB' || true)
+            ;;
+        apt)
+            size=$(grep -oE '[0-9.]+ [kMG]B of archives' "${preview_file}" 2>/dev/null | head -1 | sed -E 's/ of archives$//' || true)
+            ;;
+        dnf|pacman)
+            size="unknown"
+            ;;
+        *)
+            size="unknown"
+            ;;
+    esac
+
+    if [ -z "${size:-}" ]; then
+        size="unknown"
+    fi
+    echo "${size}"
+}
+
+znh_pm_extract_snapshot_from_preview() {
+    local preview_file="$1"
+    local snapshot
+    snapshot=""
+    znh_pm_ensure_detected
+
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            snapshot=$(grep -oP 'openSUSE Tumbleweed\s+\S+\s*->\s*\K[0-9T-]+' "${preview_file}" 2>/dev/null | head -1 || true)
+            if [ -z "${snapshot:-}" ]; then
+                snapshot=$(grep -oP 'tumbleweed-release.*->\s*\K[\dTb-]+' "${preview_file}" 2>/dev/null | head -1 || true)
+            fi
+            ;;
+    esac
+
+    printf '%s\n' "${snapshot:-}"
+}
+
+znh_pm_extract_preview_packages_from_preview() {
+    local preview_file="$1"
+    local max_packages="${2:-3}"
+    local line pkg
+    local -a packages=()
+    local seen joined
+    seen=""
+    joined=""
+
+    znh_pm_ensure_detected
+    [[ "${max_packages:-}" =~ ^[0-9]+$ ]] || max_packages=3
+    if [ "${max_packages}" -lt 1 ] 2>/dev/null; then
+        max_packages=1
+    fi
+
+    while IFS= read -r line; do
+        [ -n "${line:-}" ] || continue
+        pkg=""
+        case "${SYSTEM_PKG_MANAGER}" in
+            zypper)
+                if printf '%s\n' "${line}" | grep -q '|'; then
+                    pkg=$(printf '%s\n' "${line}" | awk -F'|' '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1}' || true)
+                    if [[ "${pkg:-}" =~ ^[0-9] ]] || [ "${pkg}" = "Name" ] || [ "${pkg}" = "Status" ] || [ "${pkg}" = "#" ]; then
+                        pkg=""
+                    fi
+                fi
+                ;;
+            apt)
+                pkg=$(printf '%s\n' "${line}" | sed -nE 's/^Inst[[:space:]]+([^[:space:]]+).*/\1/p' || true)
+                ;;
+            dnf)
+                pkg=$(printf '%s\n' "${line}" | sed -nE 's/^([A-Za-z0-9_.+-]+)\.[A-Za-z0-9_+-]+[[:space:]]+[0-9A-Za-z:._+~ -]+[[:space:]]+\S+$/\1/p' || true)
+                ;;
+            pacman)
+                pkg=$(printf '%s\n' "${line}" | sed -nE 's/^([^[:space:]]+)[[:space:]]+[^[:space:]]+[[:space:]]+->[[:space:]]+[^[:space:]]+$/\1/p' || true)
+                ;;
+        esac
+
+        [ -n "${pkg:-}" ] || continue
+        if printf '%s\n' "${seen}" | grep -Fxq "${pkg}"; then
+            continue
+        fi
+        seen="$(printf '%s\n%s\n' "${seen}" "${pkg}")"
+        packages+=("${pkg}")
+        if [ "${#packages[@]}" -ge "${max_packages}" ] 2>/dev/null; then
+            break
+        fi
+    done < "${preview_file}"
+
+    for pkg in "${packages[@]}"; do
+        if [ -n "${joined}" ]; then
+            joined="${joined},${pkg}"
+        else
+            joined="${pkg}"
+        fi
+    done
+    printf '%s\n' "${joined}"
+}
+
+znh_pm_summarize_preview() {
+    local preview_file="$1"
+    local max_packages="${2:-3}"
+    local count snapshot preview
+
+    if [ -z "${preview_file:-}" ] || [ ! -f "${preview_file}" ]; then
+        return 1
+    fi
+
+    count="$(znh_pm_extract_package_count_from_preview "${preview_file}")"
+    snapshot="$(znh_pm_extract_snapshot_from_preview "${preview_file}")"
+    preview="$(znh_pm_extract_preview_packages_from_preview "${preview_file}" "${max_packages}")"
+
+    printf 'PACKAGE_COUNT=%s\n' "${count:-0}"
+    printf 'SNAPSHOT=%s\n' "${snapshot:-}"
+    printf 'PREVIEW=%s\n' "${preview:-}"
+    return 0
+}
+
+znh_pm_install_upgrade_streaming() {
+    local log_file="$1"
+    local out_file="$2"
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            pkexec zypper dup 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        apt)
+            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -y dist-upgrade 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        dnf)
+            pkexec dnf -y upgrade 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        pacman)
+            pkexec pacman -Syu --noconfirm 2>&1 | tee -a "${log_file}" | tee "${out_file}"
+            return "${PIPESTATUS[0]}"
+            ;;
+        *)
+            echo "Unsupported package manager: ${SYSTEM_PKG_MANAGER}" | tee -a "${log_file}" | tee "${out_file}"
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_capture_package_snapshot() {
+    local out_file="$1"
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper|dnf)
+            rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}\n' | sort > "${out_file}"
+            ;;
+        apt)
+            dpkg-query -W -f='${binary:Package}=${Version}\n' 2>/dev/null | sort > "${out_file}"
+            ;;
+        pacman)
+            pacman -Q 2>/dev/null | sort > "${out_file}"
+            ;;
+        *)
+            : > "${out_file}"
+            ;;
+    esac
+}
+
+znh_pm_view_changes_preview_run() {
+    local rc
+
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            pkexec zypper --non-interactive dup --dry-run --details
+            return $?
+            ;;
+        apt)
+            pkexec env DEBIAN_FRONTEND=noninteractive apt-get -s dist-upgrade
+            return $?
+            ;;
+        dnf)
+            pkexec dnf -q check-update
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 100 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        pacman)
+            pkexec pacman -Qu
+            rc=$?
+            if [ "${rc}" -eq 0 ] || [ "${rc}" -eq 1 ]; then
+                return 0
+            fi
+            return "${rc}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+znh_pm_manual_update_command() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) echo "sudo zypper dup --allow-vendor-change" ;;
+        apt) echo "sudo apt-get dist-upgrade" ;;
+        dnf) echo "sudo dnf upgrade" ;;
+        pacman) echo "sudo pacman -Syu" ;;
+        *) echo "sudo zypper dup --allow-vendor-change" ;;
+    esac
+}
+
+znh_pm_manual_refresh_command() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) echo "sudo zypper refresh" ;;
+        apt) echo "sudo apt-get update" ;;
+        dnf) echo "sudo dnf makecache --refresh" ;;
+        pacman) echo "sudo pacman -Sy" ;;
+        *) echo "sudo zypper refresh" ;;
+    esac
+}
+
+znh_pm_query_notifier_preview_command_argv() {
+    znh_pm_ensure_detected
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper) printf '%s\0' "pkexec" "zypper" "--non-interactive" "dup" "--dry-run" ;;
+        apt) printf '%s\0' "pkexec" "env" "DEBIAN_FRONTEND=noninteractive" "apt-get" "-s" "dist-upgrade" ;;
+        dnf) printf '%s\0' "pkexec" "dnf" "-q" "check-update" ;;
+        pacman) printf '%s\0' "pkexec" "pacman" "-Qu" ;;
+        *) printf '%s\0' "pkexec" "zypper" "--non-interactive" "dup" "--dry-run" ;;
+    esac
+}
+
+znh_pm_query() {
+    local key="${1:-}"
+    local arg1="${2:-}"
+    local arg2="${3:-}"
+    znh_pm_ensure_detected
+    case "${key}" in
+        package-manager)
+            printf '%s\n' "${SYSTEM_PKG_MANAGER}"
+            ;;
+        manual-update-command)
+            znh_pm_manual_update_command
+            ;;
+        manual-refresh-command)
+            znh_pm_manual_refresh_command
+            ;;
+        notifier-preview-command-argv)
+            znh_pm_query_notifier_preview_command_argv
+            ;;
+        preview-summary)
+            znh_pm_summarize_preview "${arg1}" "${arg2:-3}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [ "${1:-}" = "--query" ]; then
+        shift || true
+        znh_pm_query "${1:-}" "${2:-}" "${3:-}"
+        exit $?
+    fi
+    if [ "${1:-}" = "--summarize-preview" ]; then
+        shift || true
+        znh_pm_summarize_preview "${1:-}" "${2:-3}"
+        exit $?
+    fi
+    if [ "${1:-}" = "--detect" ]; then
+        znh_pm_ensure_detected
+        printf '%s\n' "${SYSTEM_PKG_MANAGER}"
+        exit 0
+    fi
+fi
+# __ZNH_PM_RUNTIME_EMBEDDED_END__
+PMEOF
+    [ $? -eq 0 ] || return 1
+    chmod 755 "${_pmrt_dest}" 2>/dev/null || true
+    return 0
+}
+
 # Helper: compute a DBus user bus address for a given user (defaults to
 # SUDO_USER). Prints the address to stdout.
 get_user_bus() {
@@ -48119,8 +48826,14 @@ elif [[ "${1:-}" == "--deploy-pm-runtime" ]]; then
     fi
     _PM_RT_DIR="/usr/local/lib/zypper-auto"
     _PM_RT_PATH="${_PM_RT_DIR}/package-manager-runtime.sh"
+    # Primary: use __znh_create_pm_runtime (self-contained, no sed extraction needed;
+    # works even when $0 is an older zypper-auto-helper without embedded markers).
+    if __znh_create_pm_runtime "${_PM_RT_PATH}"; then
+        echo "PM runtime helper deployed: ${_PM_RT_PATH}"
+        exit 0
+    fi
+    # Fallback: sed extraction for backward compatibility.
     mkdir -p "${_PM_RT_DIR}" 2>/dev/null || true
-    # Extract the embedded PM runtime content from this script using markers.
     if sed -n '/^# __ZNH_PM_RUNTIME_EMBEDDED_START__$/,/^# __ZNH_PM_RUNTIME_EMBEDDED_END__$/p' "$0" \
          | sed '1d;$d' > "${_PM_RT_PATH}.tmp.$$" 2>/dev/null; then
         if [ -s "${_PM_RT_PATH}.tmp.$$" ]; then
@@ -48131,7 +48844,7 @@ elif [[ "${1:-}" == "--deploy-pm-runtime" ]]; then
         fi
     fi
     rm -f "${_PM_RT_PATH}.tmp.$$" 2>/dev/null || true
-    echo "Failed to extract PM runtime from $0" >&2
+    echo "Failed to deploy PM runtime helper" >&2
     exit 1
 elif [[ "${1:-}" == "--check-distro-upgrade" || "${1:-}" == "--distro-upgrade-check" ]]; then
     log_info "Distro-upgrade detection mode requested"
@@ -55101,16 +55814,26 @@ else
     # Auto-deploy: try to (re-)create the PM runtime via zypper-auto-helper.
     log "PM runtime helper missing (${PM_RUNTIME_HELPER}); attempting auto-deploy..."
     say "PM runtime helper not found; attempting auto-deploy..."
+    _znh_pm_rt_deploy_ok=0
     if [ -x /usr/local/bin/zypper-auto-helper ]; then
-        if pkexec /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1 \
-           || sudo /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1; then
-            if [ -r "${PM_RUNTIME_HELPER}" ]; then
-                log "PM runtime helper auto-deployed successfully."
-                say "✓ PM runtime helper installed."
-                # shellcheck disable=SC1091
-                . "${PM_RUNTIME_HELPER}"
-            fi
+        # Try non-interactive sudo first (works when password is cached or NOPASSWD
+        # is configured; fastest path, never blocks waiting for authentication).
+        if sudo -n /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1; then
+            _znh_pm_rt_deploy_ok=1
+        # Try pkexec (opens a GUI polkit authentication dialog when a polkit agent
+        # is running in the desktop session).
+        elif pkexec /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1; then
+            _znh_pm_rt_deploy_ok=1
+        # Fall back to interactive sudo (prompts for a password on /dev/tty).
+        elif sudo /usr/local/bin/zypper-auto-helper --deploy-pm-runtime >/dev/null 2>&1; then
+            _znh_pm_rt_deploy_ok=1
         fi
+    fi
+    if [ "${_znh_pm_rt_deploy_ok}" -eq 1 ] 2>/dev/null && [ -r "${PM_RUNTIME_HELPER}" ]; then
+        log "PM runtime helper auto-deployed successfully."
+        say "✓ PM runtime helper deployed."
+        # shellcheck disable=SC1091
+        . "${PM_RUNTIME_HELPER}"
     fi
 fi
 # If PM runtime is STILL not loaded after auto-deploy attempt, use inline stubs.
