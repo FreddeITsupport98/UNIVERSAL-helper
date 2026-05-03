@@ -365,11 +365,45 @@ znh_fedora_upgrade_already_staged() {
     local d
     for d in /usr/lib/sysimage/libdnf5/offline /var/lib/dnf/system-upgrade; do
         if [ -d "${d}" ] && [ -n "$(ls -A "${d}" 2>/dev/null)" ]; then
+            # Directory has files, but if the transaction is incomplete
+            # (interrupted download or user rebooted normally), it is NOT
+            # ready — dnf5 offline reboot will refuse.
+            if znh_fedora_offline_transaction_incomplete; then
+                return 1
+            fi
             return 0
         fi
     done
 
     return 1
+}
+
+znh_fedora_offline_transaction_incomplete() {
+    # Returns 0 if the dnf5 offline transaction state file exists and its
+    # status is "transaction-incomplete" (i.e. a previous upgrade attempt
+    # was interrupted — the user rebooted normally instead of via
+    # `dnf5 offline reboot`, or the download was interrupted). In this
+    # state `dnf5 offline reboot` refuses with "System is not ready for
+    # offline transaction" and the packages must be re-downloaded.
+    local state_toml="/usr/lib/sysimage/libdnf5/offline/offline-transaction-state.toml"
+    [ -f "${state_toml}" ] || return 1
+    local status_val
+    status_val="$(sed -n 's/^[[:space:]]*status[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "${state_toml}" 2>/dev/null | head -n 1)"
+    [ "${status_val}" = "transaction-incomplete" ]
+}
+
+znh_fedora_offline_transaction_clean() {
+    # Cleans a stale/incomplete dnf5 offline transaction so a fresh
+    # `system-upgrade download` can re-stage cleanly.
+    local dnf_bin="${1:-dnf5}"
+    printf 'Cleaning stale offline transaction state…\n'
+    if [ "${dnf_bin}" = "dnf5" ] && command -v dnf5 >/dev/null 2>&1; then
+        dnf5 offline clean 2>/dev/null || true
+    fi
+    # Belt-and-suspenders: remove the state file directly if dnf5 offline
+    # clean didn't do it (older dnf5 versions lack the clean subcommand).
+    rm -f /usr/lib/sysimage/libdnf5/offline/offline-transaction-state.toml 2>/dev/null || true
 }
 
 znh_distro_upgrade_check_fedora() {
@@ -928,6 +962,37 @@ znh_distro_upgrade_run_finish() {
             else
                 printf '%s\n' "dnf/dnf5 not found; cannot run system-upgrade reboot." >&2
                 return 1
+            fi
+
+            # Auto-heal incomplete offline transactions: if a previous
+            # upgrade attempt was interrupted (normal reboot instead of
+            # offline reboot, or download was cut short), dnf5 offline
+            # reboot refuses with "System is not ready for offline
+            # transaction". Detect this and automatically re-download
+            # the packages so the user doesn't have to intervene.
+            if znh_fedora_offline_transaction_incomplete; then
+                printf 'Detected incomplete offline transaction — re-staging download automatically…\n'
+                local _fin_target="${ZNH_DISTRO_UPGRADE_TARGET:-}"
+                if [ -z "${_fin_target}" ]; then
+                    # Try to recover target from the TOML state file.
+                    local _toml="/usr/lib/sysimage/libdnf5/offline/offline-transaction-state.toml"
+                    if [ -f "${_toml}" ]; then
+                        _fin_target="$(sed -n 's/^[[:space:]]*target_releasever[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+                            "${_toml}" 2>/dev/null | head -n 1)"
+                    fi
+                fi
+                if [ -z "${_fin_target}" ]; then
+                    printf 'ERROR: cannot determine target releasever for re-download.\n' >&2
+                    printf 'Run: sudo zypper-auto-helper --distro-upgrade apply --yes\n' >&2
+                    return 1
+                fi
+                znh_fedora_offline_transaction_clean "${dnf_bin}"
+                printf 'Re-downloading: %s system-upgrade download --refresh --releasever=%s -y\n' "${dnf_bin}" "${_fin_target}"
+                if ! "${dnf_bin}" system-upgrade download --refresh --releasever="${_fin_target}" -y; then
+                    printf 'ERROR: re-download failed (rc=%s). Cannot proceed with reboot.\n' "$?" >&2
+                    return 1
+                fi
+                printf 'Re-download complete. Proceeding with offline reboot…\n\n'
             fi
 
             # Try multiple paths because dnf5 versions differ:
