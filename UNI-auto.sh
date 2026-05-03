@@ -31283,7 +31283,7 @@ generate_dashboard() {
                 familyExplain = 'RHEL/CentOS-style distros use <code>leapp</code> for major-version migration. Follow the Red Hat documentation linked below.';
                 break;
             default:
-                familyExplain = 'No automated upgrade path is available for this distro family. Refer to your distro's upstream upgrade guide.';
+                familyExplain = 'No automated upgrade path is available for this distro family. Refer to the upstream upgrade guide for your distro.';
         }
 
         // When packages are already downloaded, show a reboot-focused view
@@ -31394,9 +31394,8 @@ generate_dashboard() {
             (actions.length ? ('<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top: 10px;">' + actions.join('\n') + '</div>') : ''),
             safetyBlock
         ].join('\n');
-        ].join('\n');
 
-        _ruSetHeader('Distro upgrade', 'Step 1/1', distroName + ' ' + current + ' → ' + target);
+        _ruSetHeader('Distro upgrade', 'Step 1/1', distroName + ' ' + current + ' \u2192 ' + target);
         _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
 
         // Wire action handlers.
