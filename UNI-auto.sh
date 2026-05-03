@@ -350,6 +350,15 @@ znh_fedora_upgrade_already_staged() {
     # at the common offline transaction directories.
     local dnf_bin="${1:-dnf}" target="${2:-}"
 
+    # Early-exit: if the TOML state file says "transaction-incomplete" the
+    # offline transaction is NOT usable — dnf5 offline reboot will refuse.
+    # This check MUST run before any other method because `dnf5 offline
+    # status` still mentions "system-upgrade" for incomplete transactions
+    # and the grep below would incorrectly match.
+    if znh_fedora_offline_transaction_incomplete; then
+        return 1
+    fi
+
     # Method 1: dnf5 offline status (most reliable on modern Fedora).
     # Force LC_ALL=C so the output is always English regardless of the
     # user's locale (e.g. Swedish "systemuppgradering" would not match
@@ -365,12 +374,6 @@ znh_fedora_upgrade_already_staged() {
     local d
     for d in /usr/lib/sysimage/libdnf5/offline /var/lib/dnf/system-upgrade; do
         if [ -d "${d}" ] && [ -n "$(ls -A "${d}" 2>/dev/null)" ]; then
-            # Directory has files, but if the transaction is incomplete
-            # (interrupted download or user rebooted normally), it is NOT
-            # ready — dnf5 offline reboot will refuse.
-            if znh_fedora_offline_transaction_incomplete; then
-                return 1
-            fi
             return 0
         fi
     done
@@ -810,6 +813,13 @@ znh_distro_upgrade_run_apply() {
             else
                 dnf_bin="dnf"
             fi
+            # If the offline transaction is incomplete (interrupted), clean
+            # it so system-upgrade download can re-stage from scratch.
+            if znh_fedora_offline_transaction_incomplete; then
+                printf 'Incomplete offline transaction detected \u2014 running dnf5 offline clean before re-download.\n'
+                znh_fedora_offline_transaction_clean "${dnf_bin}"
+            fi
+
             # Check if packages are already downloaded and staged.
             if znh_fedora_upgrade_already_staged "${dnf_bin}" "${target}"; then
                 printf 'System upgrade packages for Fedora %s are already downloaded and staged.\n' "${target}"
