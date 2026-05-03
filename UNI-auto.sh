@@ -26511,7 +26511,7 @@ generate_dashboard() {
 
     // --- Self-update (dashboard UI) ---
     var GITHUB_OWNER = 'FreddeITsupport98';
-    var GITHUB_REPO = 'zypper-automatik-helper-';
+    var GITHUB_REPO = 'UNIVERSAL-helper';
 
     // Self-update UI safety locks:
     // - Prevent switching channel while a status check is running
@@ -47106,7 +47106,7 @@ run_self_update_only() {
     local current_line current_ver
     local stable_policy stable_selection stable_fallback_reason stable_is_prerelease stable_info
 
-    repo="FreddeITsupport98/zypper-automatik-helper-"
+    repo="FreddeITsupport98/UNIVERSAL-helper"
 
     tag=""
     remote_sha=""
@@ -47225,8 +47225,8 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
         fi
 
         # Prefer a release asset if you ever publish one, but fall back to raw from tag (works today).
-        raw_url_asset="https://github.com/${repo}/releases/download/${tag}/zypper-auto.sh"
-        raw_url_tag="https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh"
+        raw_url_asset="https://github.com/${repo}/releases/download/${tag}/UNI-auto.sh"
+        raw_url_tag="https://raw.githubusercontent.com/${repo}/${tag}/UNI-auto.sh"
         log_info "[self-update] Stable policy=${stable_policy} selected=${stable_selection} tag=${tag}"
         if [ "${stable_is_prerelease}" = "1" ] 2>/dev/null; then
             log_warn "[self-update] Selected stable target is a prerelease candidate (${tag})."
@@ -47252,9 +47252,9 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
         fi
 
         if [ -n "${remote_sha:-}" ]; then
-            raw_url="https://raw.githubusercontent.com/${repo}/${remote_sha}/zypper-auto.sh"
+            raw_url="https://raw.githubusercontent.com/${repo}/${remote_sha}/UNI-auto.sh"
         else
-            raw_url="https://raw.githubusercontent.com/${repo}/main/zypper-auto.sh"
+            raw_url="https://raw.githubusercontent.com/${repo}/main/UNI-auto.sh"
         fi
 
         installed_ref="${installed_rolling_sha:-}"
@@ -47448,8 +47448,8 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
             "${raw_url_asset}.sha256sum" \
             "${raw_url_tag}.sha256" \
             "${raw_url_tag}.sha256sum" \
-            "https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh.sha256" \
-            "https://raw.githubusercontent.com/${repo}/${tag}/zypper-auto.sh.sha256sum"; do
+            "https://raw.githubusercontent.com/${repo}/${tag}/UNI-auto.sh.sha256" \
+            "https://raw.githubusercontent.com/${repo}/${tag}/UNI-auto.sh.sha256sum"; do
 
             if curl -sL --fail --connect-timeout 10 --max-time 20 "${chk_url}" -o "${chk_file}" 2>/dev/null; then
                 break
@@ -58023,7 +58023,7 @@ def _allowed_origin(origin: str | None) -> str | None:
 
 # --- Self-update helpers (dashboard API) ---
 GITHUB_OWNER = "FreddeITsupport98"
-GITHUB_REPO = "zypper-automatik-helper-"
+GITHUB_REPO = "UNIVERSAL-helper"
 HELPER_BIN = "/usr/local/bin/zypper-auto-helper"
 SELF_UPDATE_STATE_FILE = "/var/lib/zypper-auto/self-update-state.json"
 
@@ -58647,8 +58647,8 @@ def _stable_release_urls(tag: str) -> list[str]:
     if not t:
         return []
     return [
-        f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{t}/zypper-auto.sh",
-        f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{t}/zypper-auto.sh",
+        f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{t}/UNI-auto.sh",
+        f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{t}/UNI-auto.sh",
     ]
 
 
@@ -58725,6 +58725,7 @@ def _read_remote_script_bytes(ref: str, timeout_s: int = 15) -> tuple[bytes, str
     if not ref_s:
         return b"", ""
     candidates = [
+        "UNI-auto.sh",
         "zypper-auto.sh",
         "zypper-auto-helper",
         "zypper-auto-helper.sh",
@@ -63296,7 +63297,7 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             download_urls = _stable_release_urls(remote_ref)
                     else:
-                        pth = remote_script_path or "zypper-auto.sh"
+                        pth = remote_script_path or "UNI-auto.sh"
                         download_urls = [
                             f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{remote_ref}/{pth}",
                         ]
