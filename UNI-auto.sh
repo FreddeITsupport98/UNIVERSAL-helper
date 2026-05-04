@@ -418,6 +418,20 @@ znh_distro_upgrade_check_fedora() {
     [ -n "${current}" ] || return 1
     [[ "${current}" =~ ^[0-9]+$ ]] || return 1
 
+    # Staleness guard: if the state file exists with a target_version that is
+    # <= the current VERSION_ID, the upgrade has already been applied (e.g.
+    # the user upgraded 43→44 and rebooted). Clear the stale state so the
+    # "already staged" fallback below doesn't recover the outdated target.
+    if [ -f "${ZNH_DISTRO_UPGRADE_STATE_FILE}" ]; then
+        local _stale_target=""
+        _stale_target="$(sed -n 's/.*"target_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null | head -n 1)"
+        if [[ "${_stale_target:-}" =~ ^[0-9]+$ ]] && [ "${_stale_target}" -le "${current}" ] 2>/dev/null; then
+            # Target already reached or surpassed; clear stale state.
+            rm -f "${ZNH_DISTRO_UPGRADE_STATE_FILE}" 2>/dev/null || true
+        fi
+    fi
+
     if command -v dnf5 >/dev/null 2>&1; then
         dnf_bin="dnf5"
     elif command -v dnf >/dev/null 2>&1; then
@@ -458,9 +472,14 @@ znh_distro_upgrade_check_fedora() {
         if [ -z "${staged_target}" ]; then
             staged_target=$((current + 1))
         fi
-        ZNH_DISTRO_UPGRADE_AVAILABLE=1
-        ZNH_DISTRO_UPGRADE_TARGET="${staged_target}"
-        return 0
+        # Guard: only claim upgrade if the staged target is actually HIGHER
+        # than the current version. If target <= current the upgrade was
+        # already applied and these are leftover files.
+        if [[ "${staged_target}" =~ ^[0-9]+$ ]] && [ "${staged_target}" -gt "${current}" ] 2>/dev/null; then
+            ZNH_DISTRO_UPGRADE_AVAILABLE=1
+            ZNH_DISTRO_UPGRADE_TARGET="${staged_target}"
+            return 0
+        fi
     fi
 
     ZNH_DISTRO_UPGRADE_AVAILABLE=0
@@ -29799,7 +29818,15 @@ generate_dashboard() {
 
         // Hide on rolling/uptodate/manual/unknown distros AND when the user
         // dismissed the banner this session.
+        // Staleness guard: if both versions are numeric and target <= current,
+        // the upgrade was already applied (e.g. 43→44 completed, system is on 44).
         if (!actionable || _znhDistroUpgradeDismissed) {
+            card.style.display = 'none';
+            return;
+        }
+        var _curNum = parseInt(current, 10);
+        var _tgtNum = parseInt(target, 10);
+        if (!isNaN(_curNum) && !isNaN(_tgtNum) && _tgtNum <= _curNum) {
             card.style.display = 'none';
             return;
         }
@@ -62777,6 +62804,17 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            # Staleness guard: if both versions are numeric and target <= current,
+            # the upgrade has already been applied (e.g. 43→44 completed). Force
+            # status to "uptodate" so the banner disappears after reboot.
+            try:
+                if current_version.isdigit() and target_version.isdigit():
+                    if int(target_version) <= int(current_version):
+                        status = "uptodate"
+                        reason = f"Upgrade already applied (was {current_version}→{target_version}; current is {current_version})."
+            except Exception:
+                pass
+
             actionable = bool(release_model == "fixed" and status in ("available", "downloaded"))
             reboot_ready = bool(release_model == "fixed" and status == "downloaded")
 
@@ -62958,6 +62996,17 @@ class Handler(BaseHTTPRequestHandler):
                     manual_url = "https://access.redhat.com/articles/4263361"
                     reboot_command = "sudo systemctl reboot"
                     reboot_quick_action_supported = True
+
+            # Staleness guard: if both versions are numeric and target <= current,
+            # the upgrade has already been applied. Force status to "uptodate".
+            try:
+                if current_version.isdigit() and target_version.isdigit():
+                    if int(target_version) <= int(current_version):
+                        status = "uptodate"
+                        reason = f"Upgrade already applied (was {current_version}→{target_version}; current is {current_version})."
+                        reboot_ready = False
+            except Exception:
+                pass
 
             actionable = bool(
                 release_model == "fixed"
