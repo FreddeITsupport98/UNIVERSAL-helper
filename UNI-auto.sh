@@ -103,6 +103,163 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
     echo "Notice: detected package manager '${SYSTEM_PKG_MANAGER}'. Cross-distro update engine active (apt/dnf/pacman/zypper); zypper-only deep-repair paths are skipped with reason logs." >&2
 fi
 
+# ---------------------------------------------------------------------
+# System capability detection (bash-level, for CLI dispatch guards)
+# ---------------------------------------------------------------------
+# Mirrors the Python _compute_system_capabilities() used by the dashboard
+# API so the bash CLI dispatch can gate flags that are only safe/useful on
+# specific filesystems, package managers, or bootloader layouts.
+#
+# These variables are populated once by znh_detect_system_capabilities()
+# before the CLI dispatch runs; individual flags then call
+# znh_require_capability() to emit a clear, actionable error when the
+# user's system does not support the requested operation.
+
+ZNH_ROOT_FSTYPE="unknown"
+ZNH_BTRFS_ROOT=0
+ZNH_SNAPPER_INSTALLED=0
+ZNH_SNAPPER_ROOT_CONFIG=0
+ZNH_SNAPPER_AVAILABLE=0
+ZNH_RPM_BASED=0
+ZNH_DEB_BASED=0
+ZNH_BLS_ENTRIES_PRESENT=0
+ZNH_BLS_ENTRIES_DIR=""
+ZNH_SYSTEMD_BOOT=0
+ZNH_GRUB_DETECTED=0
+ZNH_GHOST_SCRUB_CAPABLE=0
+
+znh_detect_system_capabilities() {
+    # Root filesystem type (findmnt -> /proc/mounts fallback)
+    local _fs=""
+    if command -v findmnt >/dev/null 2>&1; then
+        _fs="$(findmnt -n -o FSTYPE / 2>/dev/null | head -n1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    fi
+    if [ -z "${_fs}" ] || [ "${_fs}" = "unknown" ]; then
+        _fs="$(awk '$2 == "/" {print $3; exit}' /proc/mounts 2>/dev/null || echo "unknown")"
+        _fs="$(printf '%s' "${_fs}" | tr '[:upper:]' '[:lower:]')"
+    fi
+    ZNH_ROOT_FSTYPE="${_fs:-unknown}"
+    [ "${ZNH_ROOT_FSTYPE}" = "btrfs" ] && ZNH_BTRFS_ROOT=1
+
+    # Snapper support
+    command -v snapper >/dev/null 2>&1 && ZNH_SNAPPER_INSTALLED=1
+    [ -f /etc/snapper/configs/root ] && ZNH_SNAPPER_ROOT_CONFIG=1
+    if [ "${ZNH_BTRFS_ROOT}" -eq 1 ] && [ "${ZNH_SNAPPER_INSTALLED}" -eq 1 ] \
+       && [ "${ZNH_SNAPPER_ROOT_CONFIG}" -eq 1 ]; then
+        ZNH_SNAPPER_AVAILABLE=1
+    fi
+
+    # Package manager family
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper|dnf) ZNH_RPM_BASED=1 ;;
+        apt)        ZNH_DEB_BASED=1 ;;
+    esac
+
+    # BLS boot entries
+    local _d
+    for _d in /boot/loader/entries /boot/efi/loader/entries /efi/loader/entries; do
+        if [ -d "${_d}" ]; then
+            ZNH_BLS_ENTRIES_PRESENT=1
+            ZNH_BLS_ENTRIES_DIR="${_d}"
+            break
+        fi
+    done
+
+    # Bootloader detection
+    local _p
+    for _p in /boot/loader/loader.conf /efi/loader/loader.conf; do
+        if [ -f "${_p}" ]; then ZNH_SYSTEMD_BOOT=1; break; fi
+    done
+    for _p in /boot/grub2/grub.cfg /boot/grub/grub.cfg; do
+        if [ -f "${_p}" ]; then ZNH_GRUB_DETECTED=1; break; fi
+    done
+
+    # Ghost-scrub / boot-entry cleanup: snapper + BLS + a bootloader
+    if [ "${ZNH_SNAPPER_AVAILABLE}" -eq 1 ] && [ "${ZNH_BLS_ENTRIES_PRESENT}" -eq 1 ] \
+       && { [ "${ZNH_SYSTEMD_BOOT}" -eq 1 ] || [ "${ZNH_GRUB_DETECTED}" -eq 1 ]; }; then
+        ZNH_GHOST_SCRUB_CAPABLE=1
+    fi
+}
+
+znh_require_capability() {
+    # Usage: znh_require_capability <capability> <flag_name>
+    # Returns 0 if the system meets the requirement, 1 otherwise.
+    # On failure, prints a clear multi-line diagnostic to stderr.
+    local cap="$1" flag="$2"
+    case "${cap}" in
+        snapper)
+            if [ "${ZNH_SNAPPER_AVAILABLE}" -eq 1 ] 2>/dev/null; then return 0; fi
+            echo "" >&2
+            echo "ERROR: '${flag}' requires Snapper on a btrfs root filesystem." >&2
+            echo "Your system:" >&2
+            echo "  Root filesystem : ${ZNH_ROOT_FSTYPE}" >&2
+            echo "  Snapper command : $([ "${ZNH_SNAPPER_INSTALLED}" -eq 1 ] && echo 'installed' || echo 'NOT installed')" >&2
+            echo "  Snapper config  : $([ "${ZNH_SNAPPER_ROOT_CONFIG}" -eq 1 ] && echo 'present' || echo 'MISSING /etc/snapper/configs/root')" >&2
+            echo "" >&2
+            echo "Reason(s) this flag is blocked:" >&2
+            [ "${ZNH_BTRFS_ROOT}" -ne 1 ]         && echo "  → Root filesystem is '${ZNH_ROOT_FSTYPE}' (btrfs required for snapshots)" >&2
+            [ "${ZNH_SNAPPER_INSTALLED}" -ne 1 ]   && echo "  → Install snapper: $(znh_install_hint_for_package "$(znh_resolve_package_name snapper)")" >&2
+            [ "${ZNH_SNAPPER_ROOT_CONFIG}" -ne 1 ] && echo "  → Create root config: sudo snapper -c root create-config /" >&2
+            echo "" >&2
+            return 1
+            ;;
+        btrfs)
+            if [ "${ZNH_BTRFS_ROOT}" -eq 1 ] 2>/dev/null; then return 0; fi
+            echo "" >&2
+            echo "ERROR: '${flag}' requires a btrfs root filesystem." >&2
+            echo "  Your root filesystem is '${ZNH_ROOT_FSTYPE}'." >&2
+            echo "" >&2
+            return 1
+            ;;
+        rpm)
+            if [ "${ZNH_RPM_BASED}" -eq 1 ] 2>/dev/null; then return 0; fi
+            echo "" >&2
+            echo "ERROR: '${flag}' requires an RPM-based system (zypper or dnf)." >&2
+            echo "  Detected package manager: '${SYSTEM_PKG_MANAGER}'" >&2
+            if [ "${ZNH_DEB_BASED}" -eq 1 ]; then
+                echo "  On Debian/Ubuntu systems, duplicate package issues are handled differently." >&2
+                echo "  Try: sudo dpkg --configure -a" >&2
+            elif [ "${SYSTEM_PKG_MANAGER}" = "pacman" ]; then
+                echo "  On Arch-based systems, package conflicts are handled differently." >&2
+                echo "  Try: sudo pacman -Syu" >&2
+            fi
+            echo "" >&2
+            return 1
+            ;;
+        ghost_scrub)
+            if [ "${ZNH_GHOST_SCRUB_CAPABLE}" -eq 1 ] 2>/dev/null; then return 0; fi
+            echo "" >&2
+            echo "ERROR: '${flag}' requires Snapper + BLS boot entries + a supported bootloader." >&2
+            echo "Your system:" >&2
+            echo "  Snapper available : $([ "${ZNH_SNAPPER_AVAILABLE}" -eq 1 ] && echo 'yes' || echo 'NO')" >&2
+            echo "  BLS entries       : $([ "${ZNH_BLS_ENTRIES_PRESENT}" -eq 1 ] && echo "yes (${ZNH_BLS_ENTRIES_DIR})" || echo 'NOT found')" >&2
+            echo "  systemd-boot      : $([ "${ZNH_SYSTEMD_BOOT}" -eq 1 ] && echo 'detected' || echo 'not detected')" >&2
+            echo "  GRUB              : $([ "${ZNH_GRUB_DETECTED}" -eq 1 ] && echo 'detected' || echo 'not detected')" >&2
+            echo "" >&2
+            echo "Reason(s) this flag is blocked:" >&2
+            [ "${ZNH_SNAPPER_AVAILABLE}" -ne 1 ] && echo "  → Snapper not fully available (requires btrfs root + snapper + config)" >&2
+            [ "${ZNH_BLS_ENTRIES_PRESENT}" -ne 1 ] && echo "  → No BLS entries directory found (/boot/loader/entries)" >&2
+            if [ "${ZNH_SYSTEMD_BOOT}" -ne 1 ] && [ "${ZNH_GRUB_DETECTED}" -ne 1 ]; then
+                echo "  → No supported bootloader detected (systemd-boot or GRUB)" >&2
+            fi
+            echo "" >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+znh_warn_limited_on_system() {
+    # Prints a non-fatal warning that a flag has limited functionality on
+    # this system. Does NOT block execution.
+    local flag="$1" reason="$2"
+    echo "" >&2
+    echo "NOTE: '${flag}' has limited functionality on this system:" >&2
+    echo "  ${reason}" >&2
+    echo "  The command will still run, but some checks may be skipped or produce no output." >&2
+    echo "" >&2
+}
+
 znh_resolve_package_name() {
     local logical="$1"
     case "${SYSTEM_PKG_MANAGER}:${logical}" in
@@ -49263,6 +49420,13 @@ if [[ "${1:-}" == "--self-check" || "${1:-}" == "--check" ]]; then
     exit 0
 fi
 
+# --- Detect system capabilities before CLI dispatch ---
+# This populates ZNH_ROOT_FSTYPE, ZNH_BTRFS_ROOT, ZNH_SNAPPER_AVAILABLE,
+# ZNH_RPM_BASED, ZNH_GHOST_SCRUB_CAPABLE etc. so per-flag guards can
+# block operations that would fail or damage the user's system.
+znh_detect_system_capabilities
+log_debug "[capabilities] rootfs=${ZNH_ROOT_FSTYPE} btrfs=${ZNH_BTRFS_ROOT} snapper=${ZNH_SNAPPER_AVAILABLE} rpm=${ZNH_RPM_BASED} deb=${ZNH_DEB_BASED} pm=${SYSTEM_PKG_MANAGER} bls=${ZNH_BLS_ENTRIES_PRESENT} ghost_scrub=${ZNH_GHOST_SCRUB_CAPABLE}"
+
 # Optional modes: Soar, Homebrew, pipx, reset-state, diagnostics, and uninstall helper-only
 if [[ "${1:-}" == "--soar" ]]; then
     log_info "Soar helper-only mode requested"
@@ -49335,6 +49499,9 @@ elif [[ "${1:-}" == "--distro-upgrade" ]]; then
     znh_distro_upgrade_cli_dispatch "$@"
     exit $?
 elif [[ "${1:-}" == "--rollback" ]]; then
+    if ! znh_require_capability snapper "--rollback"; then
+        exit 1
+    fi
     log_info "Rollback wizard mode requested"
     run_rollback_wizard_only
     exit $?
@@ -49413,11 +49580,18 @@ elif [[ "${1:-}" == "--stale-module-dirs" || "${1:-}" == "--stale-modules" ]]; t
     run_stale_module_dirs_only "${STALE_MODE}" "${STALE_ASSUME_YES}" "${STALE_QUARANTINE_ROOT}"
     exit $?
 elif [[ "${1:-}" == "--analyze" || "${1:-}" == "--health" ]]; then
+    if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
+        znh_warn_limited_on_system "${1}" \
+            "Deep zypper.log analysis requires zypper (detected: ${SYSTEM_PKG_MANAGER}). General checks will still run."
+    fi
     log_info "Log health analysis mode requested"
     # Pass any additional arguments (e.g. TID=GUI-xxxx) through to the analyzer.
     run_analyze_logs_only "${@:2}"
     exit $?
 elif [[ "${1:-}" == "--rm-conflict" ]]; then
+    if ! znh_require_capability rpm "--rm-conflict"; then
+        exit 1
+    fi
     log_info "Duplicate RPM conflict cleanup mode requested"
     run_rm_conflict_only
     exit $?
@@ -49546,6 +49720,9 @@ elif [[ "${1:-}" == "--live-logs" ]]; then
     trap - INT TERM
     exit 0
 elif [[ "${1:-}" == "scrub-ghost" ]]; then
+    if ! znh_require_capability ghost_scrub "scrub-ghost"; then
+        exit 1
+    fi
     shift || true
 
     # Ensure the embedded scrub tool is installed (best-effort) before dispatch.
@@ -49560,6 +49737,9 @@ elif [[ "${1:-}" == "scrub-ghost" ]]; then
     log_error "scrub-ghost tool not installed (expected /usr/local/bin/zypper-scrub-ghost)"
     exit 1
 elif [[ "${1:-}" == "snapper" ]]; then
+    if ! znh_require_capability snapper "snapper"; then
+        exit 1
+    fi
     log_info "Snapper tools menu requested"
     shift || true
     # Snapper submenu is best-effort and can legitimately return non-zero
@@ -49586,6 +49766,10 @@ elif [[ "${1:-}" == "--diag-logs-off" ]]; then
     update_status "SUCCESS: Diagnostics log follower disabled"
     exit 0
 elif [[ "${1:-}" == "--snapshot-state" ]]; then
+    if [ "${ZNH_SNAPPER_AVAILABLE}" -ne 1 ] 2>/dev/null; then
+        znh_warn_limited_on_system "--snapshot-state" \
+            "Snapper is not available (rootfs=${ZNH_ROOT_FSTYPE}); snapshot/zypper-preview sections will be empty."
+    fi
     log_info "Diagnostics snapshot mode requested"
     run_snapshot_state_only
     exit $?
@@ -50785,6 +50969,13 @@ DOWNLOADER_DOWNLOAD_MODE="${DOWNLOADER_DOWNLOAD_MODE:-full}"
 # (Tumbleweed/Arch/Manjaro/...) are skipped because they don't have a
 # separate distro upgrade event.
 DOWNLOADER_INCLUDE_DISTRO_UPGRADE="${DOWNLOADER_INCLUDE_DISTRO_UPGRADE:-true}"
+# Network retry: transient network errors (DNS blips, intermittent connectivity)
+# can cause false error:network alerts on the dashboard. The downloader now
+# retries up to DOWNLOADER_NETWORK_RETRY_COUNT times with exponential backoff
+# (base delay DOWNLOADER_NETWORK_RETRY_BACKOFF_SECONDS * attempt) before
+# giving up and writing the error status.
+DOWNLOADER_NETWORK_RETRY_COUNT="${DOWNLOADER_NETWORK_RETRY_COUNT:-3}"
+DOWNLOADER_NETWORK_RETRY_BACKOFF_SECONDS="${DOWNLOADER_NETWORK_RETRY_BACKOFF_SECONDS:-5}"
 PM_RUNTIME_HELPER="/usr/local/lib/zypper-auto/package-manager-runtime.sh"
 if [ -r "${PM_RUNTIME_HELPER}" ]; then
     # shellcheck disable=SC1091
@@ -51118,19 +51309,45 @@ znh_downloader_handle_stage_failure() {
 }
 
 znh_downloader_refresh_step() {
-    local refresh_err
-    refresh_err="$(mktemp)"
-    set +e
-    znh_pm_downloader_refresh_run >/dev/null 2>"${refresh_err}"
-    local refresh_rc=$?
-    set -e
-    if [ "${refresh_rc}" -ne 0 ]; then
+    local max_retries="${DOWNLOADER_NETWORK_RETRY_COUNT:-3}"
+    local backoff="${DOWNLOADER_NETWORK_RETRY_BACKOFF_SECONDS:-5}"
+    [[ "${max_retries:-}" =~ ^[0-9]+$ ]] || max_retries=3
+    [[ "${backoff:-}" =~ ^[0-9]+$ ]] || backoff=5
+    if [ "${max_retries}" -lt 1 ] 2>/dev/null; then max_retries=1; fi
+
+    local attempt=0 refresh_err refresh_rc
+    while [ "${attempt}" -lt "${max_retries}" ]; do
+        attempt=$((attempt + 1))
+        refresh_err="$(mktemp)"
+        set +e
+        znh_pm_downloader_refresh_run >/dev/null 2>"${refresh_err}"
+        refresh_rc=$?
+        set -e
+
+        if [ "${refresh_rc}" -eq 0 ]; then
+            rm -f "${refresh_err}"
+            return 0
+        fi
+
+        # Only retry on network errors; non-network failures break immediately.
+        if znh_pm_is_network_output_file "${refresh_err}"; then
+            if [ "${attempt}" -lt "${max_retries}" ]; then
+                local wait_secs=$((backoff * attempt))
+                dlog "refresh network error (attempt ${attempt}/${max_retries}, pm=${SYSTEM_PKG_MANAGER}); retrying in ${wait_secs}s"
+                znh_downloader_write_status "refreshing" "refresh retry ${attempt}/${max_retries} after network error (waiting ${wait_secs}s)"
+                sleep "${wait_secs}"
+                rm -f "${refresh_err}"
+                continue
+            fi
+            dlog "refresh network error (final attempt ${attempt}/${max_retries}, pm=${SYSTEM_PKG_MANAGER}); giving up"
+        fi
+
+        # Final failure (either non-network error or last retry exhausted)
         znh_downloader_handle_stage_failure "refresh" "${refresh_rc}" "${refresh_err}" || true
         rm -f "${refresh_err}"
         return 1
-    fi
-    rm -f "${refresh_err}"
-    return 0
+    done
+    return 1
 }
 
 znh_downloader_preview_step() {
@@ -51510,9 +51727,36 @@ if [ "${SYSTEM_PKG_MANAGER}" != "zypper" ]; then
         rm -f "$DRY_OUTPUT"
         exit 0
     fi
+    # Retry loop for transient network errors during prefetch download.
+    _dl_attempt=0
+    _dl_max="${DOWNLOADER_NETWORK_RETRY_COUNT:-3}"
+    _dl_back="${DOWNLOADER_NETWORK_RETRY_BACKOFF_SECONDS:-5}"
+    [[ "${_dl_max:-}" =~ ^[0-9]+$ ]] || _dl_max=3
+    [[ "${_dl_back:-}" =~ ^[0-9]+$ ]] || _dl_back=5
+    if [ "${_dl_max}" -lt 1 ] 2>/dev/null; then _dl_max=1; fi
     ZYP_RET=0
     DL_ERR_FILE=""
-    znh_downloader_run_prefetch_download ZYP_RET DL_ERR_FILE
+    while [ "${_dl_attempt}" -lt "${_dl_max}" ]; do
+        _dl_attempt=$((_dl_attempt + 1))
+        ZYP_RET=0
+        DL_ERR_FILE=""
+        znh_downloader_run_prefetch_download ZYP_RET DL_ERR_FILE
+        if [ "${ZYP_RET}" -eq 0 ]; then
+            break
+        fi
+        # Only retry on network errors
+        if [ -n "${DL_ERR_FILE}" ] && [ -f "${DL_ERR_FILE}" ] && znh_pm_is_network_output_file "${DL_ERR_FILE}"; then
+            if [ "${_dl_attempt}" -lt "${_dl_max}" ]; then
+                _dl_wait=$((_dl_back * _dl_attempt))
+                dlog "prefetch download network error (attempt ${_dl_attempt}/${_dl_max}, pm=${SYSTEM_PKG_MANAGER}); retrying in ${_dl_wait}s"
+                znh_downloader_write_status "downloading:${PKG_COUNT}:${DOWNLOAD_SIZE}:0:0" "download retry ${_dl_attempt}/${_dl_max} after network error (waiting ${_dl_wait}s)"
+                sleep "${_dl_wait}"
+                rm -f "${DL_ERR_FILE}" 2>/dev/null || true
+                continue
+            fi
+        fi
+        break
+    done
 
     START_TIME=$(cat "$START_TIME_FILE" 2>/dev/null || date +%s)
     END_TIME=$(date +%s)
@@ -51671,9 +51915,36 @@ wait_for_cache_event_or_timeout() {
 ) &
 TRACKER_PID=$!
 
+# Retry loop for transient network errors during prefetch download (zypper path).
+_dl_attempt=0
+_dl_max="${DOWNLOADER_NETWORK_RETRY_COUNT:-3}"
+_dl_back="${DOWNLOADER_NETWORK_RETRY_BACKOFF_SECONDS:-5}"
+[[ "${_dl_max:-}" =~ ^[0-9]+$ ]] || _dl_max=3
+[[ "${_dl_back:-}" =~ ^[0-9]+$ ]] || _dl_back=5
+if [ "${_dl_max}" -lt 1 ] 2>/dev/null; then _dl_max=1; fi
 ZYP_RET=0
 DL_ERR_FILE=""
-znh_downloader_run_prefetch_download ZYP_RET DL_ERR_FILE
+while [ "${_dl_attempt}" -lt "${_dl_max}" ]; do
+    _dl_attempt=$((_dl_attempt + 1))
+    ZYP_RET=0
+    DL_ERR_FILE=""
+    znh_downloader_run_prefetch_download ZYP_RET DL_ERR_FILE
+    if [ "${ZYP_RET}" -eq 0 ]; then
+        break
+    fi
+    # Only retry on network errors
+    if [ -n "${DL_ERR_FILE}" ] && [ -f "${DL_ERR_FILE}" ] && znh_pm_is_network_output_file "${DL_ERR_FILE}"; then
+        if [ "${_dl_attempt}" -lt "${_dl_max}" ]; then
+            _dl_wait=$((_dl_back * _dl_attempt))
+            dlog "prefetch download network error (attempt ${_dl_attempt}/${_dl_max}, pm=${SYSTEM_PKG_MANAGER}); retrying in ${_dl_wait}s"
+            znh_downloader_write_status "downloading:$PKG_COUNT:$DOWNLOAD_SIZE:0:0" "download retry ${_dl_attempt}/${_dl_max} after network error (waiting ${_dl_wait}s)"
+            sleep "${_dl_wait}"
+            rm -f "${DL_ERR_FILE}" 2>/dev/null || true
+            continue
+        fi
+    fi
+    break
+done
 
 # Kill the progress tracker
 kill $TRACKER_PID 2>/dev/null || true
