@@ -440,9 +440,35 @@ znh_distro_upgrade_check_fedora() {
         return 1
     fi
 
+    # Determine the latest officially released Fedora version from the
+    # Fedora Project releases API. This prevents false-positive upgrade
+    # banners when repoquery finds fedora-release for a branched/development
+    # version that hasn't been officially released yet (e.g. Rawhide or a
+    # branched-but-unreleased Fedora N+1).
+    local _fedora_api_latest=""
+    if command -v curl >/dev/null 2>&1; then
+        _fedora_api_latest="$(curl -sf --max-time 10 \
+            'https://fedoraproject.org/releases.json' 2>/dev/null \
+            | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    versions = [int(r["version"]) for r in data if r.get("version","").isdigit()]
+    print(max(versions) if versions else "")
+except Exception:
+    pass
+' 2>/dev/null || true)"
+    fi
+
     target=""
     for probe in 1 2 3; do
         candidate=$((current + probe))
+        # If the official API told us the latest released version, skip
+        # candidates above it — they exist in repos but aren't released.
+        if [[ "${_fedora_api_latest:-}" =~ ^[0-9]+$ ]] \
+           && [ "${candidate}" -gt "${_fedora_api_latest}" ] 2>/dev/null; then
+            continue
+        fi
         if "${dnf_bin}" --quiet repoquery --releasever="${candidate}" \
                --refresh --queryformat='%{name}' fedora-release 2>/dev/null \
                | grep -qx 'fedora-release'; then
