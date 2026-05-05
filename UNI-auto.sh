@@ -322,6 +322,37 @@ znh_install_package_via_system_pm() {
     esac
 }
 
+znh_install_package_via_system_pm_remove() {
+    local package="$1"
+    local -a as_root
+
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            return 1
+        fi
+        as_root=(sudo)
+    else
+        as_root=()
+    fi
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            execute_guarded "Remove package '${package}' via zypper" "${as_root[@]}" zypper --non-interactive remove "${package}"
+            ;;
+        dnf)
+            execute_guarded "Remove package '${package}' via dnf" "${as_root[@]}" dnf remove -y "${package}"
+            ;;
+        apt)
+            execute_guarded "Remove package '${package}' via apt-get" "${as_root[@]}" env DEBIAN_FRONTEND=noninteractive apt-get remove -y "${package}"
+            ;;
+        pacman)
+            execute_guarded "Remove package '${package}' via pacman" "${as_root[@]}" pacman -R --noconfirm "${package}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # ---------------------------------------------------------------------
 # Distro release-cycle / distro-upgrade detection helpers
 # ---------------------------------------------------------------------
@@ -49195,46 +49226,83 @@ run_setup_sf_only() {
         rc=1
     fi
 
-    # 4) Optionally remove KDE Discover (discover6) to avoid conflicting
-    # update stacks on openSUSE when this helper is managing system
-    # upgrades and Flatpak/Snap integration.
-    if rpm -q discover6 >/dev/null 2>&1; then
+    # 4) Optionally remove KDE Discover to avoid conflicting update stacks
+    # when this helper is managing system upgrades and Flatpak/Snap integration.
+    # Package names vary by distro: discover6 (openSUSE), plasma-discover (Fedora/Debian/Arch).
+    local _discover_pkg=""
+    local _discover_installed=0
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper)
+            if rpm -q discover6 >/dev/null 2>&1; then
+                _discover_pkg="discover6"
+                _discover_installed=1
+            fi
+            ;;
+        dnf)
+            if rpm -q plasma-discover >/dev/null 2>&1; then
+                _discover_pkg="plasma-discover"
+                _discover_installed=1
+            fi
+            ;;
+        apt)
+            if dpkg -s plasma-discover >/dev/null 2>&1; then
+                _discover_pkg="plasma-discover"
+                _discover_installed=1
+            fi
+            ;;
+        pacman)
+            if pacman -Q discover >/dev/null 2>&1; then
+                _discover_pkg="discover"
+                _discover_installed=1
+            fi
+            ;;
+    esac
+
+    if [ "${_discover_installed}" -eq 1 ] && [ -n "${_discover_pkg}" ]; then
+        local _pm_update_cmd
+        _pm_update_cmd="$(znh_pm_manual_update_command)"
         echo "" | tee -a "${LOG_FILE}"
-        echo "KDE Discover (package: discover6) is currently installed." | tee -a "${LOG_FILE}"
+        echo "KDE Discover (package: ${_discover_pkg}) is currently installed." | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
-        echo "On openSUSE Tumbleweed/Slowroll, Discover provides a graphical" | tee -a "${LOG_FILE}"
-        echo "software center and its own offline-update mechanism on top of" | tee -a "${LOG_FILE}"
-        echo "libzypp. Running Discover in parallel with this zypper auto-helper" | tee -a "${LOG_FILE}"
-        echo "means two independent tools can schedule and apply system updates." | tee -a "${LOG_FILE}"
-        echo "This can lead to:" | tee -a "${LOG_FILE}"
+        echo "Discover provides a graphical software center and its own" | tee -a "${LOG_FILE}"
+        echo "offline-update mechanism. Running Discover in parallel with" | tee -a "${LOG_FILE}"
+        echo "this auto-helper means two independent tools can schedule" | tee -a "${LOG_FILE}"
+        echo "and apply system updates. This can lead to:" | tee -a "${LOG_FILE}"
         echo "  - duplicated or conflicting update notifications" | tee -a "${LOG_FILE}"
         echo "  - partial or out-of-order upgrades when Discover performs" | tee -a "${LOG_FILE}"
-        echo "    offline updates while this helper expects zypper dup snapshots" | tee -a "${LOG_FILE}"
-        echo "  - confusing rollbacks when Btrfs snapshots are created from" | tee -a "${LOG_FILE}"
+        echo "    offline updates while this helper manages system upgrades" | tee -a "${LOG_FILE}"
+        echo "  - confusing rollbacks when snapshots are created from" | tee -a "${LOG_FILE}"
         echo "    different update tools" | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
-        echo "To keep the update stack simple and aligned with how openSUSE" | tee -a "${LOG_FILE}"
-        echo "expects zypper-based upgrades to run, this helper recommends" | tee -a "${LOG_FILE}"
+        echo "To keep the update stack simple, this helper recommends" | tee -a "${LOG_FILE}"
         echo "removing Discover and relying on:" | tee -a "${LOG_FILE}"
-        echo "  - zypper dup (or this helper) for system upgrades" | tee -a "${LOG_FILE}"
+        echo "  - ${_pm_update_cmd} (or this helper) for system upgrades" | tee -a "${LOG_FILE}"
         echo "  - Flatpak/Snap tooling only for user-space apps when needed" | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
-        read -p "Remove discover6 now so only zypper-based tools manage system updates? [y/N]: " -r RM_DISCOVER
+        read -p "Remove ${_discover_pkg} now so only ${SYSTEM_PKG_MANAGER}-based tools manage system updates? [y/N]: " -r RM_DISCOVER
         echo
         if [[ $RM_DISCOVER =~ ^[Yy]$ ]]; then
-            log_info "User accepted removal of discover6 to avoid conflicting update managers"
-            update_status "Removing discover6 (KDE Discover) to avoid conflicting update managers"
-            if execute_guarded "Remove discover6 via zypper" zypper -n remove discover6; then
-                log_success "discover6 removed successfully"
+            log_info "User accepted removal of ${_discover_pkg} to avoid conflicting update managers"
+            update_status "Removing ${_discover_pkg} (KDE Discover) to avoid conflicting update managers"
+            if znh_install_package_via_system_pm_remove "${_discover_pkg}"; then
+                log_success "${_discover_pkg} removed successfully"
             else
                 rc=1
-                log_error "Failed to remove discover6 automatically. Please review the log and, if needed, run 'sudo zypper remove discover6' manually."
+                local _rm_hint
+                case "${SYSTEM_PKG_MANAGER}" in
+                    zypper) _rm_hint="sudo zypper remove ${_discover_pkg}" ;;
+                    dnf)    _rm_hint="sudo dnf remove ${_discover_pkg}" ;;
+                    apt)    _rm_hint="sudo apt-get remove ${_discover_pkg}" ;;
+                    pacman) _rm_hint="sudo pacman -R ${_discover_pkg}" ;;
+                    *)      _rm_hint="Remove package '${_discover_pkg}' using your system package manager." ;;
+                esac
+                log_error "Failed to remove ${_discover_pkg} automatically. Please review the log and, if needed, run '${_rm_hint}' manually."
             fi
         else
-            log_info "User chose to keep discover6 installed; multiple update tools will remain active."
+            log_info "User chose to keep ${_discover_pkg} installed; multiple update tools will remain active."
         fi
     else
-        log_debug "discover6 is not installed; no conflicting KDE Discover instance detected"
+        log_debug "KDE Discover is not installed; no conflicting instance detected"
     fi
 
     # 5) Install default app stores when base tooling is available
@@ -49279,20 +49347,30 @@ run_setup_sf_only() {
         log_debug "Skipping Bazaar Flatpak installation; flatpak/flathub not fully available (flatpak_ok=${flatpak_ok}, flathub_ok=${flathub_ok})."
     fi
 
-    # 6) Explain the overall update model for the user
+    # 6) Explain the overall update model for the user (PM-aware)
+    local _pm_label _pm_update_label _pkg_type
+    _pm_label="${SYSTEM_PKG_MANAGER}"
+    _pm_update_label="$(znh_pm_manual_update_command)"
+    case "${SYSTEM_PKG_MANAGER}" in
+        zypper|dnf) _pkg_type="RPM" ;;
+        apt)        _pkg_type="DEB" ;;
+        pacman)     _pkg_type="system" ;;
+        *)          _pkg_type="system" ;;
+    esac
     echo "" | tee -a "${LOG_FILE}"
     echo "Update model after Snapd/Flatpak setup:" | tee -a "${LOG_FILE}"
     echo "  - KDE Discover is removed (optional) to avoid a second GUI updater" | tee -a "${LOG_FILE}"
-    echo "    competing with zypper dup and Btrfs snapshots." | tee -a "${LOG_FILE}"
-    echo "  - System (RPM) updates are handled only by zypper dup and this helper." | tee -a "${LOG_FILE}"
+    echo "    competing with ${_pm_label} system upgrades." | tee -a "${LOG_FILE}"
+    echo "  - System (${_pkg_type}) updates are handled only by '${_pm_update_label}'" | tee -a "${LOG_FILE}"
+    echo "    and this helper." | tee -a "${LOG_FILE}"
     echo "  - Flatpak apps use Bazaar as the graphical store, with 'flatpak update'" | tee -a "${LOG_FILE}"
-    echo "    run automatically after dup when ENABLE_FLATPAK_UPDATES=true." | tee -a "${LOG_FILE}"
+    echo "    run automatically after system upgrade when ENABLE_FLATPAK_UPDATES=true." | tee -a "${LOG_FILE}"
     echo "  - Snap apps use Snap Store as the graphical store, with 'snap refresh'" | tee -a "${LOG_FILE}"
-    echo "    run automatically after dup when ENABLE_SNAP_UPDATES=true." | tee -a "${LOG_FILE}"
+    echo "    run automatically after system upgrade when ENABLE_SNAP_UPDATES=true." | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
-    echo "In other words: one updater (zypper) for the system, and dedicated app" | tee -a "${LOG_FILE}"
-    echo "stores (Bazaar and Snap Store) for user applications, all kept in sync" | tee -a "${LOG_FILE}"
-    echo "by this helper so system + Flatpak + Snap apps are updated together." | tee -a "${LOG_FILE}"
+    echo "In other words: one updater (${_pm_label}) for the system, and dedicated" | tee -a "${LOG_FILE}"
+    echo "app stores (Bazaar and Snap Store) for user applications, all kept in" | tee -a "${LOG_FILE}"
+    echo "sync by this helper so system + Flatpak + Snap apps are updated together." | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
     if [ "$rc" -eq 0 ]; then
