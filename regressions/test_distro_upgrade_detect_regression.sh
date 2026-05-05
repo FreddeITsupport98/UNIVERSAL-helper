@@ -221,7 +221,7 @@ require_contains "${source_text}" "function znhDistroUpgradeRender(" \
     "Missing znhDistroUpgradeRender JS helper"
 require_contains "${source_text}" "function _wireDistroUpgradeBannerUI(" \
     "Missing _wireDistroUpgradeBannerUI wiring helper"
-require_contains "${source_text}" "releaseModel === 'fixed' && status === 'available'" \
+require_contains "${source_text}" "releaseModel === 'fixed' && (status === 'available'" \
     "Distro-upgrade renderer not gated on release_model='fixed' AND status='available'"
 require_contains "${source_text}" "if (typeof _wireDistroUpgradeBannerUI === 'function') _wireDistroUpgradeBannerUI();" \
     "_wireRocketUI does not invoke _wireDistroUpgradeBannerUI on init"
@@ -281,6 +281,60 @@ require_contains "${source_text}" "action: 'distro-upgrade-reboot'" \
     "Distro-upgrade reboot button does not invoke distro-upgrade-reboot quick-action"
 require_contains "${source_text}" "id=\"ru-distro-reboot\"" \
     "Distro-upgrade done view missing Reboot now CTA button"
+
+# 19) New Ubuntu codename-to-version helper and cycle-math helper exist.
+require_contains "${source_text}" "__znh_ubuntu_codename_to_version() {" \
+    "Missing __znh_ubuntu_codename_to_version codename→version map helper"
+require_contains "${source_text}" "__znh_ubuntu_compute_next_version() {" \
+    "Missing __znh_ubuntu_compute_next_version release-cycle math helper"
+
+# 20) Ubuntu codename table covers key releases (noble=24.04, plucky=25.04).
+require_contains "${source_text}" "noble)    printf '24.04'" \
+    "Ubuntu codename table missing 'noble' → 24.04 mapping"
+require_contains "${source_text}" "plucky)   printf '25.04'" \
+    "Ubuntu codename table missing 'plucky' → 25.04 mapping"
+require_contains "${source_text}" "regal)    printf '26.04'" \
+    "Ubuntu codename table missing 'regal' → 26.04 mapping"
+
+# 21) Ubuntu check_ubuntu() uses 4 extraction methods: direct grep, codename parse,
+#    meta-release feed (curl), and cycle-math fallback.
+require_contains "${source_text}" "grep -oE '[0-9]{2}\\.[0-9]{2}" \
+    "check_ubuntu Method 1 (direct YY.MM grep) missing"
+require_contains "${source_text}" "changelogs.ubuntu.com/meta-release" \
+    "check_ubuntu Method 3 (Ubuntu meta-release API) missing"
+require_contains "${source_text}" "__znh_ubuntu_compute_next_version \"\${current_ver}\"" \
+    "check_ubuntu Method 4 (cycle-math fallback) missing"
+
+# 22) Debian probe now detects next stable codename and sets ZNH_DISTRO_UPGRADE_TARGET.
+require_contains "${source_text}" "bookworm|bookworm/sid) next_version=\"13\"; next_codename=\"trixie\"" \
+    "check_debian missing bookworm→13 (trixie) mapping"
+require_contains "${source_text}" "trixie|trixie/sid)     next_version=\"14\"; next_codename=\"forky\"" \
+    "check_debian missing trixie→14 (forky) mapping"
+
+# 23) Leap probe computes next minor version (major.minor+1) and sets target.
+require_contains "${source_text}" "candidate_minor=\$((10#\${minor} + 1))" \
+    "check_leap missing candidate_minor arithmetic for next version"
+require_contains "${source_text}" 'ZNH_DISTRO_UPGRADE_TARGET="${next_ver:-}"' \
+    "check_leap not setting ZNH_DISTRO_UPGRADE_TARGET"
+
+# 24) znh_distro_upgrade_check() passes detected target to state_write_file for
+#    debian/leap/rhel so the JSON has a real version number.
+require_contains "${source_text}" 'znh_distro_upgrade_state_write_file "manual" "${ZNH_DISTRO_UPGRADE_TARGET}"' \
+    "debian/leap/rhel check() not passing target to state_write_file"
+require_contains "${source_text}" '_rhel_next_major=$((10#${_rhel_major} + 1))' \
+    "RHEL next-major-version computation missing"
+
+# 25) Ubuntu release notes URL sanitized to bare YY.MM before building wiki URL.
+require_contains "${source_text}" "grep -oE '[0-9]{2}\\.[0-9]{2}'" \
+    "Ubuntu release_notes_url missing YY.MM sanitization grep"
+require_contains "${source_text}" "wiki.ubuntu.com/\${_ubuntu_ver_clean}/ReleaseNotes" \
+    "Ubuntu release_notes_url missing sanitized URL construction"
+
+# 26) JS _ruRenderDistroUpgrade handles manual-status families with target version shown.
+require_contains "${source_text}" "isManual  = status === 'manual'" \
+    "_ruRenderDistroUpgrade JS not checking isManual status"
+require_contains "${source_text}" "\\uD83D\\uDD27" \
+    "_ruRenderDistroUpgrade manual view missing wrench emoji for manual upgrades"
 
 if [ "${#FAILURES[@]}" -gt 0 ]; then
     echo "FAIL SUMMARY (${#FAILURES[@]})" >&2

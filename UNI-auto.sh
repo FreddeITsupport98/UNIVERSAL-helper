@@ -701,12 +701,54 @@ except Exception:
     return 1
 }
 
+__znh_ubuntu_codename_to_version() {
+    # Map an Ubuntu release codename (first word, case-insensitive) to its
+    # YY.MM version string. Returns empty string for unknown codenames.
+    local codename
+    codename="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | awk '{print $1}')"
+    case "${codename}" in
+        focal)    printf '20.04' ;;
+        groovy)   printf '20.10' ;;
+        hirsute)  printf '21.04' ;;
+        impish)   printf '21.10' ;;
+        jammy)    printf '22.04' ;;
+        kinetic)  printf '22.10' ;;
+        lunar)    printf '23.04' ;;
+        mantic)   printf '23.10' ;;
+        noble)    printf '24.04' ;;
+        oracular) printf '24.10' ;;
+        plucky)   printf '25.04' ;;
+        questing) printf '25.10' ;;
+        regal)    printf '26.04' ;;
+        *)        printf ''      ;;
+    esac
+}
+
+__znh_ubuntu_compute_next_version() {
+    # Given a current Ubuntu version YY.MM, compute the next scheduled
+    # release: April (04) → October (10) same year; October → April next year.
+    local current="${1:-}" year month
+    year="$(printf '%s' "${current}" | cut -d. -f1)"
+    month="$(printf '%s' "${current}" | cut -d. -f2)"
+    [[ "${year}"  =~ ^[0-9]+$ ]] || return 1
+    [[ "${month}" =~ ^[0-9]+$ ]] || return 1
+    year=$((10#${year}))
+    month=$((10#${month}))
+    if [ "${month}" -eq 4 ]; then
+        printf '%02d.%02d' "${year}" 10
+    elif [ "${month}" -eq 10 ]; then
+        printf '%02d.%02d' $((year + 1)) 04
+    fi
+}
+
 znh_distro_upgrade_check_ubuntu() {
-    # Ubuntu and Mint expose a `do-release-upgrade -c` probe that returns 0
-    # when an upgrade is available. Cycle is 6 months for normal releases
-    # and ~2 years for LTS, so the helper just trusts the probe.
+    # Ubuntu and Mint expose `do-release-upgrade -c` (rc=0 when upgrade is
+    # available). We extract the target version with four fallback methods so
+    # the banner always shows a proper YY.MM number instead of raw prose like
+    # "found." which the old regex could accidentally capture.
     local out rc target
     ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-${VERSION_CODENAME:-}}"
+    local current_ver="${VERSION_ID:-}"
 
     if ! command -v do-release-upgrade >/dev/null 2>&1; then
         return 1
@@ -716,9 +758,44 @@ znh_distro_upgrade_check_ubuntu() {
     rc=$?
 
     if [ "${rc}" -eq 0 ]; then
+        # Method 1: grep for a bare YY.MM (or YY.MM.P) version number.
         target="$(printf '%s\n' "${out}" \
-            | sed -nE "s/^.*[Nn]ew release[[:space:]]+[\"\']?([0-9A-Za-z._-]+)[\"\']?.*$/\\1/p" \
+            | grep -oE '[0-9]{2}\.[0-9]{2}(\.[0-9]+)?' \
             | head -n 1)"
+
+        # Method 2: extract a quoted codename like 'noble' and map it.
+        if [ -z "${target}" ]; then
+            local _codename
+            _codename="$(printf '%s\n' "${out}" \
+                | sed -nE "s/.*[Nn]ew release[[:space:]]+'([A-Za-z][A-Za-z0-9 ]*)'.*/\1/p" \
+                | head -n 1)"
+            [ -n "${_codename}" ] && target="$(__znh_ubuntu_codename_to_version "${_codename}")"
+        fi
+
+        # Method 3: fetch from the Ubuntu meta-release feed (needs curl, best-effort).
+        if [ -z "${target}" ] && [ -n "${current_ver}" ] && command -v curl >/dev/null 2>&1; then
+            local _prompt="normal"
+            if [ -r /etc/update-manager/release-upgrades ]; then
+                _prompt="$(grep -m1 '^Prompt=' /etc/update-manager/release-upgrades 2>/dev/null \
+                    | cut -d= -f2 | tr -d '[:space:]' || echo 'normal')"
+            fi
+            local _meta_url="https://changelogs.ubuntu.com/meta-release"
+            [ "${_prompt,,}" = "lts" ] && _meta_url="https://changelogs.ubuntu.com/meta-release-lts"
+            target="$(curl -sf --max-time 8 "${_meta_url}" 2>/dev/null \
+                | awk -v cur="${current_ver}" '
+                    /^Dist:/    { dist=$2 }
+                    /^Version:/ { ver=$2 }
+                    /^Supported:[[:space:]]*1/ && ver > cur { found=ver }
+                    END { if (found) print found }
+                ' \
+                | grep -oE '[0-9]{2}\.[0-9]{2}' | head -n 1 || true)"
+        fi
+
+        # Method 4: compute next release from Ubuntu's April/October cycle.
+        if [ -z "${target}" ] && [ -n "${current_ver}" ]; then
+            target="$(__znh_ubuntu_compute_next_version "${current_ver}")"
+        fi
+
         ZNH_DISTRO_UPGRADE_AVAILABLE=1
         ZNH_DISTRO_UPGRADE_TARGET="${target:-newer}"
         return 0
@@ -729,20 +806,68 @@ znh_distro_upgrade_check_ubuntu() {
 }
 
 znh_distro_upgrade_check_debian() {
-    # Debian dist-upgrades have a ~2 year cycle but the upgrade requires a
-    # manual sources.list rewrite; we never auto-flag a target, but we still
-    # surface a state so the WebUI/CLI can guide the user.
+    # Debian has a ~2-year release cycle. Upgrades require a manual
+    # sources.list rewrite so we never mark status=available, but we DO
+    # detect the next stable codename/version so the WebUI banner and
+    # wizard can show e.g. "Debian 12 (bookworm) → 13 (trixie)".
     ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_CODENAME:-${VERSION_ID:-}}"
+    local current_codename="${VERSION_CODENAME:-}"
+    local current_id="${VERSION_ID:-}"
+    local next_version="" next_codename=""
+
+    # Map current codename → next stable codename + version number.
+    case "${current_codename,,}" in
+        buster|buster/sid)     next_version="11"; next_codename="bullseye" ;;
+        bullseye|bullseye/sid) next_version="12"; next_codename="bookworm" ;;
+        bookworm|bookworm/sid) next_version="13"; next_codename="trixie"   ;;
+        trixie|trixie/sid)     next_version="14"; next_codename="forky"    ;;
+        forky|forky/sid)       next_version="15"; next_codename=""         ;;
+        *) ;;
+    esac
+
+    # Fallback: numeric VERSION_ID + 1.
+    if [ -z "${next_version}" ] && [[ "${current_id}" =~ ^[0-9]+$ ]]; then
+        next_version=$((10#${current_id} + 1))
+    fi
+
     ZNH_DISTRO_UPGRADE_AVAILABLE=0
-    ZNH_DISTRO_UPGRADE_TARGET=""
+    if [ -n "${next_version}" ]; then
+        ZNH_DISTRO_UPGRADE_TARGET="${next_version}${next_codename:+ (${next_codename})}"
+    else
+        ZNH_DISTRO_UPGRADE_TARGET=""
+    fi
     return 1
 }
 
 znh_distro_upgrade_check_leap() {
-    # openSUSE Leap upgrades require a manual repository swap; do not flag.
+    # openSUSE Leap upgrades require a manual repository swap. We detect the
+    # expected next version (major.minor+1) so the banner shows e.g.
+    # "openSUSE Leap 15.6 → 15.7" rather than nothing.
     ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-}"
+    local current_ver="${VERSION_ID:-}"
+    local next_ver=""
+
+    if [ -n "${current_ver}" ]; then
+        local major minor
+        major="$(printf '%s' "${current_ver}" | cut -d. -f1)"
+        minor="$(printf '%s' "${current_ver}" | cut -d. -f2 | cut -d. -f1)"
+        if [[ "${major}" =~ ^[0-9]+$ ]] && [[ "${minor}" =~ ^[0-9]+$ ]]; then
+            local candidate_minor=$((10#${minor} + 1))
+            local candidate_ver="${major}.${candidate_minor}"
+            # Quick probe: check if a zypper repo for the next release exists.
+            if command -v zypper >/dev/null 2>&1; then
+                if zypper --quiet --non-interactive lr 2>/dev/null \
+                    | grep -q "leap/${candidate_ver}"; then
+                    next_ver="${candidate_ver}"
+                fi
+            fi
+            # Fallback: just compute candidate version.
+            [ -z "${next_ver}" ] && next_ver="${candidate_ver}"
+        fi
+    fi
+
     ZNH_DISTRO_UPGRADE_AVAILABLE=0
-    ZNH_DISTRO_UPGRADE_TARGET=""
+    ZNH_DISTRO_UPGRADE_TARGET="${next_ver:-}"
     return 1
 }
 
@@ -797,19 +922,36 @@ znh_distro_upgrade_check() {
             ;;
         debian)
             znh_distro_upgrade_check_debian || true
-            znh_distro_upgrade_state_write_file "manual" "" \
-                "Debian distro-upgrades require manual sources.list review (e.g. bookworm -> trixie)." || true
+            local _deb_arrow=""
+            [ -n "${ZNH_DISTRO_UPGRADE_TARGET}" ] && \
+                _deb_arrow=" (${ZNH_DISTRO_UPGRADE_CURRENT:-?} -> ${ZNH_DISTRO_UPGRADE_TARGET})"
+            znh_distro_upgrade_state_write_file "manual" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                "Debian distro-upgrades require manual sources.list review${_deb_arrow}." || true
             ;;
         leap)
             znh_distro_upgrade_check_leap || true
-            znh_distro_upgrade_state_write_file "manual" "" \
-                "openSUSE Leap upgrades require a manual repository swap; see SDB:System_upgrade." || true
+            local _leap_arrow=""
+            [ -n "${ZNH_DISTRO_UPGRADE_TARGET}" ] && \
+                _leap_arrow=" (${ZNH_DISTRO_UPGRADE_CURRENT:-?} -> ${ZNH_DISTRO_UPGRADE_TARGET})"
+            znh_distro_upgrade_state_write_file "manual" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                "openSUSE Leap upgrades require a manual repository swap; see SDB:System_upgrade${_leap_arrow}." || true
             ;;
         rhel)
             ZNH_DISTRO_UPGRADE_CURRENT="${VERSION_ID:-}"
             ZNH_DISTRO_UPGRADE_AVAILABLE=0
-            znh_distro_upgrade_state_write_file "manual" "" \
-                "RHEL/CentOS-style distros use leapp/major-version migration; not auto-flagged." || true
+            # Compute next RHEL major version (9.x -> 10, 10.x -> 11, etc.)
+            local _rhel_major _rhel_next_major
+            _rhel_major="$(printf '%s' "${VERSION_ID:-}" | cut -d. -f1)"
+            _rhel_next_major=""
+            if [[ "${_rhel_major}" =~ ^[0-9]+$ ]]; then
+                _rhel_next_major=$((10#${_rhel_major} + 1))
+            fi
+            ZNH_DISTRO_UPGRADE_TARGET="${_rhel_next_major:-}"
+            local _rhel_arrow=""
+            [ -n "${_rhel_next_major}" ] && \
+                _rhel_arrow=" (${VERSION_ID:-?} -> ${_rhel_next_major})"
+            znh_distro_upgrade_state_write_file "manual" "${ZNH_DISTRO_UPGRADE_TARGET}" \
+                "RHEL/CentOS-style distros use leapp/major-version migration; not auto-flagged${_rhel_arrow}." || true
             ;;
         *)
             znh_distro_upgrade_state_write_file "unknown" "" \
@@ -834,8 +976,12 @@ znh_distro_upgrade_release_notes_url() {
             fi
             ;;
         ubuntu)
-            if [ -n "${target}" ]; then
-                printf '%s' "https://wiki.ubuntu.com/${target}/ReleaseNotes"
+            # Sanitize target to bare YY.MM so the wiki URL is valid even if
+            # the raw target string contains extra text (e.g. "25.04 LTS").
+            local _ubuntu_ver_clean
+            _ubuntu_ver_clean="$(printf '%s' "${target}" | grep -oE '[0-9]{2}\.[0-9]{2}' | head -n 1)"
+            if [ -n "${_ubuntu_ver_clean}" ]; then
+                printf '%s' "https://wiki.ubuntu.com/${_ubuntu_ver_clean}/ReleaseNotes"
             else
                 printf '%s' "https://wiki.ubuntu.com/Releases"
             fi
@@ -30036,6 +30182,12 @@ generate_dashboard() {
         // the upgrade was already applied (e.g. 43→44 completed, system is on 44).
         if (!actionable || _znhDistroUpgradeDismissed) {
             card.style.display = 'none';
+            // Remove distro-upgrade contribution to rocket glow; keep glowing only if packages are pending.
+            try {
+                var _pcEl0 = document.getElementById('pending-count');
+                var _pc0 = parseInt((_pcEl0 && _pcEl0.textContent) || '0', 10) || 0;
+                if (typeof _rocketSetAvailable === 'function') _rocketSetAvailable(_pc0 > 0);
+            } catch (eRb0) {}
             return;
         }
         var _curNum = parseInt(current, 10);
@@ -30097,6 +30249,11 @@ generate_dashboard() {
         } catch (e1) {}
 
         card.style.display = '';
+        // Immediately glow the main Rocket button so all fixed-cycle distros
+        // (Ubuntu, Mint, Debian, Fedora, Leap, RHEL…) show the upgrade indicator
+        // as soon as the upgrade banner becomes visible — without waiting for the
+        // next applyLiveData() polling cycle.
+        try { if (typeof _rocketSetAvailable === 'function') _rocketSetAvailable(true); } catch (eRb1) {}
     }
 
     function znhDistroUpgradeFetch(opts) {
@@ -31568,6 +31725,42 @@ generate_dashboard() {
         }
 
         if (!actionable) {
+            // For manual-process families (Debian, Leap, RHEL) we may still know
+            // the target version — show it instead of a generic "not available" message.
+            var hasTarget = target && target !== '?';
+            var isManual  = status === 'manual';
+            if (isManual && hasTarget) {
+                var manFamilyExplain = '';
+                switch (family) {
+                    case 'debian':
+                        manFamilyExplain = 'Debian upgrades require a manual <code>/etc/apt/sources.list</code> rewrite (change codename to the next stable release) followed by <code>sudo apt update &amp;&amp; sudo apt full-upgrade</code>. See the upstream release notes linked below.';
+                        break;
+                    case 'leap':
+                        manFamilyExplain = 'openSUSE Leap upgrades require replacing all repository URLs with the new version before running <code>sudo zypper dup</code>. See <a href="https://en.opensuse.org/SDB:System_upgrade" target="_blank" rel="noopener noreferrer">SDB:System_upgrade</a> for the full procedure.';
+                        break;
+                    case 'rhel':
+                        manFamilyExplain = 'RHEL/CentOS-style major-version migration uses <code>leapp upgrade</code>. Follow the Red Hat documentation for your release.';
+                        break;
+                    default:
+                        manFamilyExplain = 'This distro upgrade requires a manual procedure. Refer to the upstream upgrade guide.';
+                }
+                var manActions = [];
+                if (manualUrl) {
+                    manActions.push('<a class="pill" href="' + _esc(manualUrl) + '" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">Open upstream guide</a>');
+                }
+                e.body.innerHTML = [
+                    '<div class="overlay-alert overlay-alert-warn" style="border-color: rgba(250,204,21,0.55); background: rgba(250,204,21,0.08);">',
+                    '  <div style="font-weight:950;">\uD83D\uDD27 ' + _esc(distroName) + ' ' + _esc(current) + ' \u2192 ' + _esc(target) + ' \u2014 manual upgrade required</div>',
+                    '  <div style="margin-top:6px; font-weight:800;">Family: <code>' + _esc(family) + '</code> \u2022 Release model: <code>fixed</code> \u2022 Status: <code>manual</code></div>',
+                    '</div>',
+                    '<div style="color: var(--muted); font-size:0.92rem; margin-top:8px;">' + manFamilyExplain + '</div>',
+                    (state.reason ? '<div style="color: var(--muted); font-size:0.84rem; margin-top:4px;">' + _esc(state.reason) + '</div>' : ''),
+                    (manActions.length ? '<div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">' + manActions.join('\n') + '</div>' : '')
+                ].join('\n');
+                _ruSetHeader('Distro upgrade', 'Manual', distroName + ' ' + current + ' \u2192 ' + target);
+                _suSetButtons({ show_cancel: true, show_close: true, footer_center: true });
+                return;
+            }
             e.body.innerHTML = [
                 '<div class="overlay-alert overlay-alert-warn">',
                 '  <div style="font-weight:950;">No distro upgrade is currently available</div>',
@@ -33542,7 +33735,19 @@ generate_dashboard() {
             try { addRipple(btn, ev.clientX, ev.clientY); } catch (e) {}
             try {
                 if (typeof rocketUpdateWizardOpen === 'function') {
-                    rocketUpdateWizardOpen();
+                    // Smart routing: if a distro upgrade is actionable (fixed-cycle distro
+                    // with available/downloaded state, e.g. Ubuntu → 25.04, Fedora → 43)
+                    // AND no individual package updates are pending, open the distro-upgrade
+                    // wizard directly so clicking 🚀 works the same for ALL distros.
+                    // When both package updates AND a distro upgrade are available, show
+                    // the regular package wizard first (package updates have lower risk).
+                    var _duActive = !_znhDistroUpgradeDismissed && !!(_znhDistroUpgradeState && _znhDistroUpgradeState.actionable);
+                    var _pkgsPending = (parseInt((document.getElementById('pending-count') || {}).textContent || '0', 10) || 0) > 0;
+                    if (_duActive && !_pkgsPending) {
+                        rocketUpdateWizardOpen({ distro_upgrade: true, distro_state: _znhDistroUpgradeState });
+                    } else {
+                        rocketUpdateWizardOpen();
+                    }
                 } else {
                     toast('Update wizard not ready', 'Reload dashboard after reinstall', 'err');
                 }
@@ -34333,8 +34538,15 @@ generate_dashboard() {
         } catch (e_pc_ov) {}
         setText('pending-count', pc);
 
-        // Rocket header glow: highlight when updates are pending.
-        try { _rocketSetAvailable((parseInt(pc || 0, 10) || 0) > 0); } catch (eR0) {}
+        // Rocket header glow: highlight when package updates are pending OR a distro upgrade
+        // is actionable for ANY fixed-cycle distro (Fedora, Ubuntu, Mint, Debian, Leap, RHEL…).
+        // This ensures the rocket glows for all distros, not just when zypper/dnf/apt/pacman
+        // has individual package updates ready — major version upgrades count too.
+        try {
+            var _hasPkgUpdates = (parseInt(pc || 0, 10) || 0) > 0;
+            var _hasDistroUpgrd = !_znhDistroUpgradeDismissed && !!(_znhDistroUpgradeState && _znhDistroUpgradeState.actionable);
+            _rocketSetAvailable(_hasPkgUpdates || _hasDistroUpgrd);
+        } catch (eR0) {}
 
         setText('kernel-ver', d.kernel_ver);
         setText('uptime-info', d.uptime_info);
@@ -36984,6 +37196,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # __ZNH_PM_RUNTIME_EMBEDDED_END__
 PMEOF
+    # shellcheck disable=SC2181  # $? is set by the heredoc write; can't restructure a multi-KB heredoc inline
     [ $? -eq 0 ] || return 1
     chmod 755 "${_pmrt_dest}" 2>/dev/null || true
     return 0
@@ -49075,6 +49288,34 @@ run_pipx_helper_only() {
     return 0
 }
 
+# --- Helper: Service reachability check (used by --setup-SF) ---
+# Usage: __znh_check_service_reachable <url> <service_name> [timeout_seconds]
+# Returns 0 if the URL responds (HTTP 2xx/3xx), 1 if unreachable.
+# Logs the result to LOG_FILE with the service name.
+__znh_check_service_reachable() {
+    local url="$1" service_name="$2" timeout="${3:-10}"
+    local http_code=""
+
+    if ! command -v curl >/dev/null 2>&1; then
+        log_warn "[reachability] curl not available; skipping reachability check for ${service_name} (${url})"
+        return 0  # optimistic: let the actual command try
+    fi
+
+    log_info "[reachability] Checking if ${service_name} is reachable (${url})..."
+    http_code=$(curl -sf -o /dev/null -w '%{http_code}' --max-time "${timeout}" --connect-timeout 5 "${url}" 2>/dev/null || echo "000")
+
+    if [[ "${http_code}" =~ ^[23] ]]; then
+        log_success "[reachability] ${service_name} is reachable (HTTP ${http_code})"
+        return 0
+    else
+        log_error "[reachability] ${service_name} is NOT reachable (HTTP ${http_code:-000}). The service may be down or your network may be blocking it."
+        log_error "[reachability]   URL tested  : ${url}"
+        log_error "[reachability]   HTTP status : ${http_code:-000} (expected 2xx/3xx)"
+        log_error "[reachability]   Action      : Skipping ${service_name} operations. Retry later with: zypper-auto-helper --setup-SF"
+        return 1
+    fi
+}
+
 # --- Helper: Snap & Flatpak setup mode (CLI) ---
 run_setup_sf_only() {
     log_info ">>> Snapd / Flatpak setup helper mode..."
@@ -49092,6 +49333,7 @@ run_setup_sf_only() {
 
     local rc=0
     local snap_ok=0 flatpak_ok=0 flathub_ok=0 flathub_beta_ok=0 appcenter_ok=0
+    local snap_store_reachable=0 flathub_reachable=0
     local snapd_pkg flatpak_pkg
     snapd_pkg="$(znh_resolve_package_name "snapd")"
     flatpak_pkg="$(znh_resolve_package_name "flatpak")"
@@ -49195,31 +49437,43 @@ run_setup_sf_only() {
         fi
     fi
 
-    # 3) Configure common Flatpak remotes
+    # 3) Configure common Flatpak remotes (with reachability pre-check)
     if command -v flatpak >/dev/null 2>&1; then
         log_info "Configuring common Flatpak remotes (Flathub, Flathub Beta, AppCenter)..."
-        if execute_guarded "Add Flatpak remote: flathub" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo; then
-            log_success "Flathub remote configured (or already present)"
-            flathub_ok=1
+
+        # Pre-check: is Flathub reachable?
+        if __znh_check_service_reachable "https://dl.flathub.org/repo/flathub.flatpakrepo" "Flathub (dl.flathub.org)"; then
+            flathub_reachable=1
         else
-            log_error "Failed to add Flathub remote (check network/connectivity)."
+            log_warn "Flathub service appears down or unreachable; skipping Flatpak remote and app installation."
+            log_warn "Retry later with: sudo zypper-auto-helper --setup-SF"
             rc=1
         fi
 
-        if execute_guarded "Add Flatpak remote: flathub-beta" flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo; then
-            log_success "Flathub Beta remote configured (or already present)"
-            flathub_beta_ok=1
-        else
-            log_error "Failed to add Flathub Beta remote (check network/connectivity)."
-            rc=1
-        fi
+        if [ "${flathub_reachable}" -eq 1 ]; then
+            if execute_guarded "Add Flatpak remote: flathub" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo; then
+                log_success "Flathub remote configured (or already present)"
+                flathub_ok=1
+            else
+                log_error "Failed to add Flathub remote despite service being reachable."
+                rc=1
+            fi
 
-        if execute_guarded "Add Flatpak remote: appcenter" flatpak remote-add --if-not-exists appcenter https://flatpak.elementary.io/repo.flatpakrepo; then
-            log_success "AppCenter remote configured (or already present)"
-            appcenter_ok=1
-        else
-            log_error "Failed to add AppCenter remote (check network/connectivity or remote URL)."
-            rc=1
+            if execute_guarded "Add Flatpak remote: flathub-beta" flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo; then
+                log_success "Flathub Beta remote configured (or already present)"
+                flathub_beta_ok=1
+            else
+                log_error "Failed to add Flathub Beta remote (check network/connectivity)."
+                rc=1
+            fi
+
+            if execute_guarded "Add Flatpak remote: appcenter" flatpak remote-add --if-not-exists appcenter https://flatpak.elementary.io/repo.flatpakrepo; then
+                log_success "AppCenter remote configured (or already present)"
+                appcenter_ok=1
+            else
+                log_error "Failed to add AppCenter remote (check network/connectivity or remote URL)."
+                rc=1
+            fi
         fi
     else
         log_error "Flatpak is not installed; skipping remote configuration."
@@ -49310,17 +49564,29 @@ run_setup_sf_only() {
     # a) Snap Store (snap-store) via snap (edge channel)
     if [ "$snap_ok" -eq 1 ] && command -v snap >/dev/null 2>&1; then
         log_info "Ensuring Snap Store (snap-store) is installed via snap..."
-        echo "  → Installing Snap Store with: snap install snap-store --edge (this may take a few minutes)..." | tee -a "${LOG_FILE}"
         if snap list snap-store >/dev/null 2>&1; then
             log_success "Snap Store (snap-store) is already installed"
         else
-            # Stream snap's own progress/output both to the console and the log so
-            # the user can see that work is happening while the command runs.
-            if snap install snap-store --edge 2>&1 | tee -a "${LOG_FILE}"; then
-                log_success "Snap Store (snap-store) installed via snap (edge channel)"
+            # Pre-check: is the Snap Store API reachable?
+            if __znh_check_service_reachable "https://api.snapcraft.io/v2/snaps/info/snap-store" "Snap Store API (api.snapcraft.io)"; then
+                snap_store_reachable=1
             else
-                log_error "Failed to install Snap Store (snap-store) via snap. You can retry manually with: sudo snap install snap-store --edge"
+                log_error "Snap Store service is DOWN or unreachable. Cannot install snap-store."
+                log_error "  Retry later with: sudo snap install snap-store --edge"
                 rc=1
+            fi
+
+            if [ "${snap_store_reachable}" -eq 1 ]; then
+                echo "  → Installing Snap Store with: snap install snap-store --edge (this may take a few minutes)..." | tee -a "${LOG_FILE}"
+                # Stream snap's own progress/output both to the console and the log so
+                # the user can see that work is happening while the command runs.
+                if snap install snap-store --edge 2>&1 | tee -a "${LOG_FILE}"; then
+                    log_success "Snap Store (snap-store) installed via snap (edge channel)"
+                else
+                    log_error "Failed to install Snap Store (snap-store) via snap despite service being reachable."
+                    log_error "  You can retry manually with: sudo snap install snap-store --edge"
+                    rc=1
+                fi
             fi
         fi
     else
@@ -49330,17 +49596,22 @@ run_setup_sf_only() {
     # b) Bazaar (io.github.kolunmi.Bazaar) from Flathub via Flatpak
     if [ "$flatpak_ok" -eq 1 ] && [ "$flathub_ok" -eq 1 ] && command -v flatpak >/dev/null 2>&1; then
         log_info "Ensuring Bazaar (io.github.kolunmi.Bazaar) is installed from Flathub..."
-        echo "  → Installing Bazaar with: flatpak install flathub io.github.kolunmi.Bazaar (this may take a few minutes)..." | tee -a "${LOG_FILE}"
         if flatpak list --app --columns=application 2>/dev/null | grep -qx 'io.github.kolunmi.Bazaar'; then
             log_success "Bazaar (io.github.kolunmi.Bazaar) is already installed"
         else
-            # Stream Flatpak's own progress/output both to the console and the log
-            # so the user can see downloads and installation steps.
-            if flatpak install -y flathub io.github.kolunmi.Bazaar 2>&1 | tee -a "${LOG_FILE}"; then
-                log_success "Bazaar (io.github.kolunmi.Bazaar) installed from Flathub"
+            # Flathub reachability was already checked in step 3; only proceed if it passed.
+            if [ "${flathub_reachable}" -eq 1 ]; then
+                echo "  → Installing Bazaar with: flatpak install flathub io.github.kolunmi.Bazaar (this may take a few minutes)..." | tee -a "${LOG_FILE}"
+                # Stream Flatpak's own progress/output both to the console and the log
+                # so the user can see downloads and installation steps.
+                if flatpak install -y flathub io.github.kolunmi.Bazaar 2>&1 | tee -a "${LOG_FILE}"; then
+                    log_success "Bazaar (io.github.kolunmi.Bazaar) installed from Flathub"
+                else
+                    log_error "Failed to install Bazaar (io.github.kolunmi.Bazaar) from Flathub. You can retry manually with: flatpak install flathub io.github.kolunmi.Bazaar"
+                    rc=1
+                fi
             else
-                log_error "Failed to install Bazaar (io.github.kolunmi.Bazaar) from Flathub. You can retry manually with: flatpak install flathub io.github.kolunmi.Bazaar"
-                rc=1
+                log_warn "Skipping Bazaar installation; Flathub was unreachable during remote setup."
             fi
         fi
     else
