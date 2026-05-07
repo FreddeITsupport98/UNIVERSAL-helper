@@ -62271,13 +62271,23 @@ def _recover_self_update_job(job_id: str) -> dict | None:
     # UX fix: the progress parser may hit 100% early (e.g. on "update complete") while
     # the unit is still running post-actions (verify/install). Never show 100% until done.
     if not done and progress >= 100:
-        progress = 99
-        try:
-            low = stage.lower()
-            if low in ("done", "dry-run done", "up-to-date"):
+        # Post-action stages use progress values > 100 (101-199) to signal that
+        # the self-update itself finished but a post-action is still running.
+        # Map them into a visible 1-99 band so the UI shows progress during
+        # post-install / post-verify instead of being stuck on "Finishing…".
+        if progress > 100:
+            # 101..110 → 5..95  (linear mapping within post-action band)
+            pa_pct = max(5, min(95, (progress - 101) * 10))
+            progress = pa_pct
+            # stage is already set to a meaningful post-action label by the parser
+        else:
+            progress = 99
+            try:
+                low = stage.lower()
+                if low in ("done", "dry-run done", "up-to-date"):
+                    stage = "Finishing…"
+            except Exception:
                 stage = "Finishing…"
-        except Exception:
-            stage = "Finishing…"
 
     post_action = str(status.get("post_action", "") or "").strip().lower()
     if post_action not in ("none", "verify", "install"):
@@ -62354,6 +62364,24 @@ def _job_update_progress(job: dict, line: str) -> None:
         bump(100, "Done")
     elif "dry-run ok" in l or "dry run ok" in l:
         bump(100, "Dry-run done")
+
+    # --- Post-action progress (post-install / post-verify after self-update) ---
+    # These markers are emitted by the systemd job script when a post-action is
+    # running.  They intentionally re-use the bump() helper so progress can ONLY
+    # move forward (the self-update "Done" at 100 is the ceiling; post-action
+    # stages live in the 101-199 band which gets clamped to 99 by the caller).
+    if "[webui] stage: post-install" in l:
+        bump(101, "post-install")
+    elif "[webui] stage: post-verify" in l:
+        bump(101, "post-verify")
+    elif "[webui] stage: post-install-services" in l:
+        bump(103, "post-install (services)")
+    elif "[webui] stage: post-install-dashboard" in l:
+        bump(105, "post-install (dashboard)")
+    elif "[webui] stage: post-install-done" in l:
+        bump(110, "post-install done")
+    elif "[webui] stage: post-verify-done" in l:
+        bump(110, "post-verify done")
 
     job["stage"] = stage
     job["progress"] = prog
@@ -66911,19 +66939,23 @@ class Handler(BaseHTTPRequestHandler):
                 '  write_status 0 ${rc} refreshing-dashboard',
                 f'  ( {HELPER_BIN} --dashboard ) >>"$LOG" 2>&1 || echo "[WARN] dashboard refresh failed (continuing)" >>"$LOG" || true',
                 '  if [ "${POST_ACTION:-none}" = "verify" ]; then',
+                '    echo "[webui] stage: post-verify" >>"$LOG" || true',
                 '    write_status 0 ${rc} post-verify',
                 '    set +e',
                 f'    ( {HELPER_BIN} --verify ) >>"$LOG" 2>&1',
                 '    POST_ACTION_RC=$?',
                 '    set -e',
+                '    echo "[webui] stage: post-verify-done" >>"$LOG" || true',
                 '    echo "[webui] post-verify rc=${POST_ACTION_RC}" >>"$LOG" || true',
                 '    if [ "${POST_ACTION_RC}" -ne 0 ] 2>/dev/null; then echo "[webui] WARNING: verify reported issues (rc=${POST_ACTION_RC})" >>"$LOG" || true; fi',
                 '  elif [ "${POST_ACTION:-none}" = "install" ]; then',
+                '    echo "[webui] stage: post-install" >>"$LOG" || true',
                 '    write_status 0 ${rc} post-install',
                 '    set +e',
                 f'    ( {HELPER_BIN} install ) >>"$LOG" 2>&1',
                 '    POST_ACTION_RC=$?',
                 '    set -e',
+                '    echo "[webui] stage: post-install-done" >>"$LOG" || true',
                 '    echo "[webui] post-install rc=${POST_ACTION_RC}" >>"$LOG" || true',
                 '    if [ "${POST_ACTION_RC}" -ne 0 ] 2>/dev/null; then rc=${POST_ACTION_RC}; fi',
                 '  fi',
