@@ -276,6 +276,8 @@ znh_resolve_package_name() {
         apt:python3-pipx) echo "pipx" ;;
         dnf:python3-pipx|zypper:python3-pipx) echo "python3-pipx" ;;
         pacman:python3-pipx) echo "python-pipx" ;;
+        dnf:needs-restarting) echo "python3-dnf-plugins-core" ;;
+        zypper:needs-restarting) echo "zypper" ;;
         *) echo "${logical}" ;;
     esac
 }
@@ -12998,11 +13000,43 @@ generate_dashboard() {
     feat_brew=$([[ "${ENABLE_BREW_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
     feat_pipx=$([[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
 
-    feat_flatpak_class=$([[ "${feat_flatpak}" == "ON" ]] && echo "feat-on" || echo "feat-off")
-    feat_snap_class=$([[ "${feat_snap}" == "ON" ]] && echo "feat-on" || echo "feat-off")
-    feat_soar_class=$([[ "${feat_soar}" == "ON" ]] && echo "feat-on" || echo "feat-off")
-    feat_brew_class=$([[ "${feat_brew}" == "ON" ]] && echo "feat-on" || echo "feat-off")
-    feat_pipx_class=$([[ "${feat_pipx}" == "ON" ]] && echo "feat-on" || echo "feat-off")
+    # Actual installation detection (green = installed, red = missing)
+    local feat_flatpak_installed feat_snap_installed feat_soar_installed feat_brew_installed feat_pipx_installed
+    feat_flatpak_installed=$(command -v flatpak >/dev/null 2>&1 && echo 1 || echo 0)
+    feat_snap_installed=$(command -v snap >/dev/null 2>&1 && echo 1 || echo 0)
+    feat_soar_installed=0
+    if [ -n "${SUDO_USER:-}" ]; then
+        if sudo -u "${SUDO_USER}" sh -lc 'command -v soar >/dev/null 2>&1' 2>/dev/null; then
+            feat_soar_installed=1
+        elif [ -x "${SUDO_USER_HOME:-}/.local/bin/soar" ]; then
+            feat_soar_installed=1
+        fi
+    elif command -v soar >/dev/null 2>&1; then
+        feat_soar_installed=1
+    fi
+    feat_brew_installed=0
+    if [ -n "${SUDO_USER:-}" ]; then
+        if sudo -u "${SUDO_USER}" sh -lc 'command -v brew >/dev/null 2>&1' 2>/dev/null; then
+            feat_brew_installed=1
+        fi
+    elif command -v brew >/dev/null 2>&1; then
+        feat_brew_installed=1
+    fi
+    feat_pipx_installed=0
+    if [ -n "${SUDO_USER:-}" ]; then
+        if sudo -u "${SUDO_USER}" sh -lc 'command -v pipx >/dev/null 2>&1' 2>/dev/null; then
+            feat_pipx_installed=1
+        fi
+    elif command -v pipx >/dev/null 2>&1; then
+        feat_pipx_installed=1
+    fi
+
+    # Badge class based on INSTALLED state (green/red), not config toggle
+    feat_flatpak_class=$([[ "${feat_flatpak_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
+    feat_snap_class=$([[ "${feat_snap_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
+    feat_soar_class=$([[ "${feat_soar_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
+    feat_brew_class=$([[ "${feat_brew_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
+    feat_pipx_class=$([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
 
     # Determine status color for a quick-glance badge.
     local status_color last_status_lc
@@ -14044,9 +14078,14 @@ generate_dashboard() {
     /* Feature toggles */
     .feat-grid { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .feat-badge { font-size: 0.8rem; padding: 6px 10px; border-radius: 10px; background: var(--subtle); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 8px; }
+    .feat-badge.feat-clickable { cursor: pointer; transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease; }
+    .feat-badge.feat-clickable:hover { border-color: rgba(37,99,235,0.40); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
+    .feat-badge.feat-clickable:active { transform: translateY(0) scale(0.98); }
+    .feat-badge.feat-installed { border-color: rgba(34,197,94,0.30); }
+    .feat-badge.feat-missing { border-color: rgba(239,68,68,0.30); }
     .feat-dot { font-size: 0.9rem; }
     .feat-on { color: #2ecc71; font-weight: 900; }
-    .feat-off { color: var(--muted); font-weight: 900; }
+    .feat-off { color: #e74c3c; font-weight: 900; }
 
     /* Command Center action buttons */
     .action-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 12px; }
@@ -14571,11 +14610,11 @@ generate_dashboard() {
       <h2>⚙️ Features & Config</h2>
       <div class="stat-label" style="text-transform:none;">Active Modules</div>
       <div class="feat-grid">
-        <div class="feat-badge"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_brew_class}" id="feat-brew-dot">●</span> Brew: <strong id="feat-brew-val">${feat_brew}</strong></div>
-        <div class="feat-badge"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_flatpak_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-flatpak-badge" data-module="flatpak" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Flatpak (via --setup-SF)"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_snap_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-snap-badge" data-module="snap" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Snapd (via --setup-SF)"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_soar_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-soar-badge" data-module="soar" data-install-cmd="sudo zypper-auto-helper --soar" title="Click to install/setup Soar (via --soar)"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_brew_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-brew-badge" data-module="brew" data-install-cmd="sudo zypper-auto-helper --brew" title="Click to install/setup Homebrew (via --brew)"><span class="feat-dot ${feat_brew_class}" id="feat-brew-dot">●</span> Brew: <strong id="feat-brew-val">${feat_brew}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_pipx_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-pipx-badge" data-module="pipx" data-install-cmd="sudo zypper-auto-helper --pipx" title="Click to install/setup pipx (via --pipx)"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
       </div>
 
       <div style="margin-top: 14px;">
@@ -28169,6 +28208,10 @@ generate_dashboard() {
             '  <div id="su-preview-progress" class="znh-mini-progress" style="margin-top:10px;"><div class="znh-mini-progress-bar"></div></div>',
             '  <pre class="overlay-pre" id="su-preview-notes" style="max-height: 260px; margin-top: 10px;">(loading preview…)</pre>',
             '</details>',
+            '<details id="su-diff-details" style="padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.03); margin-top: 8px;">',
+            '  <summary style="cursor:pointer; font-weight: 950; color: var(--text);">📊 Code diff (git-level changes)</summary>',
+            '  <div id="su-diff-body" style="margin-top:8px;">(loading diff analysis…)</div>',
+            '</details>',
             '<div class="overlay-scroll">',
               d.html,
               '<hr style="border:0; border-top:1px solid rgba(255,255,255,0.10); margin: 12px 0;" />',
@@ -28182,6 +28225,91 @@ generate_dashboard() {
 
         // Load preview notes asynchronously (release notes / commits)
         try { _suPreviewLoad(st); } catch (eP0) {}
+
+        // Populate the code diff section from diff_summary in the status payload.
+        try {
+            var diffEl = document.getElementById('su-diff-body');
+            if (diffEl && st && st.diff_summary) {
+                var ds = st.diff_summary;
+                var h = [];
+                if (ds.error) {
+                    h.push('<div style="color: var(--muted); font-size:0.88rem;">' + _znhEscapeHtml(String(ds.error)) + '</div>');
+                } else {
+                    var stat = ds.stat || {};
+                    var added = parseInt(stat.added || 0, 10) || 0;
+                    var removed = parseInt(stat.removed || 0, 10) || 0;
+                    var hunks = parseInt(stat.modified_hunks || 0, 10) || 0;
+                    var totalL = parseInt(stat.total_local || 0, 10) || 1;
+                    var scope = String(ds.change_scope || 'unknown');
+                    var scopeColors = { identical: 'rgba(34,197,94,0.9)', cosmetic: 'rgba(34,197,94,0.9)', minor: 'rgba(250,204,21,0.9)', moderate: 'rgba(251,146,60,0.9)', major: 'rgba(239,68,68,0.9)', massive: 'rgba(239,68,68,0.95)' };
+                    var scopeColor = scopeColors[scope] || 'var(--muted)';
+                    // Stats bar (GitHub-style)
+                    var addPct = Math.min(100, Math.round((added / Math.max(added + removed, 1)) * 100));
+                    var remPct = 100 - addPct;
+                    h.push('<div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">');
+                    h.push('  <span style="font-weight:900; color:' + scopeColor + ';">' + _znhEscapeHtml(scope.charAt(0).toUpperCase() + scope.slice(1)) + '</span>');
+                    h.push('  <span style="color:rgba(34,197,94,0.95); font-weight:800;">+' + String(added) + '</span>');
+                    h.push('  <span style="color:rgba(239,68,68,0.95); font-weight:800;">&minus;' + String(removed) + '</span>');
+                    h.push('  <span style="color:var(--muted); font-size:0.84rem;">' + String(hunks) + ' hunks</span>');
+                    h.push('</div>');
+                    // Stats bar visual
+                    if (added + removed > 0) {
+                        h.push('<div style="display:flex; height:8px; border-radius:4px; overflow:hidden; margin-bottom:10px; background:rgba(255,255,255,0.06);">');
+                        if (added > 0) h.push('<div style="width:' + String(addPct) + '%; background:rgba(34,197,94,0.7);"></div>');
+                        if (removed > 0) h.push('<div style="width:' + String(remPct) + '%; background:rgba(239,68,68,0.7);"></div>');
+                        h.push('</div>');
+                    }
+                    // Risk summary
+                    if (ds.risk_summary) {
+                        h.push('<div style="color: var(--muted); font-size:0.88rem; font-weight:800; margin-bottom:8px;">' + _znhEscapeHtml(String(ds.risk_summary)) + '</div>');
+                    }
+                    // Layer breakdown
+                    var layers = ds.layer_diffs || [];
+                    if (layers.length > 0) {
+                        h.push('<div style="font-weight:900; margin-top:6px; margin-bottom:4px;">Layer breakdown</div>');
+                        for (var li = 0; li < layers.length; li++) {
+                            var ld = layers[li];
+                            var icon = ld.changed ? '<span style="color:rgba(251,146,60,0.95);">\u25cf</span>' : '<span style="color:rgba(34,197,94,0.85);">\u25cf</span>';
+                            var lstat = ld.stat || {};
+                            var lAdd = parseInt(lstat.added || 0, 10) || 0;
+                            var lRem = parseInt(lstat.removed || 0, 10) || 0;
+                            h.push('<div style="display:flex; gap:8px; align-items:center; font-size:0.86rem; padding:2px 0;">');
+                            h.push('  ' + icon + ' <span style="font-weight:800;">' + _znhEscapeHtml(String(ld.label || ld.name || '')) + '</span>');
+                            if (ld.changed) {
+                                h.push('  <span style="color:rgba(34,197,94,0.85);">+' + String(lAdd) + '</span>');
+                                h.push('  <span style="color:rgba(239,68,68,0.85);">&minus;' + String(lRem) + '</span>');
+                            } else {
+                                h.push('  <span style="color:var(--muted);">unchanged</span>');
+                            }
+                            h.push('</div>');
+                            // Layer sample lines
+                            if (ld.changed && ld.sample_lines && ld.sample_lines.length > 0) {
+                                h.push('<div style="margin-left:20px; font-family:monospace; font-size:0.78rem; max-height:80px; overflow:auto; background:rgba(0,0,0,0.15); border-radius:6px; padding:4px 6px;">');
+                                for (var si = 0; si < ld.sample_lines.length; si++) {
+                                    var sl = String(ld.sample_lines[si]);
+                                    var slColor = sl.charAt(0) === '+' ? 'rgba(34,197,94,0.85)' : (sl.charAt(0) === '-' ? 'rgba(239,68,68,0.85)' : 'var(--muted)');
+                                    h.push('<div style="color:' + slColor + '; white-space:pre;">' + _znhEscapeHtml(sl) + '</div>');
+                                }
+                                h.push('</div>');
+                            }
+                        }
+                    }
+                    // Changed functions
+                    var fns = ds.changed_functions || [];
+                    if (fns.length > 0) {
+                        h.push('<div style="font-weight:900; margin-top:8px; margin-bottom:4px;">Functions touched (' + String(fns.length) + ')</div>');
+                        h.push('<div style="color:var(--muted); font-size:0.82rem; font-family:monospace;">' + _znhEscapeHtml(fns.join(', ')) + '</div>');
+                    }
+                    // Collapsible unified diff
+                    if (ds.unified_diff) {
+                        h.push('<details style="margin-top:10px;"><summary style="cursor:pointer; font-weight:900; color: var(--text);">Unified diff' + (ds.diff_truncated ? ' (truncated)' : '') + '</summary>');
+                        h.push('<pre class="overlay-pre" style="max-height:300px; margin-top:6px; font-size:0.78rem;">' + _znhEscapeHtml(String(ds.unified_diff)) + '</pre>');
+                        h.push('</details>');
+                    }
+                }
+                diffEl.innerHTML = h.join('\n');
+            }
+        } catch (eDiff) {}
 
         try {
             if (e.step) e.step.textContent = 'Step 1/2';
@@ -33905,6 +34033,26 @@ generate_dashboard() {
         } catch (eDU5) {}
     }
 
+    // Wire module badge click handlers (copy install command on click).
+    (function() {
+        try {
+            var badges = document.querySelectorAll('.feat-badge.feat-clickable[data-install-cmd]') || [];
+            Array.prototype.slice.call(badges).forEach(function(b) {
+                if (!b) return;
+                b.addEventListener('click', function(ev) {
+                    try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (e0) {}
+                    var cmd = String(b.getAttribute('data-install-cmd') || '').trim();
+                    var mod = String(b.getAttribute('data-module') || '').trim();
+                    if (cmd) {
+                        try { copyCmd(cmd, b); } catch (e1) {}
+                    } else {
+                        toast('No command', 'Install command not available for ' + mod, 'err');
+                    }
+                });
+            });
+        } catch (eFeatClick) {}
+    })();
+
     // Wire self-update UI (channel toggle + changelog fetch).
     _wireSelfUpdateUI();
     // Wire Snapper manager UI.
@@ -34599,18 +34747,38 @@ generate_dashboard() {
         setText('flight-report-log', d.flight_report_log);
         setText('run-id', d.run_id);
 
-        // Feature toggles
+        // Feature toggles (show ON/OFF based on config)
         setText('feat-flatpak-val', d.feat_flatpak ? 'ON' : 'OFF');
         setText('feat-snap-val', d.feat_snap ? 'ON' : 'OFF');
         setText('feat-soar-val', d.feat_soar ? 'ON' : 'OFF');
         setText('feat-brew-val', d.feat_brew ? 'ON' : 'OFF');
         setText('feat-pipx-val', d.feat_pipx ? 'ON' : 'OFF');
 
-        setClass('feat-flatpak-dot', !!d.feat_flatpak);
-        setClass('feat-snap-dot', !!d.feat_snap);
-        setClass('feat-soar-dot', !!d.feat_soar);
-        setClass('feat-brew-dot', !!d.feat_brew);
-        setClass('feat-pipx-dot', !!d.feat_pipx);
+        // Module dot color based on INSTALLED state (green=installed, red=missing)
+        var _modInstalled = {
+            flatpak: !!(d.feat_flatpak_installed),
+            snap: !!(d.feat_snap_installed),
+            soar: !!(d.feat_soar_installed),
+            brew: !!(d.feat_brew_installed),
+            pipx: !!(d.feat_pipx_installed)
+        };
+        setClass('feat-flatpak-dot', _modInstalled.flatpak);
+        setClass('feat-snap-dot', _modInstalled.snap);
+        setClass('feat-soar-dot', _modInstalled.soar);
+        setClass('feat-brew-dot', _modInstalled.brew);
+        setClass('feat-pipx-dot', _modInstalled.pipx);
+
+        // Update badge border class based on installed state
+        try {
+            var _mods = ['flatpak','snap','soar','brew','pipx'];
+            for (var _mi = 0; _mi < _mods.length; _mi++) {
+                var _mb = document.getElementById('feat-' + _mods[_mi] + '-badge');
+                if (_mb) {
+                    _mb.classList.remove('feat-installed', 'feat-missing');
+                    _mb.classList.add(_modInstalled[_mods[_mi]] ? 'feat-installed' : 'feat-missing');
+                }
+            }
+        } catch (eMod0) {}
 
         // Logs (re-highlight after replacing)
         // IMPORTANT: do not overwrite the Recent Activity Log content when the user
@@ -36058,6 +36226,12 @@ JSON_EOF
     if [[ "${ENABLE_SOAR_UPDATES,,}" == "true" ]]; then json_feat_soar=true; fi
     if [[ "${ENABLE_BREW_UPDATES,,}" == "true" ]]; then json_feat_brew=true; fi
     if [[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]]; then json_feat_pipx=true; fi
+    local json_feat_flatpak_installed json_feat_snap_installed json_feat_soar_installed json_feat_brew_installed json_feat_pipx_installed
+    json_feat_flatpak_installed=$([[ "${feat_flatpak_installed}" == "1" ]] && echo true || echo false)
+    json_feat_snap_installed=$([[ "${feat_snap_installed}" == "1" ]] && echo true || echo false)
+    json_feat_soar_installed=$([[ "${feat_soar_installed}" == "1" ]] && echo true || echo false)
+    json_feat_brew_installed=$([[ "${feat_brew_installed}" == "1" ]] && echo true || echo false)
+    json_feat_pipx_installed=$([[ "${feat_pipx_installed}" == "1" ]] && echo true || echo false)
 
     # Harden status-data generation:
     # - Prefer Python JSON serialization to avoid edge-case escaping drift from
@@ -36082,6 +36256,11 @@ JSON_EOF
             JSON_FEAT_SOAR="${json_feat_soar}" \
             JSON_FEAT_BREW="${json_feat_brew}" \
             JSON_FEAT_PIPX="${json_feat_pipx}" \
+            JSON_FEAT_FLATPAK_INSTALLED="${json_feat_flatpak_installed}" \
+            JSON_FEAT_SNAP_INSTALLED="${json_feat_snap_installed}" \
+            JSON_FEAT_SOAR_INSTALLED="${json_feat_soar_installed}" \
+            JSON_FEAT_BREW_INSTALLED="${json_feat_brew_installed}" \
+            JSON_FEAT_PIPX_INSTALLED="${json_feat_pipx_installed}" \
             JSON_DL_TIMER="${dl_timer}" \
             JSON_VERIFY_TIMER="${verify_timer}" \
             JSON_NT_TIMER="${nt_timer}" \
@@ -36139,6 +36318,11 @@ data = {
     "feat_soar": _env_bool("JSON_FEAT_SOAR", False),
     "feat_brew": _env_bool("JSON_FEAT_BREW", False),
     "feat_pipx": _env_bool("JSON_FEAT_PIPX", False),
+    "feat_flatpak_installed": _env_bool("JSON_FEAT_FLATPAK_INSTALLED", False),
+    "feat_snap_installed": _env_bool("JSON_FEAT_SNAP_INSTALLED", False),
+    "feat_soar_installed": _env_bool("JSON_FEAT_SOAR_INSTALLED", False),
+    "feat_brew_installed": _env_bool("JSON_FEAT_BREW_INSTALLED", False),
+    "feat_pipx_installed": _env_bool("JSON_FEAT_PIPX_INSTALLED", False),
     "dl_timer": os.environ.get("JSON_DL_TIMER", ""),
     "verify_timer": os.environ.get("JSON_VERIFY_TIMER", ""),
     "nt_timer": os.environ.get("JSON_NT_TIMER", ""),
@@ -36194,7 +36378,13 @@ PY
   "feat_brew": ${json_feat_brew},
   "feat_pipx": ${json_feat_pipx},
 
-  "dl_timer": "$(_json_escape "$dl_timer")",
+  "feat_flatpak_installed": ${json_feat_flatpak_installed},
+  "feat_snap_installed": ${json_feat_snap_installed},
+  "feat_soar_installed": ${json_feat_soar_installed},
+  "feat_brew_installed": ${json_feat_brew_installed},
+  "feat_pipx_installed": ${json_feat_pipx_installed},
+
+  "dl_timer":
   "verify_timer": "$(_json_escape "$verify_timer")",
   "nt_timer": "$(_json_escape "$nt_timer")",
 
@@ -57802,18 +57992,46 @@ RUN_UPDATE() {
             echo "✅ No services require restart. You're all set!"
             echo ""
         fi
-    elif [ "${SYSTEM_PKG_MANAGER}" = "dnf" ] && command -v needs-restarting >/dev/null 2>&1; then
-        NEEDS_RESTART_OUTPUT=$(pkexec needs-restarting -s 2>/dev/null || true)
-        if [ -n "${NEEDS_RESTART_OUTPUT:-}" ]; then
-            echo "${NEEDS_RESTART_OUTPUT}"
-            echo ""
-            echo "ℹ️  Services listed above should be restarted."
-            echo "Options:"
-            echo "  1. Restart individual services: systemctl restart <service>"
-            echo "  2. Reboot your system (recommended for kernel/system updates)"
-            echo ""
+    elif [ "${SYSTEM_PKG_MANAGER}" = "dnf" ]; then
+        # Fedora 44+ uses dnf5 by default; needs-restarting may come from
+        # python3-dnf-plugins-core or dnf5 built-in subcommand.
+        _nr_cmd=""
+        if command -v needs-restarting >/dev/null 2>&1; then
+            _nr_cmd="needs-restarting"
+        elif command -v dnf5 >/dev/null 2>&1 && dnf5 needs-restarting --help >/dev/null 2>&1; then
+            _nr_cmd="dnf5 needs-restarting"
         else
-            echo "✅ No services require restart. You're all set!"
+            # Best-effort auto-install (Fedora 44: python3-dnf-plugins-core provides /usr/bin/needs-restarting)
+            echo "ℹ️  needs-restarting not found; attempting to install python3-dnf-plugins-core..."
+            if pkexec dnf install -y python3-dnf-plugins-core >/dev/null 2>&1; then
+                if command -v needs-restarting >/dev/null 2>&1; then
+                    _nr_cmd="needs-restarting"
+                fi
+            fi
+        fi
+
+        if [ -n "${_nr_cmd}" ]; then
+            NEEDS_RESTART_OUTPUT=$(pkexec ${_nr_cmd} -s 2>/dev/null || true)
+            if [ -n "${NEEDS_RESTART_OUTPUT:-}" ]; then
+                echo "${NEEDS_RESTART_OUTPUT}"
+                echo ""
+                echo "ℹ️  Services listed above should be restarted."
+                echo "Options:"
+                echo "  1. Restart individual services: systemctl restart <service>"
+                echo "  2. Reboot your system (recommended for kernel/system updates)"
+                echo ""
+            else
+                echo "✅ No services require restart. You're all set!"
+                echo ""
+            fi
+        else
+            # Fallback: check reboot-required marker files (Fedora writes these for kernel updates)
+            if [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then
+                echo "⚠️  Reboot required marker detected. A reboot is recommended."
+            else
+                echo "ℹ️  needs-restarting is not available; install with: sudo dnf install python3-dnf-plugins-core"
+                echo "   Consider rebooting if core libraries or kernel packages were upgraded."
+            fi
             echo ""
         fi
     else
@@ -59137,21 +59355,28 @@ def _reboot_required(pm: str = "zypper") -> bool:
                 return False
         except Exception:
             pass
-    elif manager == "dnf" and _command_exists("needs-restarting"):
-        try:
-            p = subprocess.run(
-                ["needs-restarting", "-r"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=8,
-            )
-            # dnf-utils/libdnf returns non-zero when reboot is recommended.
-            if int(p.returncode) != 0:
-                return True
-            return False
-        except Exception:
-            pass
+    elif manager == "dnf":
+        # Try standalone needs-restarting first, then dnf5 subcommand (Fedora 44+)
+        nr_cmds = []
+        if _command_exists("needs-restarting"):
+            nr_cmds.append(["needs-restarting", "-r"])
+        if _command_exists("dnf5"):
+            nr_cmds.append(["dnf5", "needs-restarting", "-r"])
+        for nr_cmd in nr_cmds:
+            try:
+                p = subprocess.run(
+                    nr_cmd,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=8,
+                )
+                # dnf-utils/libdnf returns non-zero when reboot is recommended.
+                if int(p.returncode) != 0:
+                    return True
+                return False
+            except Exception:
+                continue
 
     # Generic fallback marker files used by apt/dnf/pacman tools.
     for f in (
@@ -59681,8 +59906,13 @@ def _script_layer_sha256s(text: str) -> dict:
         out[k] = hashlib.sha256(vv.encode("utf-8", errors="replace")).hexdigest()  # nosec B324 (non-crypto fingerprinting)
     return out
 
-def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool) -> tuple[str, str, list[str], str, str]:
-    """Recommend none|verify|install from layered SHA256 deltas."""
+def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool, diff_summary: dict | None = None) -> tuple[str, str, list[str], str, str]:
+    """Recommend none|verify|install from layered SHA256 deltas + diff analysis.
+
+    When diff_summary is provided (from _compute_diff_summary), it enriches
+    the recommendation with line-level stats, change scope, function names,
+    and per-layer detail — giving users actionable context for the choice.
+    """
     if not has_remote:
         return "verify", "Remote section fingerprints unavailable; using safer verify recommendation.", [], "low", "elevated"
 
@@ -59705,11 +59935,304 @@ def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remot
             "high",
         )
 
+    # Base recommendation from layer SHA256 deltas
     if not changed:
-        return "none", "No layered code-section change detected.", changed, "high", "low"
-    if any(x in changed for x in ("dashboard_api_embed", "installer_payloads")):
-        return "install", "Installer/deployer sections changed; full install recommended.", changed, "high", "high"
-    return "verify", "Core helper sections changed; verify recommended.", changed, "medium", "moderate"
+        base_action = "none"
+        base_reason = "No layered code-section change detected."
+        base_confidence = "high"
+        base_risk = "low"
+    elif any(x in changed for x in ("dashboard_api_embed", "installer_payloads")):
+        base_action = "install"
+        base_reason = "Installer/deployer sections changed; full install recommended."
+        base_confidence = "high"
+        base_risk = "high"
+    else:
+        base_action = "verify"
+        base_reason = "Core helper sections changed; verify recommended."
+        base_confidence = "medium"
+        base_risk = "moderate"
+
+    # Enrich with diff_summary when available
+    ds = diff_summary if isinstance(diff_summary, dict) else None
+    if ds and not ds.get("error"):
+        stat = ds.get("stat") or {}
+        added = int(stat.get("added", 0) or 0)
+        removed = int(stat.get("removed", 0) or 0)
+        hunks = int(stat.get("modified_hunks", 0) or 0)
+        scope = str(ds.get("change_scope", "") or "")
+        fns = ds.get("changed_functions") or []
+        layer_diffs = ds.get("layer_diffs") or []
+
+        # Build enriched reason with diff context
+        parts = [base_reason]
+        parts.append(f"+{added}/\u2212{removed} lines across {hunks} hunks (scope: {scope}).")
+
+        # Identify additional layers from diff_summary (6 layers vs 3 in SHA256)
+        diff_changed_layers = [ld.get("label", ld.get("name", "")) for ld in layer_diffs if ld.get("changed")]
+        if diff_changed_layers:
+            parts.append(f"Affected: {', '.join(diff_changed_layers)}.")
+
+        if fns:
+            fn_short = fns[:5]
+            parts.append(f"Functions touched: {', '.join(fn_short)}" + (f" (+{len(fns) - 5} more)" if len(fns) > 5 else "") + ".")
+
+        # Escalate recommendation based on diff scope for "none" base
+        if base_action == "none" and scope in ("minor", "moderate", "major", "massive"):
+            # Layer SHA256 says no change in tracked layers, but diff shows real changes
+            # (e.g. changes in HTML, notifier, CLI dispatch — layers not tracked by SHA256)
+            base_action = "verify"
+            base_confidence = "medium"
+            base_risk = "moderate" if scope in ("minor", "moderate") else "high"
+            parts.append(f"Diff detected {scope} changes outside tracked layers \u2014 verify recommended.")
+
+        # Escalate "verify" to "install" when massive or many layers affected
+        if base_action == "verify" and (scope == "massive" or len(diff_changed_layers) >= 4):
+            base_action = "install"
+            base_confidence = "high"
+            base_risk = "high"
+            parts.append("Large-scale changes across multiple layers \u2014 full install recommended.")
+
+        # Boost confidence when diff confirms the SHA256-based recommendation
+        if base_action != "none" and scope == "cosmetic":
+            parts.append("Changes are cosmetic (comments/whitespace) \u2014 quick update likely sufficient.")
+            base_action = "none"
+            base_confidence = "medium"
+            base_risk = "low"
+
+        base_reason = " ".join(parts)
+
+    return base_action, base_reason, changed, base_confidence, base_risk
+
+
+def _compute_diff_summary(local_text: str, remote_text: str, *, installed_ref: str = "", remote_ref: str = "", local_layers: dict | None = None, remote_layers: dict | None = None, max_diff_lines: int = 600) -> dict:
+    """Compute a git-level unified diff summary between local and remote scripts.
+
+    Returns a dict with:
+      stat          - {added, removed, modified_hunks, unchanged, total_local, total_remote}
+      unified_diff  - truncated unified diff text (capped at max_diff_lines)
+      diff_truncated - whether the diff was truncated
+      hunks         - list of {header, added, removed, preview} for each hunk
+      layer_diffs   - per-layer {name, changed, stat, sample_lines}
+      changed_functions - list of bash function names that appear in changed hunks
+      change_scope  - "cosmetic" | "minor" | "moderate" | "major" | "massive" | "identical"
+      risk_summary  - human-readable risk explanation for the WebUI
+    """
+    import difflib
+
+    local = str(local_text or "")
+    remote = str(remote_text or "")
+    result: dict = {
+        "stat": {"added": 0, "removed": 0, "modified_hunks": 0, "unchanged": 0, "total_local": 0, "total_remote": 0},
+        "unified_diff": "",
+        "diff_truncated": False,
+        "hunks": [],
+        "layer_diffs": [],
+        "changed_functions": [],
+        "change_scope": "identical",
+        "risk_summary": "",
+    }
+
+    if not local and not remote:
+        result["risk_summary"] = "Both local and remote scripts are empty or unavailable."
+        return result
+    if not remote:
+        result["risk_summary"] = "Remote script not available for comparison."
+        return result
+    if not local:
+        result["stat"]["added"] = len(remote.splitlines())
+        result["stat"]["total_remote"] = result["stat"]["added"]
+        result["change_scope"] = "massive"
+        result["risk_summary"] = "Fresh install; entire script is new."
+        return result
+
+    local_lines = local.splitlines(keepends=True)
+    remote_lines = remote.splitlines(keepends=True)
+    result["stat"]["total_local"] = len(local_lines)
+    result["stat"]["total_remote"] = len(remote_lines)
+
+    # Compute unified diff
+    from_label = f"installed ({installed_ref[:12]})" if installed_ref else "installed"
+    to_label = f"remote ({remote_ref[:12]})" if remote_ref else "remote"
+    diff_gen = difflib.unified_diff(local_lines, remote_lines, fromfile=from_label, tofile=to_label, n=3)
+    diff_lines_all: list[str] = []
+    try:
+        for dl in diff_gen:
+            diff_lines_all.append(dl)
+    except Exception:
+        pass
+
+    if not diff_lines_all:
+        result["stat"]["unchanged"] = len(local_lines)
+        result["change_scope"] = "identical"
+        result["risk_summary"] = "Scripts are identical; no changes."
+        return result
+
+    # Count stats and parse hunks
+    added = 0
+    removed = 0
+    hunks: list[dict] = []
+    current_hunk: dict | None = None
+    hunk_preview_max = 8
+    fn_pattern = re.compile(r"^(?:[-+])\s*(?:function\s+)?(\w[\w_-]*)\s*\(\)", re.MULTILINE)
+    changed_fns: set = set()
+
+    for dl in diff_lines_all:
+        if dl.startswith("@@"):
+            if current_hunk:
+                hunks.append(current_hunk)
+            current_hunk = {"header": dl.rstrip(), "added": 0, "removed": 0, "preview": []}
+        elif dl.startswith("+") and not dl.startswith("+++"):
+            added += 1
+            if current_hunk:
+                current_hunk["added"] += 1
+                if len(current_hunk["preview"]) < hunk_preview_max:
+                    current_hunk["preview"].append(dl.rstrip())
+            # Detect function names in added/removed lines
+            fm = fn_pattern.match(dl)
+            if fm:
+                changed_fns.add(fm.group(1))
+        elif dl.startswith("-") and not dl.startswith("---"):
+            removed += 1
+            if current_hunk:
+                current_hunk["removed"] += 1
+                if len(current_hunk["preview"]) < hunk_preview_max:
+                    current_hunk["preview"].append(dl.rstrip())
+            fm = fn_pattern.match(dl)
+            if fm:
+                changed_fns.add(fm.group(1))
+    if current_hunk:
+        hunks.append(current_hunk)
+
+    result["stat"]["added"] = added
+    result["stat"]["removed"] = removed
+    result["stat"]["modified_hunks"] = len(hunks)
+    result["stat"]["unchanged"] = max(0, len(local_lines) - removed)
+
+    # Truncate diff text for the response
+    truncated = len(diff_lines_all) > max_diff_lines
+    result["diff_truncated"] = truncated
+    kept = diff_lines_all[:max_diff_lines]
+    if truncated:
+        kept.append(f"\n... ({len(diff_lines_all) - max_diff_lines} more diff lines truncated) ...\n")
+    result["unified_diff"] = "".join(kept)
+
+    # Limit hunks in response (keep first N for the UI)
+    result["hunks"] = hunks[:40]
+    result["changed_functions"] = sorted(changed_fns)[:50]
+
+    # Per-layer diff breakdown
+    layer_markers = {
+        "self_update_core": ("# --- Helper: Self-update (CLI) ---", "# --- Helper: rollback latest self-update backup ---"),
+        "dashboard_api_embed": ("if write_atomic \"${DASH_API_BIN}\" <<'PYEOF'", "PYEOF"),
+        "installer_payloads": ("# --- 11e. Install dashboard settings API (localhost) ---", ""),
+        "notifier_service": ("# --- 10. Install the notification service ---", "# --- 11."),
+        "dashboard_html": ("# --- 11. Generate the live HTML dashboard ---", "# --- 11e."),
+        "cli_dispatch": ("# --- 14. CLI dispatch ---", ""),
+    }
+    layer_labels = {
+        "self_update_core": "Self-update core logic",
+        "dashboard_api_embed": "Dashboard API backend",
+        "installer_payloads": "Installer/deployer payloads",
+        "notifier_service": "Notification service",
+        "dashboard_html": "Dashboard HTML/JS",
+        "cli_dispatch": "CLI dispatch & flags",
+    }
+
+    def _extract_layer(text_lines: list[str], start_marker: str, end_marker: str) -> list[str]:
+        """Extract lines between markers (inclusive start, exclusive end)."""
+        out: list[str] = []
+        capturing = False
+        for ln in text_lines:
+            if not capturing and start_marker in ln:
+                capturing = True
+            if capturing:
+                out.append(ln)
+                if end_marker and end_marker in ln and len(out) > 1:
+                    break
+        return out
+
+    layer_diffs: list[dict] = []
+    for lname, (sm, em) in layer_markers.items():
+        try:
+            ll = _extract_layer(local_lines, sm, em)
+            rl = _extract_layer(remote_lines, sm, em)
+            l_sha = ""
+            r_sha = ""
+            if local_layers and isinstance(local_layers, dict):
+                l_sha = str(local_layers.get(lname, "") or "")
+            if remote_layers and isinstance(remote_layers, dict):
+                r_sha = str(remote_layers.get(lname, "") or "")
+
+            layer_changed = False
+            if l_sha and r_sha:
+                layer_changed = l_sha != r_sha
+            elif ll or rl:
+                layer_changed = ll != rl
+
+            la = 0
+            lr_ = 0
+            sample: list[str] = []
+            if layer_changed and ll and rl:
+                ld = list(difflib.unified_diff(ll, rl, n=1))
+                for ldl in ld:
+                    if ldl.startswith("+") and not ldl.startswith("+++"):
+                        la += 1
+                    elif ldl.startswith("-") and not ldl.startswith("---"):
+                        lr_ += 1
+                # Take first few changed lines as sample
+                for ldl in ld:
+                    if (ldl.startswith("+") or ldl.startswith("-")) and not ldl.startswith("+++") and not ldl.startswith("---"):
+                        sample.append(ldl.rstrip())
+                        if len(sample) >= 6:
+                            break
+
+            layer_diffs.append({
+                "name": lname,
+                "label": layer_labels.get(lname, lname),
+                "changed": layer_changed,
+                "stat": {"added": la, "removed": lr_, "local_lines": len(ll), "remote_lines": len(rl)},
+                "sample_lines": sample,
+            })
+        except Exception:
+            layer_diffs.append({"name": lname, "label": layer_labels.get(lname, lname), "changed": False, "stat": {"added": 0, "removed": 0, "local_lines": 0, "remote_lines": 0}, "sample_lines": []})
+    result["layer_diffs"] = layer_diffs
+
+    # Change scope classification
+    total_changed = added + removed
+    total_lines = max(len(local_lines), len(remote_lines), 1)
+    change_pct = (total_changed / total_lines) * 100.0
+
+    if total_changed == 0:
+        scope = "identical"
+    elif total_changed <= 10 or change_pct < 0.1:
+        scope = "cosmetic"
+    elif total_changed <= 50 or change_pct < 1.0:
+        scope = "minor"
+    elif total_changed <= 300 or change_pct < 5.0:
+        scope = "moderate"
+    elif total_changed <= 1000 or change_pct < 15.0:
+        scope = "major"
+    else:
+        scope = "massive"
+    result["change_scope"] = scope
+
+    # Risk summary
+    changed_layer_names = [ld["label"] for ld in layer_diffs if ld.get("changed")]
+    risk_parts = []
+    risk_parts.append(f"{scope.capitalize()} change: +{added}/\u2212{removed} lines ({len(hunks)} hunks, {change_pct:.1f}% of script).")
+    if changed_layer_names:
+        risk_parts.append(f"Affected layers: {', '.join(changed_layer_names)}.")
+    if changed_fns:
+        fn_preview = list(changed_fns)[:8]
+        risk_parts.append(f"Functions touched: {', '.join(fn_preview)}" + (f" (+{len(changed_fns) - 8} more)" if len(changed_fns) > 8 else "") + ".")
+    if any(ld.get("changed") for ld in layer_diffs if ld["name"] in ("installer_payloads", "dashboard_api_embed")):
+        risk_parts.append("Installer/API sections changed \u2014 full install recommended after update.")
+    elif any(ld.get("changed") for ld in layer_diffs if ld["name"] == "self_update_core"):
+        risk_parts.append("Self-update logic changed \u2014 verify recommended after update.")
+    result["risk_summary"] = " ".join(risk_parts)
+
+    return result
+
 def _is_git_sha(v: str) -> bool:
     try:
         s = str(v or "").strip().lower()
@@ -64161,10 +64684,26 @@ class Handler(BaseHTTPRequestHandler):
 
             local_layer_sha256 = _script_layer_sha256s(local_script_text)
             remote_layer_sha256 = _script_layer_sha256s(remote_script_text)
+
+            # Compute diff_summary first so it can feed into the recommendation engine.
+            diff_summary = {}
+            try:
+                diff_summary = _compute_diff_summary(
+                    local_script_text, remote_script_text,
+                    installed_ref=str(installed_ref or ""),
+                    remote_ref=str(remote_ref or ""),
+                    local_layers=local_layer_sha256,
+                    remote_layers=remote_layer_sha256,
+                    max_diff_lines=600,
+                )
+            except Exception:
+                diff_summary = {"error": "Failed to compute diff summary"}
+
             rec_action, rec_reason, rec_changed_layers, rec_confidence, rec_risk_level = _recommend_post_action(
                 local_layer_sha256,
                 remote_layer_sha256,
                 has_remote=bool(remote_script_text),
+                diff_summary=diff_summary if isinstance(diff_summary, dict) and not diff_summary.get("error") else None,
             )
             channel_rec_action, channel_rec_target, channel_rec_reason, channel_rec_confidence = _recommend_channel_switch(
                 configured_channel=ch,
@@ -64271,7 +64810,7 @@ class Handler(BaseHTTPRequestHandler):
 
             running_info = _self_update_any_running()
 
-            # Download source transparency (requested): show exactly where the helper would be fetched from.
+            # Download source transparency
             # NOTE: stable prefers a release asset if it exists, but still exposes the raw-tag URL.
             download_urls = []
             download_url = ""
@@ -64391,6 +64930,9 @@ class Handler(BaseHTTPRequestHandler):
                 "job_running_channel": str(running_info.get("channel", "") or ""),
                 "job_running_unit": str(running_info.get("unit", "") or ""),
                 "job_running_status_path": str(running_info.get("status_path", "") or ""),
+
+                # Git-level diff summary (unified diff stats, per-layer breakdown, changed functions)
+                "diff_summary": diff_summary if isinstance(diff_summary, dict) else {},
             }
 
             return _json_response(self, 200, payload, origin)
@@ -67272,7 +67814,7 @@ class Handler(BaseHTTPRequestHandler):
                     restart_cmd = f'{ZYPPER_BIN} ps -s >>"$LOG" 2>&1 || true'
                 elif pm_name == "dnf":
                     restart_marker = "=== RESTART CHECK (needs-restarting -s) ==="
-                    restart_cmd = 'if command -v needs-restarting >/dev/null 2>&1; then needs-restarting -s >>"$LOG" 2>&1 || true; else echo "[INFO] needs-restarting not available; skipping restart check" >>"$LOG"; fi'
+                    restart_cmd = 'if command -v needs-restarting >/dev/null 2>&1; then needs-restarting -s >>"$LOG" 2>&1 || true; elif command -v dnf5 >/dev/null 2>&1 && dnf5 needs-restarting --help >/dev/null 2>&1; then dnf5 needs-restarting -s >>"$LOG" 2>&1 || true; else dnf install -y python3-dnf-plugins-core >>"$LOG" 2>&1 || true; if command -v needs-restarting >/dev/null 2>&1; then needs-restarting -s >>"$LOG" 2>&1 || true; else echo "[INFO] needs-restarting not available (install: dnf install python3-dnf-plugins-core); checking reboot markers" >>"$LOG"; if [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then echo "Reboot required marker detected." >>"$LOG"; else echo "No reboot-required marker found; consider reboot if kernel was updated." >>"$LOG"; fi; fi; fi'
                 elif pm_name == "apt":
                     restart_marker = "=== RESTART CHECK (reboot-required markers) ==="
                     restart_cmd = 'if [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then echo "Reboot required marker detected." >>"$LOG"; elif command -v needrestart >/dev/null 2>&1; then needrestart -b >>"$LOG" 2>&1 || true; else echo "[INFO] apt restart-check helper not available; skipping detailed restart check" >>"$LOG"; fi'
