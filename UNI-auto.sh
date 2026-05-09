@@ -13038,6 +13038,17 @@ generate_dashboard() {
     feat_brew_class=$([[ "${feat_brew_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
     feat_pipx_class=$([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
 
+    # Pre-compute installed/missing CSS class for feature badges.
+    # IMPORTANT: these MUST be computed here (not as JS ternaries inside the
+    # heredoc) because the dashboard heredoc uses unquoted <<EOF, so bash
+    # expands all ${} inside it.  JS-style ${x == 'y' ? a : b} causes
+    local feat_flatpak_install_class feat_snap_install_class feat_soar_install_class feat_brew_install_class feat_pipx_install_class
+    feat_flatpak_install_class=$([[ "${feat_flatpak_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
+    feat_snap_install_class=$([[ "${feat_snap_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
+    feat_soar_install_class=$([[ "${feat_soar_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
+    feat_brew_install_class=$([[ "${feat_brew_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
+    feat_pipx_install_class=$([[ "${feat_pipx_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
+
     # Determine status color for a quick-glance badge.
     local status_color last_status_lc
     status_color="#7f8c8d" # Default gray
@@ -14610,11 +14621,11 @@ generate_dashboard() {
       <h2>⚙️ Features & Config</h2>
       <div class="stat-label" style="text-transform:none;">Active Modules</div>
       <div class="feat-grid">
-        <div class="feat-badge feat-clickable ${feat_flatpak_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-flatpak-badge" data-module="flatpak" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Flatpak (via --setup-SF)"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
-        <div class="feat-badge feat-clickable ${feat_snap_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-snap-badge" data-module="snap" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Snapd (via --setup-SF)"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
-        <div class="feat-badge feat-clickable ${feat_soar_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-soar-badge" data-module="soar" data-install-cmd="sudo zypper-auto-helper --soar" title="Click to install/setup Soar (via --soar)"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
-        <div class="feat-badge feat-clickable ${feat_brew_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-brew-badge" data-module="brew" data-install-cmd="sudo zypper-auto-helper --brew" title="Click to install/setup Homebrew (via --brew)"><span class="feat-dot ${feat_brew_class}" id="feat-brew-dot">●</span> Brew: <strong id="feat-brew-val">${feat_brew}</strong></div>
-        <div class="feat-badge feat-clickable ${feat_pipx_class == 'feat-on' ? 'feat-installed' : 'feat-missing'}" id="feat-pipx-badge" data-module="pipx" data-install-cmd="sudo zypper-auto-helper --pipx" title="Click to install/setup pipx (via --pipx)"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_flatpak_install_class}" id="feat-flatpak-badge" data-module="flatpak" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Flatpak (via --setup-SF)"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_snap_install_class}" id="feat-snap-badge" data-module="snap" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Snapd (via --setup-SF)"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_soar_install_class}" id="feat-soar-badge" data-module="soar" data-install-cmd="sudo zypper-auto-helper --soar" title="Click to install/setup Soar (via --soar)"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_brew_install_class}" id="feat-brew-badge" data-module="brew" data-install-cmd="sudo zypper-auto-helper --brew" title="Click to install/setup Homebrew (via --brew)"><span class="feat-dot ${feat_brew_class}" id="feat-brew-dot">●</span> Brew: <strong id="feat-brew-val">${feat_brew}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_pipx_install_class}" id="feat-pipx-badge" data-module="pipx" data-install-cmd="sudo zypper-auto-helper --pipx" title="Click to install/setup pipx (via --pipx)"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
       </div>
 
       <div style="margin-top: 14px;">
@@ -62790,8 +62801,15 @@ def _recover_self_update_job(job_id: str) -> dict | None:
             stage = "Dry-run done" if dry_run else "Done"
         else:
             stage = "Failed"
+    elif done and progress >= 100:
+        # Post-action band (101+) or exact 100: always clamp to 100 when done.
+        progress = 100
+        if rc == 0:
+            stage = "Dry-run done" if dry_run else "Done"
+        else:
+            stage = "Failed"
 
-    # UX fix: the progress parser may hit 100% early (e.g. on "update complete") while
+    # UX fix: the progress parser may hit 100% early
     # the unit is still running post-actions (verify/install). Never show 100% until done.
     if not done and progress >= 100:
         # Post-action stages use progress values > 100 (101-199) to signal that
@@ -62892,19 +62910,21 @@ def _job_update_progress(job: dict, line: str) -> None:
     # These markers are emitted by the systemd job script when a post-action is
     # running.  They intentionally re-use the bump() helper so progress can ONLY
     # move forward (the self-update "Done" at 100 is the ceiling; post-action
-    # stages live in the 101-199 band which gets clamped to 99 by the caller).
-    if "[webui] stage: post-install" in l:
-        bump(101, "post-install")
-    elif "[webui] stage: post-verify" in l:
-        bump(101, "post-verify")
+    # stages live in the 101-199 band which gets clamped by the caller).
+    # IMPORTANT: check "-done" variants FIRST because "post-install" is a
+    # substring of "post-install-done" and would match both.
+    if "[webui] stage: post-install-done" in l:
+        bump(110, "post-install done")
+    elif "[webui] stage: post-verify-done" in l:
+        bump(110, "post-verify done")
     elif "[webui] stage: post-install-services" in l:
         bump(103, "post-install (services)")
     elif "[webui] stage: post-install-dashboard" in l:
         bump(105, "post-install (dashboard)")
-    elif "[webui] stage: post-install-done" in l:
-        bump(110, "post-install done")
-    elif "[webui] stage: post-verify-done" in l:
-        bump(110, "post-verify done")
+    elif "[webui] stage: post-install" in l:
+        bump(101, "post-install")
+    elif "[webui] stage: post-verify" in l:
+        bump(101, "post-verify")
 
     job["stage"] = stage
     job["progress"] = prog
