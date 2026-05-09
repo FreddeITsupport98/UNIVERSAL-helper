@@ -5,6 +5,8 @@
 - Dashboard: Module badges are clickable; clicking copies the install command (Flatpak + Snap both use --setup-SF)
 - Dashboard: Added feat_*_installed fields to status-data.json for live module detection
 - Dashboard: CSS hover/active effects on clickable module badges
+- Dashboard: Module badges now install via WebUI Quick Action runner (same overlay UX as Rocket updater), not copy-to-clipboard
+- Dashboard API: Added setup-SF, soar, brew, pipx to quick-action allowlist so modules can be installed from the browser
 ## Unreleased
 - [2026-05-09 19:11 UTC] Fixed Fedora 44 `needs-restarting` not available in all three restart-check paths (interactive install, Rocket WebUI worker, Python dashboard API reboot detection). On Fedora 44+ where dnf5 is default, `needs-restarting` is not installed out of the box (provided by `python3-dnf-plugins-core`). Fixes: (1) Interactive install restart check now tries standalone `needs-restarting`, then `dnf5 needs-restarting` subcommand, then auto-installs `python3-dnf-plugins-core`, then falls back to reboot-required marker files. (2) Rocket WebUI worker restart_cmd now uses the same cascade so background updates get proper restart reporting instead of silent skip. (3) Python `_reboot_required()` now tries `dnf5 needs-restarting -r` as fallback when the standalone binary is missing. (4) Added `needs-restarting` to `znh_resolve_package_name` (dnf → `python3-dnf-plugins-core`). Verified with `bash -n UNI-auto.sh` PASS.
 - [2026-05-09 19:06 UTC]

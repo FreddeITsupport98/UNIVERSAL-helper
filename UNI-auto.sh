@@ -34045,18 +34045,48 @@ generate_dashboard() {
         } catch (eDU5) {}
     }
 
-    // Wire module badge click handlers (copy install command on click).
+    // Wire module badge click handlers (run install via Quick Action API, same UX as Rocket/Quick Actions).
     (function() {
         try {
+            var _modQaMap = {
+                'flatpak': 'setup-SF',
+                'snap':    'setup-SF',
+                'soar':    'soar',
+                'brew':    'brew',
+                'pipx':    'pipx'
+            };
+            var _modTitleMap = {
+                'flatpak': 'Install Snapd & Flatpak',
+                'snap':    'Install Snapd & Flatpak',
+                'soar':    'Install Soar CLI',
+                'brew':    'Install Homebrew',
+                'pipx':    'Install pipx'
+            };
             var badges = document.querySelectorAll('.feat-badge.feat-clickable[data-install-cmd]') || [];
             Array.prototype.slice.call(badges).forEach(function(b) {
                 if (!b) return;
                 b.addEventListener('click', function(ev) {
                     try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (e0) {}
-                    var cmd = String(b.getAttribute('data-install-cmd') || '').trim();
                     var mod = String(b.getAttribute('data-module') || '').trim();
-                    if (cmd) {
-                        try { copyCmd(cmd, b); } catch (e1) {}
+                    var qaAction = _modQaMap[mod] || '';
+                    var qaTitle = _modTitleMap[mod] || ('Install ' + mod);
+                    var copyFallback = String(b.getAttribute('data-install-cmd') || '').trim();
+                    if (qaAction && typeof quickActionOpen === 'function') {
+                        try {
+                            quickActionOpen({
+                                action: qaAction,
+                                title: qaTitle,
+                                desc: 'Install/setup ' + mod + ' via the dashboard',
+                                copy_cmd: copyFallback,
+                                danger: (qaAction === 'setup-SF'),
+                                interactive: false
+                            });
+                        } catch (e1) {
+                            toast('Quick Action failed', (e1 && e1.message) || 'failed', 'err');
+                            if (copyFallback) copyCmd(copyFallback, b);
+                        }
+                    } else if (copyFallback) {
+                        copyCmd(copyFallback, b);
                     } else {
                         toast('No command', 'Install command not available for ' + mod, 'err');
                     }
@@ -62129,6 +62159,42 @@ def _quick_action_table() -> dict:
             "bypass_running_lock": True,  # Reboot actions must not be blocked by stale quick-action locks
             "explain": "Runs the family-specific finishing command after the staged distro-upgrade download is complete. On Fedora/Nobara this calls `dnf5 offline reboot` (preferred) or `dnf system-upgrade reboot` (legacy), which immediately reboots the machine into the offline upgrade environment so the upgrade can be applied. Other families either reboot themselves (Ubuntu/Mint via do-release-upgrade) or print manual guidance (Debian/Leap/RHEL).",
             "warning": "This action WILL reboot the machine. Save your work first. The reboot kicks off the offline upgrade install which can take a while.",
+        },
+
+        # Module install helpers (WebUI Active Modules badges)
+        # Flatpak + Snap share --setup-SF (combined installer).
+        "setup-SF": {
+            "title": "Install Snapd & Flatpak",
+            "cmd": [HELPER_BIN, "--setup-SF"],
+            "timeout_s": 15 * 60,
+            "needs_confirm": True,
+            "phrase": "SETUPSF",
+            "explain": "Installs and configures Snapd and Flatpak together: ensures snapd is installed and running, installs flatpak, adds Flathub/AppCenter remotes, optionally installs Snap Store and Bazaar apps, and optionally removes KDE Discover to avoid conflicting update stacks.",
+            "warning": "This installs system packages and modifies Flatpak remotes. On openSUSE you may be prompted to add the snappy repository via opi.",
+        },
+        "soar": {
+            "title": "Install Soar CLI",
+            "cmd": [HELPER_BIN, "--soar"],
+            "timeout_s": 10 * 60,
+            "needs_confirm": False,
+            "phrase": "",
+            "explain": "Installs or upgrades the Soar CLI helper for keeping metadata in sync after updates.",
+        },
+        "brew": {
+            "title": "Install Homebrew",
+            "cmd": [HELPER_BIN, "--brew"],
+            "timeout_s": 15 * 60,
+            "needs_confirm": False,
+            "phrase": "",
+            "explain": "Installs or upgrades Homebrew (brew) for the current user.",
+        },
+        "pipx": {
+            "title": "Install pipx",
+            "cmd": [HELPER_BIN, "--pipx"],
+            "timeout_s": 10 * 60,
+            "needs_confirm": False,
+            "phrase": "",
+            "explain": "Installs pipx and shows how to manage Python CLI tools with pipx.",
         },
     }
 
