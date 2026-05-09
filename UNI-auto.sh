@@ -13042,6 +13042,7 @@ generate_dashboard() {
     # IMPORTANT: these MUST be computed here (not as JS ternaries inside the
     # heredoc) because the dashboard heredoc uses unquoted <<EOF, so bash
     # expands all ${} inside it.  JS-style ${x == 'y' ? a : b} causes
+    # "bad substitution" and crashes the entire install.
     local feat_flatpak_install_class feat_snap_install_class feat_soar_install_class feat_brew_install_class feat_pipx_install_class
     feat_flatpak_install_class=$([[ "${feat_flatpak_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
     feat_snap_install_class=$([[ "${feat_snap_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
