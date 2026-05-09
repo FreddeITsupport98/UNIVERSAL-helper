@@ -13002,9 +13002,21 @@ generate_dashboard() {
     feat_pipx=$([[ "${ENABLE_PIPX_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
 
     # Actual installation detection (green = installed, red = missing)
+    # Each module checks: command -v (root PATH), sudo -u user sh -lc (user login shell),
+    # then well-known filesystem paths as final fallback.
     local feat_flatpak_installed feat_snap_installed feat_soar_installed feat_brew_installed feat_pipx_installed
-    feat_flatpak_installed=$(command -v flatpak >/dev/null 2>&1 && echo 1 || echo 0)
-    feat_snap_installed=$(command -v snap >/dev/null 2>&1 && echo 1 || echo 0)
+    feat_flatpak_installed=0
+    if command -v flatpak >/dev/null 2>&1; then
+        feat_flatpak_installed=1
+    elif [ -x /usr/bin/flatpak ] || [ -x /usr/local/bin/flatpak ]; then
+        feat_flatpak_installed=1
+    fi
+    feat_snap_installed=0
+    if command -v snap >/dev/null 2>&1; then
+        feat_snap_installed=1
+    elif [ -x /usr/bin/snap ] || [ -x /usr/local/bin/snap ]; then
+        feat_snap_installed=1
+    fi
     feat_soar_installed=0
     if [ -n "${SUDO_USER:-}" ]; then
         if sudo -u "${SUDO_USER}" sh -lc 'command -v soar >/dev/null 2>&1' 2>/dev/null; then
@@ -13019,6 +13031,10 @@ generate_dashboard() {
     if [ -n "${SUDO_USER:-}" ]; then
         if sudo -u "${SUDO_USER}" sh -lc 'command -v brew >/dev/null 2>&1' 2>/dev/null; then
             feat_brew_installed=1
+        elif [ -x "${SUDO_USER_HOME:-}/.linuxbrew/bin/brew" ]; then
+            feat_brew_installed=1
+        elif [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+            feat_brew_installed=1
         fi
     elif command -v brew >/dev/null 2>&1; then
         feat_brew_installed=1
@@ -13026,6 +13042,11 @@ generate_dashboard() {
     feat_pipx_installed=0
     if [ -n "${SUDO_USER:-}" ]; then
         if sudo -u "${SUDO_USER}" sh -lc 'command -v pipx >/dev/null 2>&1' 2>/dev/null; then
+            feat_pipx_installed=1
+        elif [ -x "${SUDO_USER_HOME:-}/.local/bin/pipx" ]; then
+            feat_pipx_installed=1
+        elif command -v pipx >/dev/null 2>&1; then
+            # pipx installed as system package (e.g. dnf install pipx)
             feat_pipx_installed=1
         fi
     elif command -v pipx >/dev/null 2>&1; then
@@ -34956,6 +34977,58 @@ generate_dashboard() {
             highlightBlock('flight-content');
         }
     }
+
+    // --- Live service uptime poller (Flatpak/Snap badge health) ---
+    // Pings Flathub and Snapcraft every 10s from the browser.
+    // When a service is unreachable, the badge flips to yellow (installed but unhealthy).
+    // When it comes back, badge returns to green.
+    var _svcUptimeState = { flatpak: null, snap: null };
+    function _svcUptimePoll() {
+        try {
+            // Only check modules that are installed (dot is green or yellow, not red)
+            var fpDot = document.getElementById('feat-flatpak-dot');
+            var snDot = document.getElementById('feat-snap-dot');
+            var fpInstalled = fpDot && !fpDot.classList.contains('feat-off');
+            var snInstalled = snDot && !snDot.classList.contains('feat-off');
+
+            if (fpInstalled) {
+                fetch('https://dl.flathub.org/repo/config', { mode: 'no-cors', cache: 'no-store' }).then(function() {
+                    if (_svcUptimeState.flatpak !== true) {
+                        _svcUptimeState.flatpak = true;
+                        setClass('feat-flatpak-dot', true, false);
+                        var b = document.getElementById('feat-flatpak-badge');
+                        if (b) { b.classList.remove('feat-warning'); b.classList.add('feat-installed'); }
+                    }
+                }).catch(function() {
+                    if (_svcUptimeState.flatpak !== false) {
+                        _svcUptimeState.flatpak = false;
+                        setClass('feat-flatpak-dot', false, true);
+                        var b = document.getElementById('feat-flatpak-badge');
+                        if (b) { b.classList.remove('feat-installed'); b.classList.add('feat-warning'); }
+                    }
+                });
+            }
+            if (snInstalled) {
+                fetch('https://api.snapcraft.io/v2/snaps/info/core', { mode: 'no-cors', cache: 'no-store' }).then(function() {
+                    if (_svcUptimeState.snap !== true) {
+                        _svcUptimeState.snap = true;
+                        setClass('feat-snap-dot', true, false);
+                        var b = document.getElementById('feat-snap-badge');
+                        if (b) { b.classList.remove('feat-warning'); b.classList.add('feat-installed'); }
+                    }
+                }).catch(function() {
+                    if (_svcUptimeState.snap !== false) {
+                        _svcUptimeState.snap = false;
+                        setClass('feat-snap-dot', false, true);
+                        var b = document.getElementById('feat-snap-badge');
+                        if (b) { b.classList.remove('feat-installed'); b.classList.add('feat-warning'); }
+                    }
+                });
+            }
+        } catch (eUptime) {}
+    }
+    // Initial check + repeat every 10s
+    try { setTimeout(_svcUptimePoll, 2000); setInterval(_svcUptimePoll, 10000); } catch (eUptimeInit) {}
 
     var liveEnabled = false;
     try {
