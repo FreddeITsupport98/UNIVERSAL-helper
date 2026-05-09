@@ -274,7 +274,8 @@ znh_resolve_package_name() {
         apt:ShellCheck|dnf:ShellCheck|pacman:ShellCheck) echo "shellcheck" ;;
         zypper:ShellCheck) echo "ShellCheck" ;;
         apt:python3-pipx) echo "pipx" ;;
-        dnf:python3-pipx|zypper:python3-pipx) echo "python3-pipx" ;;
+        dnf:python3-pipx) echo "pipx" ;;
+        zypper:python3-pipx) echo "python3-pipx" ;;
         pacman:python3-pipx) echo "python-pipx" ;;
         dnf:needs-restarting) echo "python3-dnf-plugins-core" ;;
         zypper:needs-restarting) echo "zypper" ;;
@@ -13031,24 +13032,57 @@ generate_dashboard() {
         feat_pipx_installed=1
     fi
 
-    # Badge class based on INSTALLED state (green/red), not config toggle
-    feat_flatpak_class=$([[ "${feat_flatpak_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
-    feat_snap_class=$([[ "${feat_snap_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
-    feat_soar_class=$([[ "${feat_soar_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
-    feat_brew_class=$([[ "${feat_brew_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
-    feat_pipx_class=$([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-on" || echo "feat-off")
+    # Service health checks (installed + working = healthy)
+    # green = healthy, yellow = installed but service unhealthy, red = missing
+    local feat_flatpak_healthy feat_snap_healthy feat_soar_healthy feat_brew_healthy feat_pipx_healthy
+    feat_flatpak_healthy=0
+    feat_snap_healthy=0
+    feat_soar_healthy=0
+    feat_brew_healthy=0
+    feat_pipx_healthy=0
 
-    # Pre-compute installed/missing CSS class for feature badges.
+    if [ "${feat_flatpak_installed}" -eq 1 ] 2>/dev/null; then
+        # Flatpak healthy = flathub remote is configured
+        if flatpak remotes 2>/dev/null | grep -qi flathub; then
+            feat_flatpak_healthy=1
+        fi
+    fi
+    if [ "${feat_snap_installed}" -eq 1 ] 2>/dev/null; then
+        # Snap healthy = snapd.service is running
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet snapd.service 2>/dev/null; then
+            feat_snap_healthy=1
+        elif snap version >/dev/null 2>&1; then
+            feat_snap_healthy=1
+        fi
+    fi
+    if [ "${feat_soar_installed}" -eq 1 ] 2>/dev/null; then
+        feat_soar_healthy=1
+    fi
+    if [ "${feat_brew_installed}" -eq 1 ] 2>/dev/null; then
+        feat_brew_healthy=1
+    fi
+    if [ "${feat_pipx_installed}" -eq 1 ] 2>/dev/null; then
+        feat_pipx_healthy=1
+    fi
+
+    # Badge dot class: green (healthy), yellow (installed but unhealthy), red (missing)
+    feat_flatpak_class=$([[ "${feat_flatpak_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_flatpak_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
+    feat_snap_class=$([[ "${feat_snap_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_snap_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
+    feat_soar_class=$([[ "${feat_soar_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_soar_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
+    feat_brew_class=$([[ "${feat_brew_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_brew_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
+    feat_pipx_class=$([[ "${feat_pipx_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
+
+    # Pre-compute installed/missing/warning CSS class for feature badges.
     # IMPORTANT: these MUST be computed here (not as JS ternaries inside the
     # heredoc) because the dashboard heredoc uses unquoted <<EOF, so bash
     # expands all ${} inside it.  JS-style ${x == 'y' ? a : b} causes
     # "bad substitution" and crashes the entire install.
     local feat_flatpak_install_class feat_snap_install_class feat_soar_install_class feat_brew_install_class feat_pipx_install_class
-    feat_flatpak_install_class=$([[ "${feat_flatpak_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
-    feat_snap_install_class=$([[ "${feat_snap_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
-    feat_soar_install_class=$([[ "${feat_soar_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
-    feat_brew_install_class=$([[ "${feat_brew_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
-    feat_pipx_install_class=$([[ "${feat_pipx_class}" == "feat-on" ]] && echo "feat-installed" || echo "feat-missing")
+    feat_flatpak_install_class=$([[ "${feat_flatpak_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_flatpak_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
+    feat_snap_install_class=$([[ "${feat_snap_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_snap_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
+    feat_soar_install_class=$([[ "${feat_soar_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_soar_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
+    feat_brew_install_class=$([[ "${feat_brew_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_brew_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
+    feat_pipx_install_class=$([[ "${feat_pipx_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
 
     # Determine status color for a quick-glance badge.
     local status_color last_status_lc
@@ -14094,9 +14128,11 @@ generate_dashboard() {
     .feat-badge.feat-clickable:hover { border-color: rgba(37,99,235,0.40); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
     .feat-badge.feat-clickable:active { transform: translateY(0) scale(0.98); }
     .feat-badge.feat-installed { border-color: rgba(34,197,94,0.30); }
+    .feat-badge.feat-warning { border-color: rgba(245,158,11,0.40); }
     .feat-badge.feat-missing { border-color: rgba(239,68,68,0.30); }
     .feat-dot { font-size: 0.9rem; }
     .feat-on { color: #2ecc71; font-weight: 900; }
+    .feat-warn { color: #f59e0b; font-weight: 900; }
     .feat-off { color: #e74c3c; font-weight: 900; }
 
     /* Command Center action buttons */
@@ -28651,6 +28687,9 @@ generate_dashboard() {
                     || low.indexOf('reconnecting') !== -1
                     || low.indexOf('connecting') !== -1
                     || low.indexOf('comput') !== -1
+                    || low.indexOf('post-install') !== -1
+                    || low.indexOf('post-verify') !== -1
+                    || low.indexOf('refreshing dashboard') !== -1
                 );
                 if (isWaiting && pct < 100) {
                     bar.classList.add('waiting');
@@ -29090,6 +29129,22 @@ generate_dashboard() {
                 setTimeout(function() {
                     try { if (typeof znhDiagLogsRefreshUI === 'function') znhDiagLogsRefreshUI(); } catch (e2) {}
                 }, 650);
+            }
+            // Module install actions: refresh dashboard so status-data.json gets new
+            // feat_*_installed values, then re-poll to flip badge colors immediately.
+            if (ok && (a === 'setup-SF' || a === 'soar' || a === 'brew' || a === 'pipx')) {
+                setTimeout(function() {
+                    try {
+                        // 1) Regenerate status-data.json (root) via dashboard API
+                        if (typeof dashboardRefreshRun === 'function') {
+                            dashboardRefreshRun(null);
+                        }
+                    } catch (eR0) {}
+                    // 2) After a short delay for the refresh to land, re-poll status-data.json
+                    setTimeout(function() {
+                        try { pollLive(true); } catch (eP0) {}
+                    }, 3000);
+                }, 800);
             }
         } catch (e1) {}
     }
@@ -34062,12 +34117,56 @@ generate_dashboard() {
                 'brew':    'Install Homebrew',
                 'pipx':    'Install pipx'
             };
+            var _modInfoMap = {
+                'flatpak': { name: 'Flatpak', desc: 'Universal app packaging system. Lets you install sandboxed desktop apps from Flathub (e.g. Firefox, GIMP, VS Code). Apps auto-update independently from system packages.', use: 'Install desktop apps from flathub.org', cmd: 'flatpak install flathub <app-id>' },
+                'snap':    { name: 'Snapd (Snap Store)', desc: 'Canonical\'s universal package system. Provides sandboxed apps with automatic updates via the Snap Store. Runs as a background service (snapd.service).', use: 'Install apps from snapcraft.io', cmd: 'snap install <package>' },
+                'soar':    { name: 'Soar', desc: 'Static binary package manager. Downloads pre-built CLI tools and apps as single portable binaries — no root needed, no dependencies.', use: 'Install portable CLI tools instantly', cmd: 'soar install <tool>' },
+                'brew':    { name: 'Homebrew (Linuxbrew)', desc: 'The missing package manager for Linux. Installs CLI tools, libraries, and apps into ~/.linuxbrew without root. Great for developer tools not in your distro repos.', use: 'Install dev tools (e.g. node, gh, ripgrep)', cmd: 'brew install <formula>' },
+                'pipx':    { name: 'pipx', desc: 'Install and run Python CLI applications in isolated virtual environments. Each tool gets its own venv so dependencies never conflict with system Python packages.', use: 'Install Python CLI tools safely (e.g. yt-dlp, black, httpie)', cmd: 'pipx install <package>' }
+            };
             var badges = document.querySelectorAll('.feat-badge.feat-clickable[data-install-cmd]') || [];
             Array.prototype.slice.call(badges).forEach(function(b) {
                 if (!b) return;
                 b.addEventListener('click', function(ev) {
                     try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (e0) {}
                     var mod = String(b.getAttribute('data-module') || '').trim();
+                    // Green badge (installed + healthy): show info overlay
+                    if (b.classList.contains('feat-installed')) {
+                        var _inf = _modInfoMap[mod] || {};
+                        var _iName = _inf.name || (mod.charAt(0).toUpperCase() + mod.slice(1));
+                        try {
+                            var _ov = document.getElementById('feat-info-overlay');
+                            if (!_ov) {
+                                _ov = document.createElement('div');
+                                _ov.id = 'feat-info-overlay';
+                                _ov.style.cssText = 'position:fixed;inset:0;z-index:15500;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.55);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);';
+                                _ov.innerHTML = '<div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px 24px;max-width:460px;width:calc(100vw - 40px);box-shadow:0 22px 52px rgba(0,0,0,0.35);color:var(--text);"><div id="feat-info-title" style="font-weight:950;font-size:1.1rem;margin-bottom:14px;"></div><div id="feat-info-body" style="display:grid;gap:12px;font-size:0.92rem;font-weight:800;"></div><div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;"><button class="pill" id="feat-info-close-btn" type="button">Close</button><button class="pill" id="feat-info-copy-btn" type="button" style="border-color:rgba(255,255,255,0.14);">Copy example command</button></div></div>';
+                                document.body.appendChild(_ov);
+                                _ov.addEventListener('click', function(e2) { if (e2.target === _ov) { _ov.style.display = 'none'; } });
+                                document.getElementById('feat-info-close-btn').addEventListener('click', function() { _ov.style.display = 'none'; });
+                            }
+                            document.getElementById('feat-info-title').textContent = '\u2714 ' + _iName + ' \u2014 Installed & Healthy';
+                            var _h = '';
+                            if (_inf.desc) _h += '<div style="line-height:1.5;color:var(--text);">' + _inf.desc + '</div>';
+                            if (_inf.use) _h += '<div><span style="font-weight:950;color:var(--accent);">What it does:</span> ' + _inf.use + '</div>';
+                            if (_inf.cmd) _h += '<div style="font-family:monospace;font-size:0.86rem;background:var(--subtle);padding:8px 10px;border-radius:8px;border:1px solid var(--border);user-select:all;">' + _inf.cmd + '</div>';
+                            document.getElementById('feat-info-body').innerHTML = _h;
+                            var _cpBtn = document.getElementById('feat-info-copy-btn');
+                            if (_cpBtn) {
+                                if (_inf.cmd) { _cpBtn.style.display = ''; _cpBtn.onclick = function() { copyCmd(_inf.cmd, _cpBtn); }; }
+                                else { _cpBtn.style.display = 'none'; }
+                            }
+                            _ov.style.display = 'flex';
+                        } catch (eInfo) {
+                            toast(_iName + ' \u2714 Installed', _inf.use || 'Module is active', 'ok');
+                        }
+                        return;
+                    }
+                    // Yellow badge: installed but unhealthy, don't re-install
+                    if (b.classList.contains('feat-warning')) {
+                        toast(mod.charAt(0).toUpperCase() + mod.slice(1) + ' installed but service needs attention', 'Check if the service is running (e.g. snapd.service or Flathub remote)', 'err');
+                        return;
+                    }
                     var qaAction = _modQaMap[mod] || '';
                     var qaTitle = _modTitleMap[mod] || ('Install ' + mod);
                     var copyFallback = String(b.getAttribute('data-install-cmd') || '').trim();
@@ -34588,12 +34687,13 @@ generate_dashboard() {
         } catch (e0) {}
     }
 
-    function setClass(id, on) {
+    function setClass(id, on, warn) {
         var el = document.getElementById(id);
         if (!el) return;
-        el.classList.remove('feat-on');
-        el.classList.remove('feat-off');
-        el.classList.add(on ? 'feat-on' : 'feat-off');
+        el.classList.remove('feat-on', 'feat-warn', 'feat-off');
+        if (on) el.classList.add('feat-on');
+        else if (warn) el.classList.add('feat-warn');
+        else el.classList.add('feat-off');
     }
 
     function setTimerState(id, state) {
@@ -34796,7 +34896,7 @@ generate_dashboard() {
         setText('feat-brew-val', d.feat_brew ? 'ON' : 'OFF');
         setText('feat-pipx-val', d.feat_pipx ? 'ON' : 'OFF');
 
-        // Module dot color based on INSTALLED state (green=installed, red=missing)
+        // Module dot color: green=healthy, yellow=installed but unhealthy, red=missing
         var _modInstalled = {
             flatpak: !!(d.feat_flatpak_installed),
             snap: !!(d.feat_snap_installed),
@@ -34804,20 +34904,29 @@ generate_dashboard() {
             brew: !!(d.feat_brew_installed),
             pipx: !!(d.feat_pipx_installed)
         };
-        setClass('feat-flatpak-dot', _modInstalled.flatpak);
-        setClass('feat-snap-dot', _modInstalled.snap);
-        setClass('feat-soar-dot', _modInstalled.soar);
-        setClass('feat-brew-dot', _modInstalled.brew);
-        setClass('feat-pipx-dot', _modInstalled.pipx);
+        var _modHealthy = {
+            flatpak: !!(d.feat_flatpak_healthy),
+            snap: !!(d.feat_snap_healthy),
+            soar: !!(d.feat_soar_healthy),
+            brew: !!(d.feat_brew_healthy),
+            pipx: !!(d.feat_pipx_healthy)
+        };
+        setClass('feat-flatpak-dot', _modHealthy.flatpak, _modInstalled.flatpak && !_modHealthy.flatpak);
+        setClass('feat-snap-dot', _modHealthy.snap, _modInstalled.snap && !_modHealthy.snap);
+        setClass('feat-soar-dot', _modHealthy.soar, _modInstalled.soar && !_modHealthy.soar);
+        setClass('feat-brew-dot', _modHealthy.brew, _modInstalled.brew && !_modHealthy.brew);
+        setClass('feat-pipx-dot', _modHealthy.pipx, _modInstalled.pipx && !_modHealthy.pipx);
 
-        // Update badge border class based on installed state
+        // Update badge border class based on health state
         try {
             var _mods = ['flatpak','snap','soar','brew','pipx'];
             for (var _mi = 0; _mi < _mods.length; _mi++) {
                 var _mb = document.getElementById('feat-' + _mods[_mi] + '-badge');
                 if (_mb) {
-                    _mb.classList.remove('feat-installed', 'feat-missing');
-                    _mb.classList.add(_modInstalled[_mods[_mi]] ? 'feat-installed' : 'feat-missing');
+                    _mb.classList.remove('feat-installed', 'feat-warning', 'feat-missing');
+                    if (_modHealthy[_mods[_mi]]) _mb.classList.add('feat-installed');
+                    else if (_modInstalled[_mods[_mi]]) _mb.classList.add('feat-warning');
+                    else _mb.classList.add('feat-missing');
                 }
             }
         } catch (eMod0) {}
@@ -36274,6 +36383,12 @@ JSON_EOF
     json_feat_soar_installed=$([[ "${feat_soar_installed}" == "1" ]] && echo true || echo false)
     json_feat_brew_installed=$([[ "${feat_brew_installed}" == "1" ]] && echo true || echo false)
     json_feat_pipx_installed=$([[ "${feat_pipx_installed}" == "1" ]] && echo true || echo false)
+    local json_feat_flatpak_healthy json_feat_snap_healthy json_feat_soar_healthy json_feat_brew_healthy json_feat_pipx_healthy
+    json_feat_flatpak_healthy=$([[ "${feat_flatpak_healthy}" == "1" ]] && echo true || echo false)
+    json_feat_snap_healthy=$([[ "${feat_snap_healthy}" == "1" ]] && echo true || echo false)
+    json_feat_soar_healthy=$([[ "${feat_soar_healthy}" == "1" ]] && echo true || echo false)
+    json_feat_brew_healthy=$([[ "${feat_brew_healthy}" == "1" ]] && echo true || echo false)
+    json_feat_pipx_healthy=$([[ "${feat_pipx_healthy}" == "1" ]] && echo true || echo false)
 
     # Harden status-data generation:
     # - Prefer Python JSON serialization to avoid edge-case escaping drift from
@@ -36303,6 +36418,11 @@ JSON_EOF
             JSON_FEAT_SOAR_INSTALLED="${json_feat_soar_installed}" \
             JSON_FEAT_BREW_INSTALLED="${json_feat_brew_installed}" \
             JSON_FEAT_PIPX_INSTALLED="${json_feat_pipx_installed}" \
+            JSON_FEAT_FLATPAK_HEALTHY="${json_feat_flatpak_healthy}" \
+            JSON_FEAT_SNAP_HEALTHY="${json_feat_snap_healthy}" \
+            JSON_FEAT_SOAR_HEALTHY="${json_feat_soar_healthy}" \
+            JSON_FEAT_BREW_HEALTHY="${json_feat_brew_healthy}" \
+            JSON_FEAT_PIPX_HEALTHY="${json_feat_pipx_healthy}" \
             JSON_DL_TIMER="${dl_timer}" \
             JSON_VERIFY_TIMER="${verify_timer}" \
             JSON_NT_TIMER="${nt_timer}" \
@@ -36365,6 +36485,11 @@ data = {
     "feat_soar_installed": _env_bool("JSON_FEAT_SOAR_INSTALLED", False),
     "feat_brew_installed": _env_bool("JSON_FEAT_BREW_INSTALLED", False),
     "feat_pipx_installed": _env_bool("JSON_FEAT_PIPX_INSTALLED", False),
+    "feat_flatpak_healthy": _env_bool("JSON_FEAT_FLATPAK_HEALTHY", False),
+    "feat_snap_healthy": _env_bool("JSON_FEAT_SNAP_HEALTHY", False),
+    "feat_soar_healthy": _env_bool("JSON_FEAT_SOAR_HEALTHY", False),
+    "feat_brew_healthy": _env_bool("JSON_FEAT_BREW_HEALTHY", False),
+    "feat_pipx_healthy": _env_bool("JSON_FEAT_PIPX_HEALTHY", False),
     "dl_timer": os.environ.get("JSON_DL_TIMER", ""),
     "verify_timer": os.environ.get("JSON_VERIFY_TIMER", ""),
     "nt_timer": os.environ.get("JSON_NT_TIMER", ""),
@@ -36425,6 +36550,11 @@ PY
   "feat_soar_installed": ${json_feat_soar_installed},
   "feat_brew_installed": ${json_feat_brew_installed},
   "feat_pipx_installed": ${json_feat_pipx_installed},
+  "feat_flatpak_healthy": ${json_feat_flatpak_healthy},
+  "feat_snap_healthy": ${json_feat_snap_healthy},
+  "feat_soar_healthy": ${json_feat_soar_healthy},
+  "feat_brew_healthy": ${json_feat_brew_healthy},
+  "feat_pipx_healthy": ${json_feat_pipx_healthy},
 
   "dl_timer":
   "verify_timer": "$(_json_escape "$verify_timer")",
@@ -49459,9 +49589,15 @@ run_pipx_helper_only() {
         echo "  ${pipx_install_hint}" | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
 
-        read -p "May I install ${pipx_package} for you now via ${SYSTEM_PKG_MANAGER}? [y/N]: " -r REPLY
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        local REPLY="N"
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then
+            log_info "Non-interactive mode: auto-installing ${pipx_package}"
+            REPLY="Y"
+        else
+            read -p "May I install ${pipx_package} for you now via ${SYSTEM_PKG_MANAGER}? [y/N]: " -r REPLY || true
+            echo
+        fi
+        if [[ ${REPLY:-N} =~ ^[Yy]$ ]]; then
             log_info "Installing ${pipx_package} via ${SYSTEM_PKG_MANAGER}..."
             update_status "Installing dependency: ${pipx_package}"
             if ! znh_install_package_via_system_pm "${pipx_package}"; then
@@ -49493,9 +49629,15 @@ run_pipx_helper_only() {
 
     # Offer to run a safe upgrade-all for the user
     if sudo -u "$SUDO_USER" sh -lc 'command -v pipx >/dev/null 2>&1'; then
-        read -p "Do you want me to run 'pipx upgrade-all' for user $SUDO_USER now? [y/N]: " -r UPGRADE
-        echo
-        if [[ $UPGRADE =~ ^[Yy]$ ]]; then
+        local UPGRADE="N"
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then
+            log_info "Non-interactive mode: auto-running pipx upgrade-all"
+            UPGRADE="Y"
+        else
+            read -p "Do you want me to run 'pipx upgrade-all' for user $SUDO_USER now? [y/N]: " -r UPGRADE || true
+            echo
+        fi
+        if [[ ${UPGRADE:-N} =~ ^[Yy]$ ]]; then
             log_info "Running 'pipx upgrade-all' for user $SUDO_USER..."
             update_status "Running pipx upgrade-all for $SUDO_USER"
             if execute_guarded "pipx upgrade-all" sudo -u "$SUDO_USER" pipx upgrade-all; then
@@ -62862,40 +63004,46 @@ def _recover_self_update_job(job_id: str) -> dict | None:
     stage = str(jtmp.get("stage") or "Starting")
     progress = int(jtmp.get("progress") or 0)
 
-    if done and progress < 100:
-        if rc == 0:
-            progress = 100
-            stage = "Dry-run done" if dry_run else "Done"
-        else:
-            stage = "Failed"
-    elif done and progress >= 100:
-        # Post-action band (101+) or exact 100: always clamp to 100 when done.
+    # --- Post-action override ---
+    # When the status file says the job is in a post-action phase (post-install
+    # / post-verify), the log parser output is misleading because the full
+    # installer re-emits keywords like "verification", "installing", "update
+    # complete" that push progress to 100.  Trust the STATUS FILE stage as the
+    # authoritative source and show an indeterminate-style progress (small %)
+    # so the user sees the job is still working.
+    status_stage = str(status.get("stage") or "").strip().lower()
+    is_post_action = status_stage in ("post-install", "post-verify", "refreshing-dashboard")
+
+    if done:
+        # Job finished: always clamp to 100%.
         progress = 100
         if rc == 0:
             stage = "Dry-run done" if dry_run else "Done"
         else:
             stage = "Failed"
-
-    # UX fix: the progress parser may hit 100% early
-    # the unit is still running post-actions (verify/install). Never show 100% until done.
-    if not done and progress >= 100:
-        # Post-action stages use progress values > 100 (101-199) to signal that
-        # the self-update itself finished but a post-action is still running.
-        # Map them into a visible 1-99 band so the UI shows progress during
-        # post-install / post-verify instead of being stuck on "Finishing…".
-        if progress > 100:
-            # 101..110 → 5..95  (linear mapping within post-action band)
-            pa_pct = max(5, min(95, (progress - 101) * 10))
-            progress = pa_pct
-            # stage is already set to a meaningful post-action label by the parser
+    elif is_post_action:
+        # Still running a post-action: override the log-parser stage/progress
+        # with the status-file stage so the UI shows "post-install" with a
+        # pulsing bar instead of a confusing 99%.
+        if status_stage == "refreshing-dashboard":
+            stage = "Refreshing dashboard"
+            progress = 98
+        elif status_stage == "post-verify":
+            stage = "post-verify"
+            progress = 50
         else:
-            progress = 99
-            try:
-                low = stage.lower()
-                if low in ("done", "dry-run done", "up-to-date"):
-                    stage = "Finishing…"
-            except Exception:
+            stage = "post-install"
+            progress = 50
+    elif not done and progress >= 100:
+        # Self-update itself hit 100% ("update complete") but the unit hasn't
+        # written a post-action stage yet (race window). Show "Finishing…".
+        progress = 99
+        try:
+            low = stage.lower()
+            if low in ("done", "dry-run done", "up-to-date"):
                 stage = "Finishing…"
+        except Exception:
+            stage = "Finishing…"
 
     post_action = str(status.get("post_action", "") or "").strip().lower()
     if post_action not in ("none", "verify", "install"):

@@ -7,6 +7,10 @@
 - Dashboard: CSS hover/active effects on clickable module badges
 - Dashboard: Module badges now install via WebUI Quick Action runner (same overlay UX as Rocket updater), not copy-to-clipboard
 - Dashboard API: Added setup-SF, soar, brew, pipx to quick-action allowlist so modules can be installed from the browser
+- Dashboard: Badge auto-refresh on Quick Action completion — badges flip green immediately after install finishes
+- Dashboard: Non-interactive auto-install fix for pipx helper (auto-answers Y when run from WebUI Quick Action worker)
+- Fix: Fedora 44 pipx package name corrected in `znh_resolve_package_name` — `dnf:python3-pipx` now resolves to `pipx` (not `python3-pipx`)
+- Dashboard: Module badges now show 3 states — green (healthy), yellow (installed but service unhealthy), red (missing). Flatpak checks Flathub remote; Snap checks snapd.service status via systemctl/snap version. New `feat_*_healthy` fields in status-data.json for live polling.
 ## Unreleased
 - [2026-05-09 19:11 UTC] Fixed Fedora 44 `needs-restarting` not available in all three restart-check paths (interactive install, Rocket WebUI worker, Python dashboard API reboot detection). On Fedora 44+ where dnf5 is default, `needs-restarting` is not installed out of the box (provided by `python3-dnf-plugins-core`). Fixes: (1) Interactive install restart check now tries standalone `needs-restarting`, then `dnf5 needs-restarting` subcommand, then auto-installs `python3-dnf-plugins-core`, then falls back to reboot-required marker files. (2) Rocket WebUI worker restart_cmd now uses the same cascade so background updates get proper restart reporting instead of silent skip. (3) Python `_reboot_required()` now tries `dnf5 needs-restarting -r` as fallback when the standalone binary is missing. (4) Added `needs-restarting` to `znh_resolve_package_name` (dnf → `python3-dnf-plugins-core`). Verified with `bash -n UNI-auto.sh` PASS.
 - [2026-05-09 19:06 UTC]
