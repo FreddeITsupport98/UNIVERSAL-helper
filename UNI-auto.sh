@@ -993,7 +993,7 @@ znh_distro_upgrade_release_notes_url() {
             printf '%s' "https://blog.linuxmint.com/"
             ;;
         debian)
-            printf '%s' "https://www.debian.org/releases/stable/releasenotes"
+            printf '%s' "https://www.debian.org/releases/trixie/release-notes/upgrading.html"
             ;;
         leap)
             printf '%s' "https://doc.opensuse.org/release-notes/"
@@ -1277,7 +1277,7 @@ znh_distro_upgrade_run_apply() {
             ;;
         debian)
             printf '%s\n' "Debian distro upgrades require manual review."
-            printf '%s\n' "See: https://www.debian.org/releases/stable/releasenotes"
+            printf '%s\n' "See: https://www.debian.org/releases/trixie/release-notes/upgrading.html"
             printf '%s\n' "Typical flow:"
             printf '%s\n' "  1. Update /etc/apt/sources.list to the new codename"
             printf '%s\n' "  2. sudo apt update"
@@ -14643,6 +14643,7 @@ generate_dashboard() {
             <div id="znh-distro-upgrade-detail" style="margin-top:4px; font-size:0.82rem; color: var(--muted); font-weight: 800;"></div>
           </div>
           <div style="display:flex; gap:10px; flex-wrap: wrap; align-items: center;">
+            <button class="pill" type="button" id="znh-distro-upgrade-install-btn" style="font-weight:900; display:none;" title="Start the distro upgrade">Install</button>
             <button class="pill" type="button" id="znh-distro-upgrade-open-btn" title="Open the distro upgrade flow inside the Rocket Update Manager">Open in Rocket</button>
             <button class="pill" type="button" id="znh-distro-upgrade-copy-btn" style="border-color: rgba(255,255,255,0.14);" title="Copy the apply command to the clipboard">Copy command</button>
             <button class="pill" type="button" id="znh-distro-upgrade-changelog-btn" style="border-color: rgba(255,255,255,0.14); display:none;" title="View release notes / changelog for the new version">Changelog</button>
@@ -30373,7 +30374,7 @@ generate_dashboard() {
     // ---- Distro upgrade (Rocket Update Manager surface) ----
     // Cached state from /api/system/distro-upgrade.
     // The renderer reveals the banner when:
-    //   release_model === 'fixed' AND (status === 'available' OR status === 'downloaded')
+    //   release_model === 'fixed' AND (status === 'available' OR status === 'downloaded' OR status === 'manual')
     // so rolling distros (Tumbleweed/Slowroll/Arch/Manjaro/EndeavourOS/Garuda/...)
     // never see the card. This matches the bash classifier in
     // znh_distro_release_model_classify().
@@ -30389,13 +30390,20 @@ generate_dashboard() {
         var releaseModel = String(state.release_model || '').toLowerCase();
         var status = String(state.status || '').toLowerCase();
         var family = String(state.distro_family || '').toLowerCase();
-        var actionable = !!state.actionable && releaseModel === 'fixed' && (status === 'available' || status === 'downloaded');
+        var actionable = !!state.actionable && releaseModel === 'fixed' && (status === 'available' || status === 'downloaded' || status === 'manual');
         var rebootReady = !!state.reboot_ready && status === 'downloaded';
 
-        // Hide on rolling/uptodate/manual/unknown distros AND when the user
+        // Hide on rolling/uptodate/unknown distros AND when the user
         // dismissed the banner this session.
         // Staleness guard: if both versions are numeric and target <= current,
         // the upgrade was already applied (e.g. 43→44 completed, system is on 44).
+        // Extract version strings early so staleness guard can use them.
+        var distroName = String(state.distro_name || state.distro_id || 'Linux');
+        var current = String(state.current_version || '?');
+        var target = String(state.target_version || '?');
+        var pm = String(state.package_manager || '').toLowerCase();
+        var qaSupported = !!state.quick_action_supported;
+
         if (!actionable || _znhDistroUpgradeDismissed) {
             card.style.display = 'none';
             // Remove distro-upgrade contribution to rocket glow; keep glowing only if packages are pending.
@@ -30413,18 +30421,14 @@ generate_dashboard() {
             return;
         }
 
-        var distroName = String(state.distro_name || state.distro_id || 'Linux');
-        var current = String(state.current_version || '?');
-        var target = String(state.target_version || '?');
-        var pm = String(state.package_manager || '').toLowerCase();
         var familyLabel = '';
         switch (family) {
             case 'fedora':  familyLabel = 'Fedora ~6 month cycle'; break;
             case 'ubuntu':  familyLabel = 'Ubuntu (do-release-upgrade)'; break;
             case 'mint':    familyLabel = 'Linux Mint (do-release-upgrade)'; break;
-            case 'debian':  familyLabel = 'Debian (manual sources.list review)'; break;
-            case 'leap':    familyLabel = 'openSUSE Leap (manual repository swap)'; break;
-            case 'rhel':    familyLabel = 'RHEL/CentOS-style (leapp)'; break;
+            case 'debian':  familyLabel = 'Debian — edit sources.list codename, then apt full-upgrade'; break;
+            case 'leap':    familyLabel = 'openSUSE Leap — swap repo URLs to new version (or use opensuse-migration-tool)'; break;
+            case 'rhel':    familyLabel = 'RHEL/CentOS-style — upgrade via leapp framework'; break;
             default:        familyLabel = family || 'fixed-cycle distro';
         }
 
@@ -30432,16 +30436,51 @@ generate_dashboard() {
         var detailEl = document.getElementById('znh-distro-upgrade-detail');
         if (msgEl) {
             if (rebootReady) {
-                msgEl.textContent = distroName + ' ' + current + ' → ' + target + ' downloaded — ready to reboot!';
+                msgEl.textContent = distroName + ' ' + current + ' \u2192 ' + target + ' downloaded \u2014 ready to reboot!';
+            } else if (status === 'manual' && family === 'debian') {
+                msgEl.textContent = distroName + ' ' + current + ' \u2192 ' + target + ' upgrade is available! Open a terminal to start.';
+            } else if (status === 'manual' && family === 'leap') {
+                msgEl.textContent = distroName + ' ' + current + ' \u2192 ' + target + ' upgrade is available! Swap repos and run zypper dup.';
+            } else if (status === 'manual' && family === 'rhel') {
+                msgEl.textContent = distroName + ' ' + current + ' \u2192 ' + target + ' upgrade is available via leapp.';
+            } else if (status === 'manual') {
+                msgEl.textContent = distroName + ' ' + current + ' \u2192 ' + target + ' upgrade is available! See the guide below.';
             } else {
-                msgEl.textContent = distroName + ' ' + current + ' → ' + target + ' is ready to install.';
+                msgEl.textContent = distroName + ' ' + current + ' \u2192 ' + target + ' is ready to install.';
+            }
+        }
+        // Family-specific guided steps for manual distros.
+        var guidedSteps = '';
+        if (status === 'manual') {
+            switch (family) {
+                case 'debian':
+                    guidedSteps = 'How to upgrade: 1) sudo nano /etc/apt/sources.list \u2014 change the old codename to the new one  ' +
+                        '2) sudo apt update  3) sudo apt full-upgrade  4) sudo reboot';
+                    break;
+                case 'leap':
+                    guidedSteps = 'How to upgrade: 1) sudo zypper --releasever=' + target + ' ref  ' +
+                        '2) sudo zypper --releasever=' + target + ' dup  ' +
+                        '3) sudo reboot  (or use: sudo opensuse-migration-tool)';
+                    break;
+                case 'rhel':
+                    guidedSteps = 'How to upgrade: 1) sudo dnf install leapp-upgrade  ' +
+                        '2) sudo leapp preupgrade \u2014 review the report and fix blockers  ' +
+                        '3) sudo leapp upgrade  4) sudo reboot';
+                    break;
+                default:
+                    guidedSteps = '';
+                    break;
             }
         }
         if (detailEl) {
             var detailParts = [familyLabel];
             if (pm) detailParts.push('Package manager: ' + pm);
-            if (state.reason) detailParts.push(String(state.reason));
-            detailEl.textContent = detailParts.join(' • ');
+            if (guidedSteps) {
+                detailParts.push(guidedSteps);
+            } else if (state.reason) {
+                detailParts.push(String(state.reason));
+            }
+            detailEl.textContent = detailParts.join(' \u2022 ');
         }
 
         // Tooltip on the Copy/Open buttons reflects the family-specific command.
@@ -30463,6 +30502,49 @@ generate_dashboard() {
                 }
             }
         } catch (e1) {}
+
+        // Family-specific Install button on the banner.
+        // Fedora/Nobara: "⚡ Install via Rocket" (drives quick-action from banner).
+        // Ubuntu/Mint:   "▶ Start upgrade (terminal)" (copies do-release-upgrade + toast).
+        // Debian/Leap/RHEL: "📖 Upgrade guide" (opens manual URL).
+        // Others with apply_command: "▶ Start upgrade (terminal)" (copies + toast).
+        try {
+            var installBtn = document.getElementById('znh-distro-upgrade-install-btn');
+            if (installBtn) {
+                var applyCmd = String(state.apply_command || '').trim();
+                var manUrl = String(state.manual_url || '').trim();
+                if (qaSupported && applyCmd) {
+                    // Fedora-style: direct Rocket quick-action.
+                    installBtn.textContent = '\u26a1 Install via Rocket';
+                    installBtn.title = 'Start distro upgrade via Rocket quick-action: ' + applyCmd;
+                    installBtn.setAttribute('data-mode', 'rocket');
+                    installBtn.setAttribute('data-cmd', applyCmd);
+                    installBtn.style.display = '';
+                } else if (applyCmd) {
+                    // Interactive families (Ubuntu/Mint/Debian): copy command + toast.
+                    var interLabel = '\u25b6 Start upgrade (terminal)';
+                    if (family === 'ubuntu' || family === 'mint') {
+                        interLabel = '\u25b6 Start upgrade (terminal)';
+                    } else if (family === 'debian') {
+                        interLabel = '\u25b6 Upgrade (terminal)';
+                    }
+                    installBtn.textContent = interLabel;
+                    installBtn.title = 'Copy upgrade command & paste in terminal: ' + applyCmd;
+                    installBtn.setAttribute('data-mode', 'terminal');
+                    installBtn.setAttribute('data-cmd', applyCmd);
+                    installBtn.style.display = '';
+                } else if (manUrl) {
+                    // Manual-only families (Leap/RHEL with no apply_command).
+                    installBtn.textContent = '\uD83D\uDCD6 Upgrade guide';
+                    installBtn.title = 'Open upstream upgrade guide: ' + manUrl;
+                    installBtn.setAttribute('data-mode', 'guide');
+                    installBtn.setAttribute('data-cmd', manUrl);
+                    installBtn.style.display = '';
+                } else {
+                    installBtn.style.display = 'none';
+                }
+            }
+        } catch (eIB) {}
 
         card.style.display = '';
         // Immediately glow the main Rocket button so all fixed-cycle distros
@@ -30574,6 +30656,80 @@ generate_dashboard() {
         if (dismissBtn) dismissBtn.addEventListener('click', function() {
             _znhDistroUpgradeDismissed = true;
             card.style.display = 'none';
+        });
+
+        // Family-specific Install button (set by znhDistroUpgradeRender via data-mode).
+        var installBtn = document.getElementById('znh-distro-upgrade-install-btn');
+        if (installBtn) installBtn.addEventListener('click', function(ev) {
+            var mode = installBtn.getAttribute('data-mode') || '';
+            var cmd = installBtn.getAttribute('data-cmd') || '';
+            try { addRipple(installBtn, ev.clientX, ev.clientY); } catch (eR0) {}
+
+            if (mode === 'rocket') {
+                // Fedora-style: drive quick-action confirm flow directly from banner.
+                var st = _znhDistroUpgradeState || {};
+                var distroName = String(st.distro_name || st.distro_id || 'Linux');
+                var cur = String(st.current_version || '?');
+                var tgt = String(st.target_version || '?');
+                if (!confirm('Start distro upgrade for ' + distroName + ' ' + cur + ' \u2192 ' + tgt + '?\n\n' +
+                             'This runs:\n  ' + cmd + '\n\n' +
+                             'The apply itself does NOT reboot. You must run the family-specific finishing command afterwards.')) {
+                    return;
+                }
+                installBtn.disabled = true;
+                toast('Requesting confirmation\u2026', 'Distro upgrade quick-action token', 'ok');
+                _api('/api/quick/confirm', { method: 'POST', body: JSON.stringify({ action: 'distro-upgrade' }) }).then(function(c) {
+                    if (!c || !c.confirm_token) throw new Error('missing confirm_token');
+                    return _api('/api/quick/start', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            action: 'distro-upgrade',
+                            confirm_token: c.confirm_token,
+                            confirm_phrase: 'DISTROUPGRADE'
+                        })
+                    });
+                }).then(function(r) {
+                    if (!r || !r.job_id) throw new Error('missing job_id');
+                    toast('Distro upgrade running\u2026', 'Tracking via quick-action job ' + r.job_id, 'ok');
+                    // Open the Rocket wizard to show live progress.
+                    try {
+                        if (typeof rocketUpdateWizardOpen === 'function') {
+                            rocketUpdateWizardOpen({ distro_upgrade: true, distro_state: _znhDistroUpgradeState });
+                        }
+                    } catch (eW) {}
+                }).catch(function(err) {
+                    var msg = (err && err.message) ? err.message : 'failed';
+                    toast('Distro upgrade start failed', msg, 'err');
+                }).finally(function() {
+                    try { installBtn.disabled = false; } catch (eF) {}
+                });
+            } else if (mode === 'terminal') {
+                // Interactive families (Ubuntu/Mint/Debian): copy command + toast.
+                if (!cmd) {
+                    toast('No automated command', 'This distro family requires a manual upgrade flow.', 'err');
+                    return;
+                }
+                try {
+                    if (typeof window.copyCmd === 'function') {
+                        window.copyCmd(cmd, installBtn);
+                    } else if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(cmd);
+                    }
+                } catch (eC) {}
+                toast('Open a terminal and paste', cmd, 'ok');
+            } else if (mode === 'guide') {
+                // Manual-only families (Leap/RHEL): open upstream guide.
+                if (!cmd) {
+                    toast('No upgrade guide URL', 'No manual URL available for this family.', 'err');
+                    return;
+                }
+                try {
+                    window.open(cmd, '_blank', 'noopener,noreferrer');
+                    toast('Opening upgrade guide', cmd, 'ok');
+                } catch (eG) {
+                    toast('Cannot open URL', cmd, 'err');
+                }
+            }
         });
     }
 
@@ -64320,7 +64476,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-            actionable = bool(release_model == "fixed" and status in ("available", "downloaded"))
+            actionable = bool(release_model == "fixed" and status in ("available", "downloaded", "manual"))
             reboot_ready = bool(release_model == "fixed" and status == "downloaded")
 
             apply_command = ""
@@ -64343,7 +64499,7 @@ class Handler(BaseHTTPRequestHandler):
                 quick_action_supported = False
             elif family == "debian":
                 apply_command = "sudo apt update && sudo apt full-upgrade"
-                manual_url = "https://www.debian.org/releases/stable/releasenotes"
+                manual_url = "https://www.debian.org/releases/trixie/release-notes/upgrading.html"
             elif family == "leap":
                 apply_command = ""
                 manual_url = "https://en.opensuse.org/SDB:System_upgrade"
@@ -64489,7 +64645,7 @@ class Handler(BaseHTTPRequestHandler):
                     reboot_command = "sudo systemctl reboot"
                     reboot_quick_action_supported = True
                 elif distro_family == "debian":
-                    manual_url = "https://www.debian.org/releases/stable/releasenotes"
+                    manual_url = "https://www.debian.org/releases/trixie/release-notes/upgrading.html"
                     apply_command = "sudo apt full-upgrade"
                     reboot_command = "sudo systemctl reboot"
                     reboot_quick_action_supported = True
