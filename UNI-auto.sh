@@ -48126,6 +48126,65 @@ __znh_self_update_state_write() {
     return 0
 }
 
+# Universal URL fetcher: curl -> wget -> python3 urllib
+# Usage: __znh_download_url_stdout <url> [max_time] [conn_time]
+# Outputs downloaded content to stdout. Returns 0 on success, 1 on failure.
+__znh_download_url_stdout() {
+    local url="$1" max_time="${2:-90}" conn_time="${3:-10}"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sL --fail --connect-timeout "${conn_time}" --max-time "${max_time}" "${url}" 2>/dev/null
+        return $?
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout="${max_time}" --tries=2 -O - "${url}" 2>/dev/null
+        return $?
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "${url}" "${max_time}" <<'PY' 2>/dev/null
+import sys, urllib.request, ssl
+url, timeout = sys.argv[1], int(sys.argv[2] or 90)
+ctx = ssl.create_default_context()
+req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; zypper-auto-helper)"})
+try:
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        sys.stdout.buffer.write(r.read())
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+        return $?
+    fi
+    return 1
+}
+
+# Universal URL fetcher: curl -> wget -> python3 urllib
+# Usage: __znh_download_url_file <url> <output_file> [max_time] [conn_time]
+# Writes downloaded content to output_file. Returns 0 on success, 1 on failure.
+__znh_download_url_file() {
+    local url="$1" out="$2" max_time="${3:-90}" conn_time="${4:-10}"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sL --fail --connect-timeout "${conn_time}" --max-time "${max_time}" "${url}" -o "${out}" >/dev/null 2>&1
+        return $?
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout="${max_time}" --tries=2 -O "${out}" "${url}" >/dev/null 2>&1
+        return $?
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "${url}" "${out}" "${max_time}" <<'PY' 2>/dev/null
+import sys, urllib.request, ssl
+url, out, timeout = sys.argv[1], sys.argv[2], int(sys.argv[3] or 90)
+ctx = ssl.create_default_context()
+req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; zypper-auto-helper)"})
+try:
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        with open(out, "wb") as f:
+            f.write(r.read())
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+        return $?
+    fi
+    return 1
+}
+
 # --- Helper: Self-update (CLI) ---
 run_self_update_only() {
     log_info ">>> Self-update mode requested"
@@ -48135,8 +48194,9 @@ run_self_update_only() {
         return 1
     fi
 
-    if ! command -v curl >/dev/null 2>&1; then
-        log_error "curl is required for --self-update"
+    # Universal downloader: curl, wget, or python3 urllib
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+        log_error "--self-update requires curl, wget, or python3 for downloading"
         return 1
     fi
 
@@ -48418,7 +48478,7 @@ run_self_update_only() {
         # Stable selection is policy-driven (release|candidate|prerelease)
         # using the latest non-draft GitHub releases list.
         if command -v python3 >/dev/null 2>&1; then
-            stable_info=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+            stable_info=$(__znh_download_url_stdout "${api_url}" 30 10 \
                 | python3 -c 'import json,sys
 policy=str(sys.argv[1] if len(sys.argv) > 1 else "release").strip().lower()
 if policy not in ("release", "candidate", "prerelease"):
@@ -48488,7 +48548,7 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
         fi
         if [ -z "${tag:-}" ]; then
             # Fallback (best-effort text parse): first tag_name in releases list.
-            tag=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+            tag=$(__znh_download_url_stdout "${api_url}" 30 10 \
                 | grep -m1 '"tag_name"' | cut -d '"' -f4 || true)
             stable_selection="${stable_policy}"
             stable_fallback_reason=""
@@ -48518,12 +48578,12 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
 
         # Rolling: compare commit SHA on main. Pin download to the resolved SHA.
         if command -v python3 >/dev/null 2>&1; then
-            remote_sha=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+            remote_sha=$(__znh_download_url_stdout "${api_url}" 30 10 \
                 | python3 -c 'import json,sys; print((json.load(sys.stdin).get("sha") or "").strip())' 2>/dev/null || true)
         fi
         if [ -z "${remote_sha:-}" ]; then
             # Fallback (best-effort)
-            remote_sha=$(curl -sL --fail --connect-timeout 10 --max-time 30 "${api_url}" 2>/dev/null \
+            remote_sha=$(__znh_download_url_stdout "${api_url}" 30 10 \
                 | grep -m1 '"sha"' | cut -d '"' -f4 || true)
         fi
 
@@ -48557,7 +48617,7 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
         local_hash=""
         remote_hash=""
 
-        if curl -sL --fail --connect-timeout 5 --max-time 30 "${compare_url}" -o "${temp_remote}" 2>/dev/null; then
+        if __znh_download_url_file "${compare_url}" "${temp_remote}" 30 5 >/dev/null 2>&1; then
             # Preflight: captive portals / proxies can return HTML with HTTP 200.
             # Verify it at least looks like a helper script before hashing.
             if head -n 1 "${temp_remote}" 2>/dev/null | grep -qE '^#!/bin/bash|^#!/usr/bin/env bash' \
@@ -48638,7 +48698,7 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
         download_ok=0
         while [ "${attempt}" -le "${max_retries}" ]; do
             rm -f "${tmp}" 2>/dev/null || true
-            if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+            if __znh_download_url_file "${raw_url}" "${tmp}" 90 10 >/dev/null 2>&1; then
                 download_ok=1
                 break
             fi
@@ -48655,7 +48715,7 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
             download_ok=0
             while [ "${attempt}" -le "${max_retries}" ]; do
                 rm -f "${tmp}" 2>/dev/null || true
-                if curl -sL --fail --connect-timeout 10 --max-time 90 "${raw_url}" -o "${tmp}"; then
+                if __znh_download_url_file "${raw_url}" "${tmp}" 90 10 >/dev/null 2>&1; then
                     download_ok=1
                     break
                 fi
@@ -48727,7 +48787,7 @@ print(is_pre)' "${stable_policy}" 2>/dev/null || true)
             "https://raw.githubusercontent.com/${repo}/${tag}/UNI-auto.sh.sha256" \
             "https://raw.githubusercontent.com/${repo}/${tag}/UNI-auto.sh.sha256sum"; do
 
-            if curl -sL --fail --connect-timeout 10 --max-time 20 "${chk_url}" -o "${chk_file}" 2>/dev/null; then
+            if __znh_download_url_file "${chk_url}" "${chk_file}" 20 10 >/dev/null 2>&1; then
                 break
             fi
             chk_url=""
@@ -49207,13 +49267,19 @@ run_soar_install_only() {
         return 0
     fi
 
-    if ! command -v curl >/dev/null 2>&1; then
-        log_error "curl is required to install Soar but is not installed."
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+        log_error "A downloader (curl, wget, or python3) is required to install Soar but none are available."
         echo "Install curl with: $(znh_install_hint_for_package "$(znh_resolve_package_name "curl")")" | tee -a "${LOG_FILE}"
         return 1
     fi
 
-    SOAR_INSTALL_CMD='curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh'
+    if command -v curl >/dev/null 2>&1; then
+        SOAR_INSTALL_CMD='curl -fsSL "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh'
+    elif command -v wget >/dev/null 2>&1; then
+        SOAR_INSTALL_CMD='wget -qO- "https://raw.githubusercontent.com/pkgforge/soar/main/install.sh" | sh'
+    else
+        SOAR_INSTALL_CMD='python3 -c "import urllib.request, ssl; ctx=ssl.create_default_context(); urllib.request.urlopen(urllib.request.Request(\"https://raw.githubusercontent.com/pkgforge/soar/main/install.sh\", headers={\"User-Agent\":\"Mozilla/5.0\"}), context=ctx).read().decode()" | sh'
+    fi
 
     echo "" | tee -a "${LOG_FILE}"
     echo "This will run the official Soar installer as user $SUDO_USER:" | tee -a "${LOG_FILE}"
