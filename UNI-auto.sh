@@ -50119,7 +50119,7 @@ run_setup_sf_only() {
             rc=1
         fi
 
-        if [ "${flathub_reachable}" -eq 1 ]; then
+    if [ "${flathub_reachable}" -eq 1 ]; then
             if execute_guarded "Add Flatpak remote: flathub" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo; then
                 log_success "Flathub remote configured (or already present)"
                 flathub_ok=1
@@ -50149,8 +50149,26 @@ run_setup_sf_only() {
         rc=1
     fi
 
+    # 3b) Pre-check Snap Store reachability BEFORE offering to remove Discover.
+    # We must confirm alternative stores work before removing the user's existing
+    # graphical software center.
+    if [ "$snap_ok" -eq 1 ] && command -v snap >/dev/null 2>&1; then
+        log_info "Pre-check: is the Snap Store reachable?"
+        if snap debug connectivity >/dev/null 2>&1; then
+            snap_store_reachable=1
+            log_success "Snap Store is reachable"
+        else
+            log_error "Snap Store service is DOWN or unreachable."
+            rc=1
+        fi
+    else
+        log_warn "snapd is not installed or not available; Snap Store reachability check skipped."
+    fi
+
     # 4) Optionally remove KDE Discover to avoid conflicting update stacks
     # when this helper is managing system upgrades and Flatpak/Snap integration.
+    # ONLY proceed with removal if BOTH Flathub and Snap Store are confirmed
+    # reachable, so the user is not left without a working graphical app store.
     # Package names vary by distro: discover6 (openSUSE), plasma-discover (Fedora/Debian/Arch).
     local _discover_pkg=""
     local _discover_installed=0
@@ -50182,47 +50200,64 @@ run_setup_sf_only() {
     esac
 
     if [ "${_discover_installed}" -eq 1 ] && [ -n "${_discover_pkg}" ]; then
-        local _pm_update_cmd
-        _pm_update_cmd="$(znh_pm_manual_update_command)"
-        echo "" | tee -a "${LOG_FILE}"
-        echo "KDE Discover (package: ${_discover_pkg}) is currently installed." | tee -a "${LOG_FILE}"
-        echo "" | tee -a "${LOG_FILE}"
-        echo "Discover provides a graphical software center and its own" | tee -a "${LOG_FILE}"
-        echo "offline-update mechanism. Running Discover in parallel with" | tee -a "${LOG_FILE}"
-        echo "this auto-helper means two independent tools can schedule" | tee -a "${LOG_FILE}"
-        echo "and apply system updates. This can lead to:" | tee -a "${LOG_FILE}"
-        echo "  - duplicated or conflicting update notifications" | tee -a "${LOG_FILE}"
-        echo "  - partial or out-of-order upgrades when Discover performs" | tee -a "${LOG_FILE}"
-        echo "    offline updates while this helper manages system upgrades" | tee -a "${LOG_FILE}"
-        echo "  - confusing rollbacks when snapshots are created from" | tee -a "${LOG_FILE}"
-        echo "    different update tools" | tee -a "${LOG_FILE}"
-        echo "" | tee -a "${LOG_FILE}"
-        echo "To keep the update stack simple, this helper recommends" | tee -a "${LOG_FILE}"
-        echo "removing Discover and relying on:" | tee -a "${LOG_FILE}"
-        echo "  - ${_pm_update_cmd} (or this helper) for system upgrades" | tee -a "${LOG_FILE}"
-        echo "  - Flatpak/Snap tooling only for user-space apps when needed" | tee -a "${LOG_FILE}"
-        echo "" | tee -a "${LOG_FILE}"
-        read -p "Remove ${_discover_pkg} now so only ${SYSTEM_PKG_MANAGER}-based tools manage system updates? [y/N]: " -r RM_DISCOVER
-        echo
-        if [[ $RM_DISCOVER =~ ^[Yy]$ ]]; then
-            log_info "User accepted removal of ${_discover_pkg} to avoid conflicting update managers"
-            update_status "Removing ${_discover_pkg} (KDE Discover) to avoid conflicting update managers"
-            if znh_install_package_via_system_pm_remove "${_discover_pkg}"; then
-                log_success "${_discover_pkg} removed successfully"
+        if [ "${flathub_reachable}" -eq 1 ] && [ "${snap_store_reachable}" -eq 1 ]; then
+            local _pm_update_cmd
+            _pm_update_cmd="$(znh_pm_manual_update_command)"
+            echo "" | tee -a "${LOG_FILE}"
+            echo "KDE Discover (package: ${_discover_pkg}) is currently installed." | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+            echo "Discover provides a graphical software center and its own" | tee -a "${LOG_FILE}"
+            echo "offline-update mechanism. Running Discover in parallel with" | tee -a "${LOG_FILE}"
+            echo "this auto-helper means two independent tools can schedule" | tee -a "${LOG_FILE}"
+            echo "and apply system updates. This can lead to:" | tee -a "${LOG_FILE}"
+            echo "  - duplicated or conflicting update notifications" | tee -a "${LOG_FILE}"
+            echo "  - partial or out-of-order upgrades when Discover performs" | tee -a "${LOG_FILE}"
+            echo "    offline updates while this helper manages system upgrades" | tee -a "${LOG_FILE}"
+            echo "  - confusing rollbacks when snapshots are created from" | tee -a "${LOG_FILE}"
+            echo "    different update tools" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+            echo "To keep the update stack simple, this helper recommends" | tee -a "${LOG_FILE}"
+            echo "removing Discover and relying on:" | tee -a "${LOG_FILE}"
+            echo "  - ${_pm_update_cmd} (or this helper) for system upgrades" | tee -a "${LOG_FILE}"
+            echo "  - Flatpak/Snap tooling only for user-space apps when needed" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+            read -p "Remove ${_discover_pkg} now so only ${SYSTEM_PKG_MANAGER}-based tools manage system updates? [y/N]: " -r RM_DISCOVER
+            echo
+            if [[ $RM_DISCOVER =~ ^[Yy]$ ]]; then
+                log_info "User accepted removal of ${_discover_pkg} to avoid conflicting update managers"
+                update_status "Removing ${_discover_pkg} (KDE Discover) to avoid conflicting update managers"
+                if znh_install_package_via_system_pm_remove "${_discover_pkg}"; then
+                    log_success "${_discover_pkg} removed successfully"
+                else
+                    rc=1
+                    local _rm_hint
+                    case "${SYSTEM_PKG_MANAGER}" in
+                        zypper) _rm_hint="sudo zypper remove ${_discover_pkg}" ;;
+                        dnf)    _rm_hint="sudo dnf remove ${_discover_pkg}" ;;
+                        apt)    _rm_hint="sudo apt-get remove ${_discover_pkg}" ;;
+                        pacman) _rm_hint="sudo pacman -R ${_discover_pkg}" ;;
+                        *)      _rm_hint="Remove package '${_discover_pkg}' using your system package manager." ;;
+                    esac
+                    log_error "Failed to remove ${_discover_pkg} automatically. Please review the log and, if needed, run '${_rm_hint}' manually."
+                fi
             else
-                rc=1
-                local _rm_hint
-                case "${SYSTEM_PKG_MANAGER}" in
-                    zypper) _rm_hint="sudo zypper remove ${_discover_pkg}" ;;
-                    dnf)    _rm_hint="sudo dnf remove ${_discover_pkg}" ;;
-                    apt)    _rm_hint="sudo apt-get remove ${_discover_pkg}" ;;
-                    pacman) _rm_hint="sudo pacman -R ${_discover_pkg}" ;;
-                    *)      _rm_hint="Remove package '${_discover_pkg}' using your system package manager." ;;
-                esac
-                log_error "Failed to remove ${_discover_pkg} automatically. Please review the log and, if needed, run '${_rm_hint}' manually."
+                log_info "User chose to keep ${_discover_pkg} installed; multiple update tools will remain active."
             fi
         else
-            log_info "User chose to keep ${_discover_pkg} installed; multiple update tools will remain active."
+            echo "" | tee -a "${LOG_FILE}"
+            echo "KDE Discover (package: ${_discover_pkg}) is currently installed," | tee -a "${LOG_FILE}"
+            echo "but one or more alternative app stores are NOT reachable." | tee -a "${LOG_FILE}"
+            echo "To avoid leaving you without a graphical software center," | tee -a "${LOG_FILE}"
+            echo "the helper will NOT remove Discover at this time." | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+            echo "Reachability status:" | tee -a "${LOG_FILE}"
+            echo "  - Flathub        : $([ "${flathub_reachable}" -eq 1 ] && echo OK || echo FAILED)" | tee -a "${LOG_FILE}"
+            echo "  - Snap Store     : $([ "${snap_store_reachable}" -eq 1 ] && echo OK || echo FAILED)" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+            echo "Fix network/connectivity issues and re-run:" | tee -a "${LOG_FILE}"
+            echo "  sudo zypper-auto-helper --setup-SF" | tee -a "${LOG_FILE}"
+            echo "" | tee -a "${LOG_FILE}"
+            log_warn "Skipping KDE Discover removal because alternative stores are not fully reachable (Flathub=${flathub_reachable}, Snap=${snap_store_reachable})."
         fi
     else
         log_debug "KDE Discover is not installed; no conflicting instance detected"
@@ -50236,15 +50271,6 @@ run_setup_sf_only() {
         if snap list snap-store >/dev/null 2>&1; then
             log_success "Snap Store (snap-store) is already installed"
         else
-            # Pre-check: is the Snap Store API reachable?
-            if __znh_check_service_reachable "https://api.snapcraft.io/v2/snaps/info/snap-store" "Snap Store API (api.snapcraft.io)"; then
-                snap_store_reachable=1
-            else
-                log_error "Snap Store service is DOWN or unreachable. Cannot install snap-store."
-                log_error "  Retry later with: sudo snap install snap-store --edge"
-                rc=1
-            fi
-
             if [ "${snap_store_reachable}" -eq 1 ]; then
                 echo "  → Installing Snap Store with: snap install snap-store --edge (this may take a few minutes)..." | tee -a "${LOG_FILE}"
                 # Stream snap's own progress/output both to the console and the log so
@@ -50256,6 +50282,8 @@ run_setup_sf_only() {
                     log_error "  You can retry manually with: sudo snap install snap-store --edge"
                     rc=1
                 fi
+            else
+                log_warn "Skipping Snap Store installation; store was unreachable during pre-check."
             fi
         fi
     else
