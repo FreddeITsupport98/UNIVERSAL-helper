@@ -13069,10 +13069,8 @@ generate_dashboard() {
         fi
     fi
     if [ "${feat_snap_installed}" -eq 1 ] 2>/dev/null; then
-        # Snap healthy = snapd.service is running
-        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet snapd.service 2>/dev/null; then
-            feat_snap_healthy=1
-        elif snap version >/dev/null 2>&1; then
+        # Snap healthy = snapd.service is running AND Snap Store is reachable
+        if command -v snap >/dev/null 2>&1 && snap debug connectivity >/dev/null 2>&1; then
             feat_snap_healthy=1
         fi
     fi
