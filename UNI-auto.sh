@@ -53886,7 +53886,10 @@ __znh_pm_is_rpm_based() {
 # `-e` makes script return the PM's exit code. Falls back to a direct
 # exec (interactive, no capture) if `script` is unavailable.
 __znh_run_pm_pty() {
+    # $1 = output capture file (may be empty for no-capture); remaining args
+    # ($2..) are the package-manager arguments to forward.
     local out_file="${1:-}"
+    shift
     local pm_cmd
     pm_cmd="sudo $(__znh_pm_binary)$(printf ' %q' "$@")"
     if command -v script >/dev/null 2>&1; then
@@ -54519,7 +54522,7 @@ if __znh_pm_is_update_cmd "$@"; then
         # terminal's foreground pg, so keystrokes never reached the PM.
         # `script` allocates its own PTY and bridges stdin, fixing that.
         # See __znh_run_pm_pty for the full rationale.
-        __znh_run_pm_pty "$ZYPPER_OUT_FILE"
+        __znh_run_pm_pty "$ZYPPER_OUT_FILE" "$@"
         EXIT_CODE=$?
         DID_UPDATES=1
         if __znh_pm_is_nothing_to_do "$ZYPPER_OUT_FILE"; then
@@ -54935,7 +54938,7 @@ else
     # Use __znh_run_pm_pty so interactive prompts (e.g. zypper install
     # confirmations, dnf/apt prompts) work — same setsid/PTY reason as the
     # update flow. No output capture needed here.
-    __znh_run_pm_pty ""
+    __znh_run_pm_pty "" "$@"
     exit $?
 fi
 EOF
