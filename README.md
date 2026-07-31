@@ -65,6 +65,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [Downloader prefetch error classification (`error:solver:1` / libdnf5 sandbox)](#downloader-prefetch-error-classification)
 - [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
 - [Btrfs qgroups (Snapper Manager)](#qgroups)
+- [Cross-distro manual-update wrapper (zypper/dnf/apt/pacman)](#cross-distro-wrapper)
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
 - [Verification low-impact mode](#cfg-verify-low-impact)
 - [Adaptive Settings drawer (cross-distro)](#cfg-adaptive-settings-drawer)
@@ -349,6 +350,19 @@ sudo zypper-auto-helper snapper qgroup-disable  # Disable btrfs qgroups; clear s
 # The installer disables qgroups by default (they slow snapper cleanup/list and can hang btrfs-cleaner).
 # Toggle from the dashboard Snapper Manager -> "Btrfs qgroups" tile (Enable/Disable, phrase QGROUPS).
 
+# Cross-distro manual-update wrapper (zypper / dnf / apt / pacman)
+# 'sudo <pm> <update-cmd>' is intercepted (Fish) and routed through the safe
+# ~/.local/bin/<pm>-with-ps wrapper, which runs post-update service/reboot
+# checks and (for RPM-based PMs) safe duplicate-RPM cleanup.
+sudo zypper dup                 # openSUSE
+sudo dnf upgrade                # Fedora/RHEL/Rocky/Alma
+sudo apt upgrade                # Debian/Ubuntu/Mint
+sudo apt-get upgrade            # Debian/Ubuntu/Mint (apt-get variant)
+sudo pacman -Syu                # Arch/Manjaro/EndeavourOS
+# The same wrapper also handles '<pm> --rm-conflict' (RPM-based only) and runs
+# the right post-update check per PM (zypper ps -s / dnf needs-restarting -s /
+# needrestart -l / reboot-required marker).
+
 # Boot Entry Scrub (scrub-ghost)
 # NOTE: run --dry-run first. This tool touches boot menu entries (high-stakes).
 zypper-auto-helper scrub-ghost --dry-run
@@ -543,6 +557,32 @@ Some actions require typing a phrase before the WebUI will run them:
 #### Advanced notes
 - Pinning: entries listed in `ENTRIES_DIR/.scrub-ghost-pinned` are never moved/deleted.
 - Immutable/transactional systems: scrub-ghost can attempt temporary remount `rw` while applying changes; disable that behavior with `--no-remount-rw`.
+
+<a id="cross-distro-wrapper"></a>
+### 🔄 Cross-distro manual-update wrapper (zypper / dnf / apt / pacman)
+
+The manual-update wrapper (`~/.local/bin/zypper-with-ps`) is now **cross-distro**. Originally zypper-only, it now also wraps `dnf`, `apt`/`apt-get`, and `pacman` via basename dispatch (`dnf-with-ps` / `apt-with-ps` / `apt-get-with-ps` / `pacman-with-ps` are symlinks to the same script). It detects which package manager to drive from the invocation name and runs the matching binary with the right post-update checks.
+
+**What it does for every PM:**
+- Detects update/upgrade commands (`dup`/`dist-upgrade`/`update` for zypper; `upgrade`/`distro-sync` for dnf; `upgrade`/`full-upgrade`/`dist-upgrade` for apt; `-Syu`/`-Su`/`-Sy` for pacman).
+- Runs the PM command with **stderr on the TTY** so interactive `Continue? [y/n]` prompts work (this fixes a bug where `sudo zypper dup` silently did nothing after typing `y` — see the changelog `[2026-07-31]` entry).
+- Runs **post-update service-restart checks** per PM: `zypper ps -s` / `dnf needs-restarting -s` / `needrestart -l` (apt) / a pacman hint.
+- Runs a **reboot check** per PM: `zypper needs-reboot` / `dnf needs-restarting -r` / `needrestart -r` / `/run/reboot-required` marker.
+- Skips the zypp-lock wait and duplicate-RPM cleanup on non-RPM PMs (apt/pacman), since those are RPM-specific.
+- Optional post-update app refresh (Flatpak/Snap/Soar/Brew/pipx) runs for all PMs when system packages changed.
+
+**Fish shell interception:** the Fish `sudo` wrapper catches `sudo zypper`, `sudo dnf`, `sudo apt`, `sudo apt-get`, and `sudo pacman`, routing each through the matching `<pm>-with-ps` wrapper. Bash/Zsh get aliases for each PM (so `zypper`/`dnf`/`apt`/`apt-get`/`pacman` without `sudo` also go through the wrapper; `sudo <pm>` interception is Fish-only, same as before for zypper).
+
+**CLI examples:**
+```bash path=null start=null
+sudo zypper dup          # openSUSE
+sudo dnf upgrade         # Fedora/RHEL/Rocky/Alma
+sudo apt upgrade         # Debian/Ubuntu/Mint
+sudo apt-get upgrade     # Debian/Ubuntu/Mint (apt-get variant)
+sudo pacman -Syu         # Arch/Manjaro/EndeavourOS
+```
+
+The `--rm-conflict` duplicate-RPM cleanup mode is also available for RPM-based PMs: `sudo zypper --rm-conflict` or `sudo dnf --rm-conflict` (ignored on apt/pacman).
 
 <a id="qgroups"></a>
 ### 🧮 Btrfs qgroups (Snapper Manager)

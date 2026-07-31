@@ -49714,7 +49714,8 @@ run_uninstall_helper_only() {
         echo "    plus: /var/lib/zypper-auto/qgroups-preinstall.state (Btrfs qgroup pre-install state; qgroups restored to pre-install state)" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
-        echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
+        echo "    zypper-with-ps, dnf-with-ps, apt-with-ps, apt-get-with-ps, pacman-with-ps (cross-distro PM wrappers)," | tee -a "${LOG_FILE}"
+        echo "    zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
         echo "  - Fish wrappers: $SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish," | tee -a "${LOG_FILE}"
         echo "    $SUDO_USER_HOME/.config/fish/conf.d/sudo-handler.fish, zypper-auto-helper-alias.fish" | tee -a "${LOG_FILE}"
         echo "  - Desktop/menu shortcuts: $SUDO_USER_HOME/.local/share/applications/zypper-auto-dashboard.desktop" | tee -a "${LOG_FILE}"
@@ -49856,6 +49857,10 @@ run_uninstall_helper_only() {
             "$SUDO_USER_HOME/.local/bin/zypper-notify-updater.py" \
             "$SUDO_USER_HOME/.local/bin/zypper-run-install" \
             "$SUDO_USER_HOME/.local/bin/zypper-with-ps" \
+            "$SUDO_USER_HOME/.local/bin/dnf-with-ps" \
+            "$SUDO_USER_HOME/.local/bin/apt-with-ps" \
+            "$SUDO_USER_HOME/.local/bin/apt-get-with-ps" \
+            "$SUDO_USER_HOME/.local/bin/pacman-with-ps" \
             "$SUDO_USER_HOME/.local/bin/zypper-view-changes" \
             "$SUDO_USER_HOME/.local/bin/zypper-soar-install-helper" \
             "$SUDO_USER_HOME/.config/fish/conf.d/zypper-wrapper.fish" \
@@ -49882,8 +49887,13 @@ run_uninstall_helper_only() {
         if [ -f "${SUDO_USER_HOME}/.bashrc" ]; then
             execute_guarded "Remove helper aliases from .bashrc" \
                 sed -i \
+                    -e '/# Package-manager wrapper for auto service check (added by zypper-auto-helper)/d' \
                     -e '/# Zypper wrapper for auto service check/d' \
                     -e '/alias zypper=/d' \
+                    -e '/alias dnf=.*-with-ps/d' \
+                    -e '/alias apt=.*-with-ps/d' \
+                    -e '/alias apt-get=.*-with-ps/d' \
+                    -e '/alias pacman=.*-with-ps/d' \
                     -e '/# zypper-auto-helper command alias/d' \
                     -e '/alias zypper-auto-helper=/d' \
                     -e '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}$/d' \
@@ -49892,8 +49902,13 @@ run_uninstall_helper_only() {
         if [ -f "${SUDO_USER_HOME}/.zshrc" ]; then
             execute_guarded "Remove helper aliases from .zshrc" \
                 sed -i \
+                    -e '/# Package-manager wrapper for auto service check (added by zypper-auto-helper)/d' \
                     -e '/# Zypper wrapper for auto service check/d' \
                     -e '/alias zypper=/d' \
+                    -e '/alias dnf=.*-with-ps/d' \
+                    -e '/alias apt=.*-with-ps/d' \
+                    -e '/alias apt-get=.*-with-ps/d' \
+                    -e '/alias pacman=.*-with-ps/d' \
                     -e '/# zypper-auto-helper command alias/d' \
                     -e '/alias zypper-auto-helper=/d' \
                     -e '/# zypper-auto-helper command wrapper (added by zypper-auto-helper)/,/^}$/d' \
@@ -53683,8 +53698,11 @@ ZYPPER_WRAPPER_PATH="$USER_BIN_DIR/zypper-with-ps"
 log_debug "Writing zypper wrapper to: $ZYPPER_WRAPPER_PATH"
 write_atomic "$ZYPPER_WRAPPER_PATH" << 'EOF'
 #!/usr/bin/env bash
-# Zypper wrapper that automatically runs 'zypper ps -s' after 'zypper dup'
-# This shows which services need restarting after updates
+# Package-manager wrapper with post-update service/reboot checks.
+# Originally zypper-only; now cross-distro via basename dispatch:
+#   zypper-with-ps / dnf-with-ps / apt-with-ps / apt-get-with-ps / pacman-with-ps
+# (the dnf/apt/apt-get/pacman names are symlinks to this same script).
+# This shows which services need restarting after updates.
 
 # Load feature toggles from the same config used by the installer.
 CONFIG_FILE="/etc/zypper-auto.conf"
@@ -53722,6 +53740,133 @@ else
 fi
 znh_pm_ensure_detected
 SYSTEM_PKG_MANAGER="${SYSTEM_PKG_MANAGER:-zypper}"
+
+# --- Cross-distro wrapper dispatch ---
+# WRAPPER_PM is the package manager this invocation should drive, derived from
+# the basename the script was invoked under (symlinks dnf-with-ps / apt-with-ps
+# / apt-get-with-ps / pacman-with-ps all point at this file). It is independent
+# of SYSTEM_PKG_MANAGER so the user can explicitly invoke a specific PM.
+__znh_wrapper_pm_from_invocation() {
+    local base
+    base="$(basename "$0" 2>/dev/null || echo zypper-with-ps)"
+    case "$base" in
+        dnf-with-ps)        printf '%s' "dnf" ;;
+        apt-with-ps)        printf '%s' "apt" ;;
+        apt-get-with-ps)    printf '%s' "apt-get" ;;
+        pacman-with-ps)     printf '%s' "pacman" ;;
+        *)                  printf '%s' "zypper" ;;
+    esac
+}
+WRAPPER_PM="$(__znh_wrapper_pm_from_invocation)"
+
+# Absolute path to the real package-manager binary for this invocation.
+__znh_pm_binary() {
+    printf '%s' "/usr/bin/${WRAPPER_PM}"
+}
+
+# Returns 0 (true) when the argv looks like an update/upgrade command for the
+# active PM, so the wrapper should run post-update checks afterwards.
+__znh_pm_is_update_cmd() {
+    case "${WRAPPER_PM}" in
+        zypper)
+            [[ "$*" == *"dup"* || "$*" == *"dist-upgrade"* || "$*" == *"update"* || "$*" == " up"* || "$*" == "up" ]]
+            ;;
+        dnf)
+            [[ "$*" == *"upgrade"* || "$*" == *"distro-sync"* ]]
+            ;;
+        apt|apt-get)
+            [[ "$*" == *"upgrade"* || "$*" == *"dist-upgrade"* || "$*" == *"full-upgrade"* ]]
+            ;;
+        pacman)
+            [[ "$*" == *"-Syu"* || "$*" == *"-Su"* || "$*" == *"-Sy"* ]]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Returns 0 (true) when the captured PM output indicates "nothing to do"
+# (no updates available), so the wrapper can skip optional refresh steps.
+__znh_pm_is_nothing_to_do() {
+    local out_file="${1:-}"
+    [ -n "$out_file" ] && [ -f "$out_file" ] || return 1
+    case "${WRAPPER_PM}" in
+        zypper|dnf)
+            grep -qiE 'Nothing to do' "$out_file" 2>/dev/null
+            ;;
+        apt|apt-get)
+            grep -qiE '0 upgraded, 0 newly installed|All packages are up to date|Nothing to do' "$out_file" 2>/dev/null
+            ;;
+        pacman)
+            grep -qiE 'there is nothing to do|Nothing to do' "$out_file" 2>/dev/null
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Prints services/processes still using old libraries after an update.
+# Best-effort per PM; failures are non-fatal.
+__znh_pm_post_update_service_check() {
+    case "${WRAPPER_PM}" in
+        zypper)
+            sudo /usr/bin/zypper ps -s 2>/dev/null || true
+            ;;
+        dnf)
+            if command -v dnf >/dev/null 2>&1; then
+                sudo /usr/bin/dnf needs-restarting -s 2>/dev/null || true
+            elif command -v needs-restarting >/dev/null 2>&1; then
+                sudo needs-restarting -s 2>/dev/null || true
+            fi
+            ;;
+        apt|apt-get)
+            if command -v needrestart >/dev/null 2>&1; then
+                sudo needrestart -l 2>/dev/null || true
+            elif command -v checkrestart >/dev/null 2>&1; then
+                sudo checkrestart 2>/dev/null || true
+            fi
+            ;;
+        pacman)
+            echo "(pacman has no built-in service-restart listing; use 'systemctl restart <service>' or reboot.)"
+            ;;
+    esac
+}
+
+# Returns 0 (true) when a system reboot is recommended after the update.
+__znh_pm_needs_reboot() {
+    case "${WRAPPER_PM}" in
+        zypper)
+            # zypper needs-reboot exits 0 when a reboot IS required.
+            zypper needs-reboot >/dev/null 2>&1
+            ;;
+        dnf)
+            if command -v dnf >/dev/null 2>&1; then
+                sudo /usr/bin/dnf needs-restarting -r >/dev/null 2>&1
+            elif command -v needs-restarting >/dev/null 2>&1; then
+                sudo needs-restarting -r >/dev/null 2>&1
+            else
+                [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]
+            fi
+            ;;
+        apt|apt-get)
+            if [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]; then
+                return 0
+            fi
+            if command -v needrestart >/dev/null 2>&1; then
+                sudo needrestart -r >/dev/null 2>&1
+            else
+                return 1
+            fi
+            ;;
+        pacman)
+            [ -f /run/reboot-required ] || [ -f /var/run/reboot-required ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Whether this PM is RPM-based (so duplicate-RPM cleanup is applicable).
+__znh_pm_is_rpm_based() {
+    [[ "${WRAPPER_PM}" == "zypper" || "${WRAPPER_PM}" == "dnf" ]]
+}
 
 # Enterprise extensions (optional)
 HOOKS_ENABLED="${HOOKS_ENABLED:-true}"
@@ -54264,11 +54409,12 @@ cleanup_thirdparty_duplicates() {
 }
 
 # One-shot conflict-cleanup mode: when invoked as
-#   zypper --rm-conflict [optional zypper-args...]
+#   <pm> --rm-conflict [optional pm-args...]
 # we run duplicate-RPM cleanup first, then (if additional
-# arguments are present) fall through to normal zypper
-# handling.
-if [[ "${1:-}" == "--rm-conflict" ]]; then
+# arguments are present) fall through to normal PM handling.
+# RPM duplicate cleanup only makes sense for RPM-based PMs (zypper/dnf);
+# on apt/pacman --rm-conflict is ignored (no rpm database).
+if [[ "${1:-}" == "--rm-conflict" ]] && __znh_pm_is_rpm_based; then
     echo "Running duplicate RPM conflict cleanup (--rm-conflict)..."
     # Drop the flag from the argument list before continuing
     shift
@@ -54279,19 +54425,21 @@ if [[ "${1:-}" == "--rm-conflict" ]]; then
     fi
 fi
 
-# Check if we're running 'dup', 'dist-upgrade' or 'update'
+# Check if we're running an update/upgrade command for the active PM.
 STATUS_DIR="/var/log/zypper-auto"
 STATUS_FILE="$STATUS_DIR/download-status.txt"
 
-if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"update"* ]] ; then
+if __znh_pm_is_update_cmd "$@"; then
     # For interactive runs, publish a best-effort "downloading" status so the
     # desktop notifier can show a progress bar while the user is running
-    # zypper manually. We don't know the package count in advance here, so we
+    # a manual update. We don't know the package count in advance here, so we
     # mark the total as 0 and treat that as "unknown" on the notifier side.
     sudo mkdir -p "$STATUS_DIR" >/dev/null 2>&1 || true
     sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' 'downloading:0:manual:0:0' > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
 
-    # Before running zypper, respect the global system management lock.
+    # Before running, respect the global system management lock.
+    # The zypp lock is zypper-specific; dnf/apt/pacman handle their own locks
+    # internally, so we only wait when driving zypper.
     max_attempts=${LOCK_RETRY_MAX_ATTEMPTS:-10}
     base_delay=${LOCK_RETRY_INITIAL_DELAY_SECONDS:-1}
     if ! [[ "${max_attempts:-}" =~ ^[0-9]+$ ]]; then
@@ -54300,21 +54448,25 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     if ! [[ "${base_delay:-}" =~ ^[0-9]+$ ]]; then
         base_delay=1
     fi
-    if ! wait_for_zypp_lock_clear "$max_attempts" "$base_delay"; then
-        # Clear the manual downloading state so the notifier does not show a
-        # stuck progress bar when we never actually ran zypper.
-        sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' idle > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
-        exit 1
+    if [[ "${WRAPPER_PM}" == "zypper" ]]; then
+        if ! wait_for_zypp_lock_clear "$max_attempts" "$base_delay"; then
+            # Clear the manual downloading state so the notifier does not show a
+            # stuck progress bar when we never actually ran the PM.
+            sudo bash -c "tmp='${STATUS_FILE}.tmp.$$'; printf '%s\n' idle > \"$tmp\" && mv -f \"$tmp\" '$STATUS_FILE'" >/dev/null 2>&1 || true
+            exit 1
+        fi
     fi
 
     # Pre-update hooks (best-effort)
     run_hooks "pre" || true
 
-    # Clean up duplicate RPMs before running zypper, according to
-    # AUTO_DUPLICATE_RPM_CLEANUP_PACKAGES / AUTO_DUPLICATE_RPM_MODE.
-    cleanup_duplicate_rpms
+    # Clean up duplicate RPMs before running the PM (RPM-based only: zypper/dnf).
+    # On apt/pacman there is no rpm database, so this is a no-op.
+    if __znh_pm_is_rpm_based; then
+        cleanup_duplicate_rpms
+    fi
 
-    # Run the actual zypper command, with one retry on lock race.
+    # Run the actual package-manager command, with one retry on lock race.
     # This handles the case where lock contention appears after the pre-check.
     run_attempt=1
     run_attempt_max=2
@@ -54324,10 +54476,19 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     FINAL_OUTPUT_LOCK=0
     while [ "$run_attempt" -le "$run_attempt_max" ]; do
         ZYPPER_OUT_FILE="$(mktemp /tmp/znh-zypper-with-ps.XXXXXX 2>/dev/null || echo /tmp/znh-zypper-with-ps.$$)"
-        sudo /usr/bin/zypper "$@" 2>&1 | tee "$ZYPPER_OUT_FILE"
+        # IMPORTANT: do NOT merge stderr into the tee pipe (no "2>&1").
+        # The PM's interactive "Continue? [y/n]" prompt + download progress
+        # rely on STDERR being a TTY. With "2>&1 | tee", zypper saw a
+        # non-TTY stderr and entered non-interactive mode, silently
+        # auto-cancelling the Continue prompt — so "sudo zypper dup" did
+        # nothing after the user typed y (no download, no install).
+        # Keep stderr on the TTY (inherited) so the PM stays interactive;
+        # pipe only stdout through tee for real-time display + "Nothing to
+        # do." detection. Lock retry still works via zypper rc=7.
+        sudo "$(__znh_pm_binary)" "$@" | tee "$ZYPPER_OUT_FILE"
         EXIT_CODE=${PIPESTATUS[0]}
         DID_UPDATES=1
-        if grep -q "Nothing to do\." "$ZYPPER_OUT_FILE" 2>/dev/null; then
+        if __znh_pm_is_nothing_to_do "$ZYPPER_OUT_FILE"; then
             DID_UPDATES=0
         fi
 
@@ -54364,14 +54525,16 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     if [ "$EXIT_CODE" -eq 0 ]; then
         run_hooks "post" || true
     fi
-    if [ "$EXIT_CODE" -eq 7 ] || [ "$LOCK_FAILURE" -eq 1 ] || [ "$FINAL_OUTPUT_LOCK" -eq 1 ]; then
-        lock_info="$(zypp_lock_details)"
-        IFS=$'\t' read -r lock_file lock_pid lock_owner <<< "$lock_info"
-        echo ""
-        echo "System management is locked by another update tool (zypper/YaST/PackageKit)."
-        echo "Lock details: lock_file=${lock_file} pid=${lock_pid} owner=${lock_owner}"
-        echo "Close that other update tool (or wait for it to finish), then run this zypper command again."
-        echo ""
+    if [[ "${WRAPPER_PM}" == "zypper" ]]; then
+        if [ "$EXIT_CODE" -eq 7 ] || [ "$LOCK_FAILURE" -eq 1 ] || [ "$FINAL_OUTPUT_LOCK" -eq 1 ]; then
+            lock_info="$(zypp_lock_details)"
+            IFS=$'\t' read -r lock_file lock_pid lock_owner <<< "$lock_info"
+            echo ""
+            echo "System management is locked by another update tool (zypper/YaST/PackageKit)."
+            echo "Lock details: lock_file=${lock_file} pid=${lock_pid} owner=${lock_owner}"
+            echo "Close that other update tool (or wait for it to finish), then run this ${WRAPPER_PM} command again."
+            echo ""
+        fi
     fi
 
     # Clear the manual downloading state so the notifier stops showing
@@ -54381,11 +54544,11 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     # Update helper status + remote monitoring (best-effort)
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     if [ "$EXIT_CODE" -eq 0 ]; then
-        echo "[$ts] SUCCESS: Manual zypper update completed (wrapper)" | sudo tee "$HELPER_STATUS_FILE" >/dev/null 2>&1 || true
-        send_webhook "Zypper update successful" "Manual update (wrapper) completed successfully." "65280"
+        echo "[$ts] SUCCESS: Manual ${WRAPPER_PM} update completed (wrapper)" | sudo tee "$HELPER_STATUS_FILE" >/dev/null 2>&1 || true
+        send_webhook "${WRAPPER_PM} update successful" "Manual update (wrapper) completed successfully." "65280"
     else
-        echo "[$ts] FAILED: Manual zypper update failed (wrapper rc=$EXIT_CODE)" | sudo tee "$HELPER_STATUS_FILE" >/dev/null 2>&1 || true
-        send_webhook "Zypper update FAILED" "Manual update (wrapper) failed (rc=$EXIT_CODE)." "16711680"
+        echo "[$ts] FAILED: Manual ${WRAPPER_PM} update failed (wrapper rc=$EXIT_CODE)" | sudo tee "$HELPER_STATUS_FILE" >/dev/null 2>&1 || true
+        send_webhook "${WRAPPER_PM} update FAILED" "Manual update (wrapper) failed (rc=$EXIT_CODE)." "16711680"
     fi
 
     generate_dashboard || true
@@ -54674,14 +54837,14 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     else
         echo ""
         if [ "$EXIT_CODE" -ne 0 ]; then
-            echo "ℹ️  Skipping optional updates because zypper dup failed (rc=$EXIT_CODE)."
+            echo "ℹ️  Skipping optional updates because the ${WRAPPER_PM} update failed (rc=$EXIT_CODE)."
         else
             echo "ℹ️  No system updates were applied (Nothing to do). Skipping optional updates to conserve CPU."
         fi
         echo ""
     fi
 
-    # Always show service restart info, even if zypper reported errors
+    # Always show service restart info, even if the PM reported errors
     echo "=========================================="
     echo "  Post-Update Service Check"
     echo "=========================================="
@@ -54689,12 +54852,14 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     echo "Checking which services need to be restarted..."
     echo ""
     
-    # Run zypper ps -s to show services using old libraries
-    ZYPPER_PS_OUTPUT=$(sudo /usr/bin/zypper ps -s 2>/dev/null || true)
+    # Run the PM-specific service-restart check (zypper ps -s / dnf
+    # needs-restarting -s / needrestart -l / pacman hint).
+    ZYPPER_PS_OUTPUT="$(__znh_pm_post_update_service_check)"
     echo "$ZYPPER_PS_OUTPUT"
     
-    # Check if there are any running processes
-    if echo "$ZYPPER_PS_OUTPUT" | grep -q "running processes"; then
+    # Check if there are any running processes (zypper prints "running
+    # processes"; dnf/apt lists service names). Keep this best-effort.
+    if echo "$ZYPPER_PS_OUTPUT" | grep -qiE 'running processes|needs-restarting|needrestart|restart'; then
         echo ""
         echo "ℹ️  Services listed above are using old library versions."
         echo ""
@@ -54717,8 +54882,9 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     echo "=========================================="
     echo ""
 
-    # zypper needs-reboot returns exit code 1 if a reboot is required.
-    if zypper needs-reboot >/dev/null 2>&1; then
+    # Reboot check (PM-specific): zypper needs-reboot / dnf needs-restarting -r
+    # / needrestart -r / /run/reboot-required marker.
+    if __znh_pm_needs_reboot; then
         echo "🔴 SYSTEM REBOOT IS REQUIRED"
         echo "   Core libraries or the kernel have been updated."
         echo "   Please reboot as soon as possible."
@@ -54731,13 +54897,26 @@ if [[ "$*" == *"dup"* ]] || [[ "$*" == *"dist-upgrade"* ]] || [[ "$*" == *"updat
     
     exit $EXIT_CODE
 else
-    # Not a dup command, just run zypper normally
-    sudo /usr/bin/zypper "$@"
+    # Not an update command, just run the package manager normally.
+    # Keep stderr on the TTY (no 2>&1) so interactive prompts work.
+    sudo "$(__znh_pm_binary)" "$@"
 fi
 EOF
 chown "$SUDO_USER:$SUDO_USER" "$ZYPPER_WRAPPER_PATH"
 chmod +x "$ZYPPER_WRAPPER_PATH"
 log_success "Zypper wrapper script created and made executable"
+
+# --- 7b.5. Create cross-distro PM wrapper symlinks ---
+# dnf-with-ps / apt-with-ps / apt-get-with-ps / pacman-with-ps are symlinks to
+# zypper-with-ps. The wrapper dispatches on basename so each PM gets the right
+# binary + post-update checks. Recreate on every install so they track the
+# canonical wrapper (ln -sf is idempotent).
+for _znh_pm_sym in dnf apt apt-get pacman; do
+    execute_guarded "Create ${_znh_pm_sym}-with-ps symlink -> zypper-with-ps" \
+        ln -sf zypper-with-ps "${USER_BIN_DIR}/${_znh_pm_sym}-with-ps" || true
+    chown -h "$SUDO_USER:$SUDO_USER" "${USER_BIN_DIR}/${_znh_pm_sym}-with-ps" 2>/dev/null || true
+done
+log_success "Cross-distro PM wrapper symlinks created (dnf/apt/apt-get/pacman-with-ps)"
 
 # Add shell alias/function to user's shell config
 log_info ">>> Adding zypper alias to shell configurations..."
@@ -54745,18 +54924,27 @@ update_status "Configuring shell aliases..."
 
 # Bash configuration
 if [ -f "$SUDO_USER_HOME/.bashrc" ]; then
-    log_debug "Adding zypper alias to .bashrc"
-    # Remove old alias if it exists
+    log_debug "Adding package-manager aliases to .bashrc"
+    # Remove old aliases if they exist (only lines pointing at our -with-ps wrappers)
+    sed -i '/# Package-manager wrapper for auto service check (added by zypper-auto-helper)/d' "$SUDO_USER_HOME/.bashrc"
     sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.bashrc"
     sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.bashrc"
-    # Add new alias
+    sed -i '/alias dnf=.*-with-ps/d' "$SUDO_USER_HOME/.bashrc"
+    sed -i '/alias apt=.*-with-ps/d' "$SUDO_USER_HOME/.bashrc"
+    sed -i '/alias apt-get=.*-with-ps/d' "$SUDO_USER_HOME/.bashrc"
+    sed -i '/alias pacman=.*-with-ps/d' "$SUDO_USER_HOME/.bashrc"
+    # Add new aliases (cross-distro: each PM routes through its -with-ps wrapper)
     {
         echo ""
-        echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)"
+        echo "# Package-manager wrapper for auto service check (added by zypper-auto-helper)"
         echo "alias zypper='$ZYPPER_WRAPPER_PATH'"
+        echo "alias dnf='$USER_BIN_DIR/dnf-with-ps'"
+        echo "alias apt='$USER_BIN_DIR/apt-with-ps'"
+        echo "alias apt-get='$USER_BIN_DIR/apt-get-with-ps'"
+        echo "alias pacman='$USER_BIN_DIR/pacman-with-ps'"
     } >> "$SUDO_USER_HOME/.bashrc"
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.bashrc"
-    log_success "Added zypper alias to .bashrc"
+    log_success "Added package-manager aliases to .bashrc"
 fi
 
 # Fish configuration
@@ -54766,28 +54954,65 @@ if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
     mkdir -p "$FISH_CONFIG_DIR"
     FISH_ALIAS_FILE="$FISH_CONFIG_DIR/zypper-wrapper.fish"
     cat > "$FISH_ALIAS_FILE" << 'FISHEOF'
-# Zypper wrapper for auto service check (added by zypper-auto-helper)
+# Package-manager wrappers for auto service check (added by zypper-auto-helper)
+# Cross-distro: each <pm> function calls the matching ~/.local/bin/<pm>-with-ps
+# wrapper, which runs post-update service/reboot checks and (for RPM-based PMs)
+# safe duplicate-RPM cleanup. The dnf/apt/apt-get/pacman wrappers are symlinks
+# to zypper-with-ps and dispatch on their basename.
 
 # Wrap zypper command
 function zypper --wraps zypper --description "Wrapper for zypper with post-update checks"
     # Call the wrapper script (which handles sudo and locking internally)
     ~/.local/bin/zypper-with-ps $argv
 end
+
+# Wrap dnf command (Fedora/RHEL/Rocky/Alma)
+function dnf --wraps dnf --description "Wrapper for dnf with post-update checks"
+    ~/.local/bin/dnf-with-ps $argv
+end
+
+# Wrap apt command (Debian/Ubuntu/Mint)
+function apt --wraps apt --description "Wrapper for apt with post-update checks"
+    ~/.local/bin/apt-with-ps $argv
+end
+
+# Wrap apt-get command (Debian/Ubuntu/Mint)
+function apt-get --wraps apt-get --description "Wrapper for apt-get with post-update checks"
+    ~/.local/bin/apt-get-with-ps $argv
+end
+
+# Wrap pacman command (Arch/Manjaro/EndeavourOS)
+function pacman --wraps pacman --description "Wrapper for pacman with post-update checks"
+    ~/.local/bin/pacman-with-ps $argv
+end
 FISHEOF
 
-    # NEW: Install sudo wrapper for Fish to catch 'sudo zypper'
+    # NEW: Install sudo wrapper for Fish to catch 'sudo <pm>'
     FISH_SUDO_FILE="$FISH_CONFIG_DIR/sudo-handler.fish"
     log_debug "Creating sudo wrapper for Fish at $FISH_SUDO_FILE"
     cat > "$FISH_SUDO_FILE" << 'FISHEOF'
-# Wrapper to catch 'sudo zypper' and redirect it to the safe helper
-function sudo --description "Wrapper to handle sudo aliases"
+# Wrapper to catch 'sudo <pm>' and redirect it to the safe helper.
+# Cross-distro: intercepts zypper, dnf, apt, apt-get, and pacman so that
+# 'sudo <pm> <update-cmd>' goes through the corresponding ~/.local/bin/<pm>-with-ps
+# wrapper (post-update service/reboot checks + safe duplicate-RPM cleanup).
+function sudo --description "Wrapper to handle sudo aliases for package managers"
     if test (count $argv) -ge 1
-        # If the user runs 'sudo zypper ...', run 'zypper ...' directly.
-        # This triggers the 'zypper' function defined in zypper-wrapper.fish,
-        # which runs zypper-with-ps (the safe helper).
-        if test "$argv[1]" = "zypper"
-            zypper $argv[2..-1]
-            return $status
+        switch $argv[1]
+            case zypper
+                zypper $argv[2..-1]
+                return $status
+            case dnf
+                dnf $argv[2..-1]
+                return $status
+            case apt
+                apt $argv[2..-1]
+                return $status
+            case apt-get
+                apt-get $argv[2..-1]
+                return $status
+            case pacman
+                pacman $argv[2..-1]
+                return $status
         end
     end
     # For everything else, run real sudo
@@ -54796,24 +55021,33 @@ end
 FISHEOF
 
     chown -R "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.config/fish"
-    log_success "Added zypper wrapper functions to fish config"
-    log_success "Added sudo wrapper to fish config (catches 'sudo zypper')"
+    log_success "Added package-manager wrapper functions to fish config"
+    log_success "Added sudo wrapper to fish config (catches 'sudo zypper/dnf/apt/apt-get/pacman')"
 fi
 
 # Zsh configuration
 if [ -f "$SUDO_USER_HOME/.zshrc" ]; then
-    log_debug "Adding zypper alias to .zshrc"
-    # Remove old alias if it exists
+    log_debug "Adding package-manager aliases to .zshrc"
+    # Remove old aliases if they exist (only lines pointing at our -with-ps wrappers)
+    sed -i '/# Package-manager wrapper for auto service check (added by zypper-auto-helper)/d' "$SUDO_USER_HOME/.zshrc"
     sed -i '/# Zypper wrapper for auto service check/d' "$SUDO_USER_HOME/.zshrc"
     sed -i '/alias zypper=/d' "$SUDO_USER_HOME/.zshrc"
-    # Add new alias
+    sed -i '/alias dnf=.*-with-ps/d' "$SUDO_USER_HOME/.zshrc"
+    sed -i '/alias apt=.*-with-ps/d' "$SUDO_USER_HOME/.zshrc"
+    sed -i '/alias apt-get=.*-with-ps/d' "$SUDO_USER_HOME/.zshrc"
+    sed -i '/alias pacman=.*-with-ps/d' "$SUDO_USER_HOME/.zshrc"
+    # Add new aliases (cross-distro: each PM routes through its -with-ps wrapper)
     {
         echo ""
-        echo "# Zypper wrapper for auto service check (added by zypper-auto-helper)"
+        echo "# Package-manager wrapper for auto service check (added by zypper-auto-helper)"
         echo "alias zypper='$ZYPPER_WRAPPER_PATH'"
+        echo "alias dnf='$USER_BIN_DIR/dnf-with-ps'"
+        echo "alias apt='$USER_BIN_DIR/apt-with-ps'"
+        echo "alias apt-get='$USER_BIN_DIR/apt-get-with-ps'"
+        echo "alias pacman='$USER_BIN_DIR/pacman-with-ps'"
     } >> "$SUDO_USER_HOME/.zshrc"
     chown "$SUDO_USER:$SUDO_USER" "$SUDO_USER_HOME/.zshrc"
-    log_success "Added zypper alias to .zshrc"
+    log_success "Added package-manager aliases to .zshrc"
 fi
 
 log_success "Shell aliases configured. Restart your shell or run 'source ~/.bashrc' (or equivalent) to activate."
