@@ -37304,6 +37304,11 @@ __znh_create_pm_runtime() {
     local _pmrt_dest="${1:-}"
     [ -n "${_pmrt_dest}" ] || return 1
     mkdir -p "$(dirname "${_pmrt_dest}")" 2>/dev/null || true
+    # The PM runtime helper is sourced by non-root user scripts, so the
+    # directory must be world-traversable (755). Without this, mkdir can
+    # inherit a restrictive umask (often 700) and non-root users get
+    # "PM runtime helper missing" warnings.
+    chmod 755 "$(dirname "${_pmrt_dest}")" 2>/dev/null || true
     write_atomic "${_pmrt_dest}" << 'PMEOF'
 # __ZNH_PM_RUNTIME_EMBEDDED_START__
 #!/usr/bin/env bash
@@ -50929,6 +50934,7 @@ elif [[ "${1:-}" == "--deploy-pm-runtime" ]]; then
     fi
     # Fallback: sed extraction for backward compatibility.
     mkdir -p "${_PM_RT_DIR}" 2>/dev/null || true
+    chmod 755 "${_PM_RT_DIR}" 2>/dev/null || true
     if sed -n '/^# __ZNH_PM_RUNTIME_EMBEDDED_START__$/,/^# __ZNH_PM_RUNTIME_EMBEDDED_END__$/p' "$0" \
          | sed '1d;$d' > "${_PM_RT_PATH}.tmp.$$" 2>/dev/null; then
         if [ -s "${_PM_RT_PATH}.tmp.$$" ]; then
@@ -51637,6 +51643,11 @@ log_success "Old user services disabled and files removed"
 log_info ">>> Creating shared package-manager runtime helper: ${PM_RUNTIME_HELPER_PATH}"
 update_status "Creating shared package-manager helper..."
 execute_guarded "Ensure shared PM helper directory exists" mkdir -p "${PM_RUNTIME_HELPER_DIR}"
+# The PM runtime helper is sourced by non-root user scripts (zypper-with-ps,
+# zypper-run-install, etc.), so the directory must be world-traversable (755).
+# Without this, mkdir inherits restrictive umask defaults (often 700) and
+# non-root users get "PM runtime helper missing" warnings.
+execute_guarded "Set shared PM helper directory permissions (755)" chmod 755 "${PM_RUNTIME_HELPER_DIR}" || true
 write_atomic "${PM_RUNTIME_HELPER_PATH}" << 'EOF'
 # __ZNH_PM_RUNTIME_EMBEDDED_START__
 #!/usr/bin/env bash
