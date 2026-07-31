@@ -64,6 +64,7 @@ If you like opinionated, **safety‑first** automation – with clear logs and a
 - [Rocket conflict quick flow](#rocket-conflict-quick-flow)
 - [Downloader prefetch error classification (`error:solver:1` / libdnf5 sandbox)](#downloader-prefetch-error-classification)
 - [Boot Entry Scrub (scrub-ghost)](#scrub-ghost)
+- [Btrfs qgroups (Snapper Manager)](#qgroups)
 - [Configuration file (/etc/zypper-auto.conf)](#configuration)
 - [Verification low-impact mode](#cfg-verify-low-impact)
 - [Adaptive Settings drawer (cross-distro)](#cfg-adaptive-settings-drawer)
@@ -341,6 +342,13 @@ zypper-auto-helper snapper auto     # Enable common snapper timers (timeline + c
 # It also shows a text suffix: (disabled|partial|enabled) so it’s readable even when colors are off.
 # snapper auto-off disables the same snapper timers and also disables optional option-5 maintenance timers (btrfsmaintenance + fstrim) when present.
 
+# Btrfs qgroups (Snapper snapshot size accounting)
+zypper-auto-helper snapper qgroup-status    # Show btrfs qgroup (quota) state + snapper QGROUP value
+sudo zypper-auto-helper snapper qgroup-enable   # Enable btrfs qgroups + set snapper QGROUP="1/0"
+sudo zypper-auto-helper snapper qgroup-disable  # Disable btrfs qgroups; clear snapper QGROUP (recommended default)
+# The installer disables qgroups by default (they slow snapper cleanup/list and can hang btrfs-cleaner).
+# Toggle from the dashboard Snapper Manager -> "Btrfs qgroups" tile (Enable/Disable, phrase QGROUPS).
+
 # Boot Entry Scrub (scrub-ghost)
 # NOTE: run --dry-run first. This tool touches boot menu entries (high-stakes).
 zypper-auto-helper scrub-ghost --dry-run
@@ -536,6 +544,35 @@ Some actions require typing a phrase before the WebUI will run them:
 - Pinning: entries listed in `ENTRIES_DIR/.scrub-ghost-pinned` are never moved/deleted.
 - Immutable/transactional systems: scrub-ghost can attempt temporary remount `rw` while applying changes; disable that behavior with `--no-remount-rw`.
 
+<a id="qgroups"></a>
+### 🧮 Btrfs qgroups (Snapper Manager)
+
+Btrfs **quota groups (qgroups)** track per-subvolume / per-snapshot space usage so `snapper list` can show a "Used" size column. openSUSE snapper enables them by default (`QGROUP="1/0"`).
+
+**Why qgroups are OFF by default on install:**
+- qgroup accounting is expensive on snapshot-heavy btrfs roots: every snapshot create/delete forces the kernel to recompute quota references for each extent.
+- This drives `btrfs-cleaner` to high CPU and can **hang `snapper list`/cleanup** (the qgroup data also frequently goes inconsistent, requiring a slow `btrfs quota rescan`).
+- Disabling qgroups keeps snapper rollback/cleanup fast and responsive. The **only** thing lost is the per-snapshot "Used" size column in `snapper list` — snapshots, cleanup, and rollback all work fully without qgroups.
+
+**Install behavior:** on every install (fresh + upgrade) the helper disables qgroups (`btrfs quota disable /`) and clears `QGROUP=` in `/etc/snapper/configs/root`. The pre-install qgroup state is recorded in `/var/lib/zypper-auto/qgroups-preinstall.state` so `--uninstall-zypper` can restore it.
+
+**Toggle from the dashboard:** the Snapper Manager card has a **Btrfs qgroups (quota)** tile showing the live state (`enabled` / `disabled (recommended)` / `unsupported`) with **Enable** / **Disable** buttons and an inline "Why is this OFF by default?" explanation. Toggling requires typing the confirmation phrase `QGROUPS`.
+
+**CLI equivalent:**
+```bash path=null start=null
+zypper-auto-helper snapper qgroup-status    # show btrfs qgroup state
+sudo zypper-auto-helper snapper qgroup-enable   # enable qgroups + snapper QGROUP
+sudo zypper-auto-helper snapper qgroup-disable  # disable qgroups; clear snapper QGROUP
+```
+
+Manual (without the helper):
+```bash path=null start=null
+sudo btrfs quota disable /   # disable
+sudo sed -i 's|^QGROUP=.*|QGROUP=""|' /etc/snapper/configs/root
+sudo btrfs quota enable /    # re-enable
+sudo sed -i 's|^QGROUP=.*|QGROUP="1/0"|' /etc/snapper/configs/root
+```
+
 <a id="configuration"></a>
 ### Configuration File: `/etc/zypper-auto.conf`
 
@@ -560,6 +597,7 @@ Key options include:
 - [Snapper safety (retention optimizer caps)](#cfg-snapper-safety)
 - [Snapper cleanup safety](#cfg-snapper-cleanup-safety)
 - [Snapper cleanup Deep Clean](#cfg-snapper-deep-clean)
+- [Btrfs qgroups (Snapper snapshot size accounting)](#cfg-btrfs-qgroups)
 - [System Deep Scrub (Option 4 extras)](#cfg-system-deep-scrub)
 - [System Health Automator (Option 5 extras)](#cfg-system-health-automator)
 - [Boot menu hygiene](#cfg-boot-menu-hygiene)
@@ -736,6 +774,22 @@ A new low-impact background mode keeps the WebUI HTTP API + sync/perf workers al
     `true`).
   - When btrfs is available and cleanup reclaimed >~1GB, the helper prints a **tip**
     suggesting a btrfs balance command (it does not run balance automatically).
+
+
+<a id="cfg-btrfs-qgroups"></a>
+#### Btrfs qgroups (Snapper snapshot size accounting)
+
+- **Btrfs qgroups (Snapper snapshot size accounting)**
+  - `BTRFS_QGROUPS_ENABLED` – `true` / `false` (default: `false`). Reflects whether
+    Btrfs quota groups (qgroups) are left enabled for per-snapshot size accounting
+    in `snapper list`. Defaults to `false` because qgroups make snapper cleanup/list
+    slow and can hang `btrfs-cleaner`. The dashboard Snapper Manager can toggle this
+    (Enable/Disable, confirmation phrase `QGROUPS`); the installer disables qgroups
+    on every install and records the pre-install state so `--uninstall-zypper` can
+    restore it. Only the per-snapshot "Used" size column is lost when qgroups are off;
+    snapshots, cleanup, and rollback all work fully without qgroups.
+  - CLI: `zypper-auto-helper snapper qgroup-status|qgroup-enable|qgroup-disable`.
+  - See also: [Btrfs qgroups (Snapper Manager)](#qgroups).
 
 
 <a id="cfg-system-deep-scrub"></a>

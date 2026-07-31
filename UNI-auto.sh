@@ -4411,13 +4411,103 @@ __znh_write_dashboard_schema_json() {
     "KERNEL_FAMILY_PURGE_TARGETS": {"type": "string", "max_len": 400, "default": "", "requires": {"kernel_purge": true}},
     "KERNEL_FAMILY_PURGE_CONFIRM": {"type": "bool", "default": "true", "requires": {"kernel_purge": true}},
     "KERNEL_FAMILY_PURGE_DRY_RUN": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
-    "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900", "requires": {"kernel_purge": true}}
+    "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900", "requires": {"kernel_purge": true}},
+
+    "BTRFS_QGROUPS_ENABLED": {"type": "bool", "default": "false", "requires": {"snapper": true}}
   }
 }
 EOF
 
     chmod 600 "${out_path}" 2>/dev/null || true
     chown root:root "${out_path}" 2>/dev/null || true
+    return 0
+}
+
+# --- Btrfs qgroups: install-time default (OFF) + pre-install state capture ---
+# qgroups make snapper cleanup/list slow and can hang btrfs-cleaner, so the
+# installer disables them by default on every install (fresh + upgrade). The
+# pre-install state is recorded so --uninstall-zypper can restore it. Best-effort
+# and fully gated: only acts on a btrfs root with the btrfs binary and a snapper
+# root config. The dashboard Snapper Manager toggle can re-enable qgroups anytime.
+__znh_snapper_qgroup_install_default() {
+    local state_dir="/var/lib/zypper-auto"
+    local state_file="${state_dir}/qgroups-preinstall.state"
+    local cfg="/etc/snapper/configs/root"
+    local fst
+
+    # Gate: btrfs root
+    fst="$(findmnt -n -o FSTYPE / 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ "${fst}" != "btrfs" ]; then
+        log_info "[qgroups] Root is '${fst:-unknown}' (not btrfs); skipping qgroup default-off."
+        return 0
+    fi
+    # Gate: btrfs binary
+    if ! command -v btrfs >/dev/null 2>&1; then
+        log_info "[qgroups] 'btrfs' command not installed; skipping qgroup default-off."
+        return 0
+    fi
+    # Gate: snapper root config
+    if [ ! -f "${cfg}" ]; then
+        log_info "[qgroups] ${cfg} not present; skipping qgroup default-off (snapper not configured)."
+        return 0
+    fi
+
+    # Capture pre-install state (enabled/disabled + snapper QGROUP value).
+    local pre_state val
+    pre_state="unknown"
+    if btrfs qgroup show / >/dev/null 2>&1; then
+        pre_state="enabled"
+    else
+        # `btrfs qgroup show /` exits non-zero with "quotas not enabled" when disabled.
+        pre_state="disabled"
+    fi
+    val=""
+    if grep -qE '^QGROUP=' "${cfg}" 2>/dev/null; then
+        val="$(grep -E '^QGROUP=' "${cfg}" 2>/dev/null | head -n 1 || true)"
+        val="${val#*=}"
+        val="${val%\"}"
+        val="${val#\"}"
+    fi
+
+    mkdir -p "${state_dir}" 2>/dev/null || true
+    write_atomic "${state_file}" <<EOF 2>/dev/null || true
+pre_state="${pre_state}"
+pre_qgroup="${val}"
+captured_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date 2>/dev/null || echo unknown)"
+EOF
+    chmod 600 "${state_file}" 2>/dev/null || true
+    log_info "[qgroups] Pre-install state captured: ${pre_state} (snapper QGROUP=\"${val}\") -> ${state_file}"
+
+    # Apply default-off: disable btrfs quotas (only if currently enabled).
+    if [ "${pre_state}" = "enabled" ]; then
+        log_info "[qgroups] Disabling btrfs qgroups (quota) on / (install default-off)..."
+        if btrfs quota disable / >/dev/null 2>&1; then
+            log_success "[qgroups] btrfs qgroups disabled on install (recommended)."
+        else
+            log_warn "[qgroups] btrfs quota disable / failed (non-fatal; qgroups may remain enabled)."
+        fi
+    else
+        log_info "[qgroups] btrfs qgroups already disabled; no quota change needed."
+    fi
+
+    # Clear snapper QGROUP= so snapper does not re-enable qgroup accounting.
+    if grep -qE '^QGROUP=' "${cfg}" 2>/dev/null; then
+        local ts backup_dir backup tmp
+        ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo nodate)"
+        backup_dir="/var/backups/zypper-auto"
+        mkdir -p "${backup_dir}" 2>/dev/null || true
+        backup="${backup_dir}/snapper-root-qgroup-install-${ts}.bak"
+        cp -a -- "${cfg}" "${backup}" 2>/dev/null || true
+        chmod 600 "${backup}" 2>/dev/null || true
+        tmp="$(mktemp 2>/dev/null || echo /tmp/.znh_qgroup_install.$$)"
+        sed -E 's|^QGROUP=.*|QGROUP=""|' "${cfg}" >"${tmp}" 2>/dev/null
+        if [ -s "${tmp}" ]; then
+            cat -- "${tmp}" >"${cfg}" 2>/dev/null || true
+            log_info "[qgroups] Cleared QGROUP= in ${cfg} (was \"${val}\")."
+        fi
+        rm -f -- "${tmp}" 2>/dev/null || true
+    fi
+
     return 0
 }
 
@@ -10965,6 +11055,32 @@ BTRFS_MAINTENANCE_TUNE_ENABLED=false
 BTRFS_MAINTENANCE_TUNE_CONFIRM=true
 
 # ---------------------------------------------------------------------
+# Btrfs quota groups (qgroups) — Snapper snapshot size accounting
+# ---------------------------------------------------------------------
+
+# BTRFS_QGROUPS_ENABLED
+# Btrfs quota groups track per-subvolume/per-snapshot space usage. openSUSE
+# snapper enables them by default (QGROUP="1/0") so `snapper list` can show a
+# "Used" size column per snapshot.
+#
+# WHY THIS DEFAULTS TO false:
+# qgroup accounting is expensive on snapshot-heavy btrfs roots. Every snapshot
+# create/delete forces the kernel to recompute quota references for each extent,
+# which drives btrfs-cleaner to high CPU and can hang `snapper list`/cleanup
+# (the qgroup data also frequently goes inconsistent, requiring a slow rescan).
+# Disabling qgroups keeps snapper rollback/cleanup fast and responsive. The only
+# thing lost is the per-snapshot "Used" size column in `snapper list` (snapshots,
+# cleanup, and rollback all work fully without qgroups).
+#
+# The installer disables qgroups on every install (and records the pre-install
+# state so --uninstall-zypper can restore it). You can re-enable qgroups at any
+# time from the dashboard Snapper Manager -> "Btrfs qgroups" toggle, or via:
+#   sudo btrfs quota enable /   && sudo sed -i 's|^QGROUP=.*|QGROUP="1/0"|' /etc/snapper/configs/root
+# Default: false (disabled).
+# shellcheck disable=SC2034  # config indicator consumed by the dashboard API + /etc/zypper-auto.conf (schema-driven)
+BTRFS_QGROUPS_ENABLED=false
+
+# ---------------------------------------------------------------------
 # Boot menu hygiene: auto-clean old kernel entries (systemd-boot / BLS)
 # ---------------------------------------------------------------------
 
@@ -12290,6 +12406,9 @@ EOF
                 KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS)
                     log_info "  - KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS: best-effort timeout for the family purge removal run (seconds)."
                     ;;
+                BTRFS_QGROUPS_ENABLED)
+                    log_info "  - BTRFS_QGROUPS_ENABLED: when true, Btrfs quota groups (qgroups) are left enabled for per-snapshot size accounting. Defaults to false because qgroups make snapper cleanup/list slow and can hang btrfs-cleaner; the dashboard Snapper Manager can toggle this."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -12561,6 +12680,10 @@ EOF
                     ;;
                 KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS)
                     KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS=900
+                    ;;
+                BTRFS_QGROUPS_ENABLED)
+                    # shellcheck disable=SC2034  # consumed by the dashboard API + /etc/zypper-auto.conf (schema-driven)
+                    BTRFS_QGROUPS_ENABLED="false"
                     ;;
             esac
         done
@@ -14999,6 +15122,24 @@ generate_dashboard() {
             <button class="pill" type="button" id="snapper-disable-cleanup-btn" style="border-color: rgba(239,68,68,0.30);">Disable cleanup</button>
             <button class="pill" type="button" id="snapper-disable-boot-btn" style="border-color: rgba(239,68,68,0.30);">Disable boot</button>
           </div>
+        </div>
+
+        <div class="stat-box" id="snapper-qgroup-box">
+          <span class="stat-label">Btrfs qgroups (quota)</span>
+          <div class="feat-badge" id="snapper-qgroup-badge" title="Btrfs quota groups (qgroups) state" style="margin-top:8px;">
+            <span class="feat-dot" id="snapper-qgroup-dot" style="color: rgba(148,163,184,0.9);">●</span>
+            qgroups: <strong id="snapper-qgroup-val">(loading)</strong>
+          </div>
+          <div style="margin-top:10px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="pill" type="button" id="snapper-qgroup-enable-btn">Enable</button>
+            <button class="pill" type="button" id="snapper-qgroup-disable-btn" style="border-color: rgba(239,68,68,0.30);">Disable</button>
+          </div>
+          <details style="margin-top:10px;">
+            <summary style="cursor:pointer; color: var(--muted); font-size:0.85rem;">Why is this OFF by default?</summary>
+            <div style="margin-top:8px; font-size:0.85rem; color: var(--muted); line-height:1.45;">
+              Btrfs qgroups track per-snapshot space usage so <code>snapper list</code> can show a "Used" size column. They are <strong>disabled by default on install</strong> because qgroup accounting is expensive on snapshot-heavy btrfs roots: every snapshot create/delete forces the kernel to recompute quota references, which drives <code>btrfs-cleaner</code> to high CPU and can hang <code>snapper list</code>/cleanup (the qgroup data also frequently goes inconsistent, requiring a slow rescan). Disabling qgroups keeps snapper rollback/cleanup fast and responsive. The only thing lost is the per-snapshot "Used" size column — snapshots, cleanup, and rollback all work fully without qgroups. You can re-enable qgroups here at any time; a background qgroup rescan may start.
+            </div>
+          </details>
         </div>
       </div>
 
@@ -24746,6 +24887,58 @@ generate_dashboard() {
         });
     }
     window.znhSnapperRefreshTimerBadges = znhSnapperRefreshTimerBadges;
+
+    function znhQgroupRefreshUI() {
+        // Reflect live Btrfs qgroup (quota) state for the Snapper Manager tile.
+        // Reads /api/snapper/qgroups (which runs: snapper qgroup-status).
+        return _api('/api/snapper/qgroups', { method: 'GET' }).then(function(r) {
+            var supported = false;
+            var enabled = false;
+            try {
+                supported = !!(r && r.supported);
+                enabled = !!(r && r.enabled);
+            } catch (e0) {}
+
+            var label = '(loading)';
+            var dotColor = 'rgba(148,163,184,0.90)';
+            var valColor = 'rgba(148,163,184,0.92)';
+
+            if (!supported) {
+                label = 'unsupported';
+            } else if (enabled) {
+                // Enabled = caution: qgroups can slow snapper cleanup/list.
+                label = 'enabled';
+                dotColor = 'rgba(250,204,21,0.90)';
+                valColor = 'rgba(250,204,21,0.92)';
+            } else {
+                // Disabled = recommended (fast snapper).
+                label = 'disabled (recommended)';
+                dotColor = 'rgba(34,197,94,0.90)';
+                valColor = 'rgba(34,197,94,0.92)';
+            }
+
+            var d = null, v = null;
+            try { d = document.getElementById('snapper-qgroup-dot'); } catch (e1) { d = null; }
+            try { v = document.getElementById('snapper-qgroup-val'); } catch (e2) { v = null; }
+            if (d) { try { d.style.color = dotColor; } catch (e3) {} }
+            if (v) { try { v.textContent = label; v.style.color = valColor; } catch (e4) {} }
+
+            // Disable the toggle that matches the current state so users can't
+            // click "Enable" when already enabled (and vice versa).
+            var btnOn = document.getElementById('snapper-qgroup-enable-btn');
+            var btnOff = document.getElementById('snapper-qgroup-disable-btn');
+            try {
+                if (btnOn) btnOn.disabled = !supported || enabled;
+                if (btnOff) btnOff.disabled = !supported || !enabled;
+            } catch (e5) {}
+
+            return r;
+        }).catch(function() {
+            return null;
+        });
+    }
+    window.znhQgroupRefreshUI = znhQgroupRefreshUI;
+
     var _znhSnapperCapabilityState = null;
 
     function _znhCapReasonList(v) {
@@ -24885,7 +25078,9 @@ generate_dashboard() {
             '#snapper-enable-boot-btn',
             '#snapper-disable-timeline-btn',
             '#snapper-disable-cleanup-btn',
-            '#snapper-disable-boot-btn'
+            '#snapper-disable-boot-btn',
+            '#snapper-qgroup-enable-btn',
+            '#snapper-qgroup-disable-btn'
         ];
         var snapTitle = snapperSupported ? '' : ('Disabled: ' + snapReasons.join('; '));
         _znhCapDisableSelectors(snapperActionSelectors, !snapperSupported, snapTitle);
@@ -25264,6 +25459,19 @@ generate_dashboard() {
             snapperRun('timer-disable-boot', {}, 'timer-disable-boot');
         });
 
+        var bQgOn = document.getElementById('snapper-qgroup-enable-btn');
+        var bQgOff = document.getElementById('snapper-qgroup-disable-btn');
+        if (bQgOn) bQgOn.addEventListener('click', function() {
+            Promise.resolve(snapperRun('qgroup-enable', {}, 'qgroup-enable')).then(function() {
+                try { if (typeof znhQgroupRefreshUI === 'function') znhQgroupRefreshUI(); } catch (eQg) {}
+            });
+        });
+        if (bQgOff) bQgOff.addEventListener('click', function() {
+            Promise.resolve(snapperRun('qgroup-disable', {}, 'qgroup-disable')).then(function() {
+                try { if (typeof znhQgroupRefreshUI === 'function') znhQgroupRefreshUI(); } catch (eQg2) {}
+            });
+        });
+
         // Option 4 card remains compact; only mode selector is present here.
         // Customization controls are rendered/bound inside the cleanup confirmation modal.
         var modeSel = document.getElementById('snapper-cleanup-mode');
@@ -25285,6 +25493,11 @@ generate_dashboard() {
                 znhSnapperRefreshTimerBadges();
             }
         } catch (e4) {}
+        try {
+            if (typeof znhQgroupRefreshUI === 'function') {
+                znhQgroupRefreshUI();
+            }
+        } catch (eQg3) {}
         try {
             if (typeof _znhSnapperTimerEnsurePassiveSync === 'function') {
                 _znhSnapperTimerEnsurePassiveSync();
@@ -46665,6 +46878,132 @@ run_snapper_menu_only() {
         return 0
     }
 
+    # --- Btrfs qgroups (quota groups) management ---
+    # qgroups track per-snapshot space usage but make snapper cleanup/list slow
+    # and can hang btrfs-cleaner. The installer disables them by default; these
+    # helpers power the dashboard Snapper Manager "Btrfs qgroups" toggle and the
+    # `snapper qgroup-status|qgroup-enable|qgroup-disable` subcommands.
+    __znh_btrfs_qgroup_supported() {
+        # Returns 0 (true) when qgroup management is applicable on this host:
+        # btrfs root + btrfs binary + a snapper root config.
+        if [ "${ZNH_BTRFS_ROOT:-0}" -ne 1 ] 2>/dev/null; then
+            local fst
+            fst="$(findmnt -n -o FSTYPE / 2>/dev/null | tr -d '[:space:]' || true)"
+            [ "${fst}" = "btrfs" ] || return 1
+        fi
+        command -v btrfs >/dev/null 2>&1 || return 1
+        [ -f /etc/snapper/configs/root ] || return 1
+        return 0
+    }
+
+    __znh_btrfs_qgroup_snapper_val() {
+        # Prints the raw QGROUP= value from /etc/snapper/configs/root (or empty).
+        local cfg="/etc/snapper/configs/root"
+        [ -r "${cfg}" ] || { printf '%s' ""; return 0; }
+        local line val
+        line="$(grep -E '^QGROUP=' "${cfg}" 2>/dev/null | head -n 1 || true)"
+        [ -n "${line}" ] || { printf '%s' ""; return 0; }
+        val="${line#*=}"
+        val="${val%\"}"
+        val="${val#\"}"
+        printf '%s' "${val}"
+    }
+
+    __znh_btrfs_qgroup_set_snapper() {
+        # Usage: __znh_btrfs_qgroup_set_snapper "1/0"  or  ""
+        # Rewrites the QGROUP= line in /etc/snapper/configs/root only when the
+        # key already exists (never injects a new key into a foreign config).
+        local newval="$1"
+        local cfg="/etc/snapper/configs/root"
+        [ -w "${cfg}" ] || return 1
+        grep -qE '^QGROUP=' "${cfg}" 2>/dev/null || return 0
+        local ts backup_dir backup tmp
+        ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo 'nodate')"
+        backup_dir="/var/backups/zypper-auto"
+        mkdir -p "${backup_dir}" 2>/dev/null || true
+        backup="${backup_dir}/snapper-root-qgroup-${ts}.bak"
+        cp -a -- "${cfg}" "${backup}" 2>/dev/null || true
+        chmod 600 "${backup}" 2>/dev/null || true
+        tmp="$(mktemp 2>/dev/null || echo /tmp/.znh_qgroup.$$)"
+        if [ -z "${newval}" ]; then
+            sed -E "s|^QGROUP=.*|QGROUP=\"\"|" "${cfg}" >"${tmp}" 2>/dev/null
+        else
+            sed -E "s|^QGROUP=.*|QGROUP=\"${newval}\"|" "${cfg}" >"${tmp}" 2>/dev/null
+        fi
+        if [ -s "${tmp}" ]; then
+            cat -- "${tmp}" >"${cfg}" 2>/dev/null || true
+        fi
+        rm -f -- "${tmp}" 2>/dev/null || true
+        return 0
+    }
+
+    __znh_btrfs_qgroup_status() {
+        # Prints: "enabled" or "disabled" (or "unsupported"), plus the snapper
+        # QGROUP value + a short human report. Used by the dashboard
+        # /api/snapper/qgroups endpoint and the `snapper qgroup-status` CLI subcommand.
+        if ! __znh_btrfs_qgroup_supported; then
+            echo "unsupported"
+            echo "Btrfs qgroups management requires a btrfs root, the 'btrfs' command, and /etc/snapper/configs/root."
+            return 0
+        fi
+        local out rc state
+        out="$(btrfs qgroup show / 2>&1)"
+        rc=$?
+        if printf '%s' "${out}" | grep -qiE 'quotas not enabled|quota not enabled'; then
+            state="disabled"
+        elif [ "${rc}" -eq 0 ] 2>/dev/null; then
+            state="enabled"
+        else
+            state="enabled"
+        fi
+        local snap_q
+        snap_q="$(__znh_btrfs_qgroup_snapper_val)"
+        echo "${state}"
+        echo "snapper QGROUP=\"${snap_q}\""
+        if [ "${state}" = "enabled" ]; then
+            echo "Btrfs qgroups are ENABLED. snapper list shows per-snapshot sizes, but cleanup/list may be slow and btrfs-cleaner can thrash."
+        else
+            echo "Btrfs qgroups are DISABLED (recommended). snapper rollback/cleanup run fast; the per-snapshot \"Used\" size column is unavailable."
+        fi
+        return 0
+    }
+
+    __znh_btrfs_qgroup_enable() {
+        if ! __znh_btrfs_qgroup_supported; then
+            echo "Btrfs qgroups management is not supported on this system." >&2
+            return 1
+        fi
+        echo "Enabling Btrfs qgroups (quota) on / ..."
+        local rc
+        btrfs quota enable / 2>&1
+        rc=$?
+        if [ "${rc}" -ne 0 ] 2>/dev/null; then
+            echo "btrfs quota enable / failed (rc=${rc})." >&2
+            return "${rc}"
+        fi
+        __znh_btrfs_qgroup_set_snapper "1/0" || true
+        echo "Btrfs qgroups ENABLED. A background qgroup rescan may start; snapper list will show per-snapshot sizes."
+        return 0
+    }
+
+    __znh_btrfs_qgroup_disable() {
+        if ! __znh_btrfs_qgroup_supported; then
+            echo "Btrfs qgroups management is not supported on this system." >&2
+            return 1
+        fi
+        echo "Disabling Btrfs qgroups (quota) on / ..."
+        local rc
+        btrfs quota disable / 2>&1
+        rc=$?
+        if [ "${rc}" -ne 0 ] 2>/dev/null; then
+            echo "btrfs quota disable / failed (rc=${rc})." >&2
+            return "${rc}"
+        fi
+        __znh_btrfs_qgroup_set_snapper "" || true
+        echo "Btrfs qgroups DISABLED. snapper cleanup/list will be faster; btrfs-cleaner thrash should stop."
+        return 0
+    }
+
     # Non-interactive subcommands:
     #   zypper-auto-helper snapper status
     #   zypper-auto-helper snapper list [N]
@@ -46675,6 +47014,9 @@ run_snapper_menu_only() {
     #   zypper-auto-helper snapper auto-off (disable timers)
     #   zypper-auto-helper snapper timer-enable <timeline|cleanup|boot>
     #   zypper-auto-helper snapper timer-disable <timeline|cleanup|boot>
+    #   zypper-auto-helper snapper qgroup-status   (show btrfs qgroup state)
+    #   zypper-auto-helper snapper qgroup-enable   (enable btrfs qgroups + snapper QGROUP)
+    #   zypper-auto-helper snapper qgroup-disable  (disable btrfs qgroups; clear snapper QGROUP)
     local sub="${1:-}"
     case "${sub}" in
         status)
@@ -46732,6 +47074,26 @@ run_snapper_menu_only() {
         timer-disable)
             shift
             __znh_snapper_single_timer disable "${1:-}"
+            local rc=$?
+            set -e
+            return $rc
+            ;;
+        qgroup-status)
+            shift
+            __znh_btrfs_qgroup_status
+            set -e
+            return 0
+            ;;
+        qgroup-enable)
+            shift
+            __znh_btrfs_qgroup_enable
+            local rc=$?
+            set -e
+            return $rc
+            ;;
+        qgroup-disable)
+            shift
+            __znh_btrfs_qgroup_disable
             local rc=$?
             set -e
             return $rc
@@ -49349,6 +49711,7 @@ run_uninstall_helper_only() {
         echo "  - Dashboard API state + history DB: /var/lib/zypper-auto/dashboard-history.sqlite3 (and -wal/-shm)" | tee -a "${LOG_FILE}"
         echo "    plus: /var/lib/zypper-auto/dashboard-api.* /var/lib/zypper-auto/dashboard-schema.json" | tee -a "${LOG_FILE}"
         echo "    plus: /var/lib/zypper-auto/distro-upgrade.json (distro-upgrade detection state for the WebUI)" | tee -a "${LOG_FILE}"
+        echo "    plus: /var/lib/zypper-auto/qgroups-preinstall.state (Btrfs qgroup pre-install state; qgroups restored to pre-install state)" | tee -a "${LOG_FILE}"
         echo "  - User units: $SUDO_USER_HOME/.config/systemd/user/zypper-notify-user.service/timer" | tee -a "${LOG_FILE}"
         echo "  - Helper scripts: $SUDO_USER_HOME/.local/bin/zypper-notify-updater.py, zypper-run-install," | tee -a "${LOG_FILE}"
         echo "    zypper-with-ps, zypper-view-changes, zypper-soar-install-helper" | tee -a "${LOG_FILE}"
@@ -49551,6 +49914,45 @@ run_uninstall_helper_only() {
         fi
     fi
 
+    # 5b. Restore pre-install Btrfs qgroup state (best-effort).
+    # The installer disabled qgroups by default and recorded the pre-install
+    # state; on uninstall we restore it so the install->uninstall cycle is
+    # reversible. We only re-enable when the installer actually found qgroups
+    # ENABLED pre-install; if the state file is absent we never guess.
+    local _qg_state_file="/var/lib/zypper-auto/qgroups-preinstall.state"
+    if [ -f "${_qg_state_file}" ]; then
+        local _qg_pre_state _qg_pre_q
+        _qg_pre_state=""
+        _qg_pre_q=""
+        # shellcheck disable=SC1090
+        . "${_qg_state_file}" 2>/dev/null || true
+        _qg_pre_state="${pre_state:-}"
+        _qg_pre_q="${pre_qgroup:-}"
+        if [ "${_qg_pre_state}" = "enabled" ] && command -v btrfs >/dev/null 2>&1 && [ -f /etc/snapper/configs/root ]; then
+            log_info "[uninstall] Restoring pre-install Btrfs qgroups state: enabled"
+            if btrfs quota enable / >/dev/null 2>&1; then
+                log_success "[uninstall] Btrfs qgroups re-enabled (restored to pre-install state)."
+                if grep -qE '^QGROUP=' /etc/snapper/configs/root 2>/dev/null; then
+                    local _qg_cfg _qg_tmp
+                    _qg_cfg=/etc/snapper/configs/root
+                    _qg_tmp="$(mktemp 2>/dev/null || echo /tmp/.znh_qg_uninst.$$)"
+                    sed -E 's|^QGROUP=.*|QGROUP="1/0"|' "${_qg_cfg}" >"${_qg_tmp}" 2>/dev/null || true
+                    if [ -s "${_qg_tmp}" ]; then
+                        cat -- "${_qg_tmp}" >"${_qg_cfg}" 2>/dev/null || true
+                    fi
+                    rm -f -- "${_qg_tmp}" 2>/dev/null || true
+                fi
+                log_warn "[uninstall] qgroups re-enabled: this can slow snapper cleanup/list. Disable again with: sudo btrfs quota disable /"
+            else
+                log_warn "[uninstall] btrfs quota enable / failed (non-fatal; qgroups left in current state)."
+            fi
+        else
+            log_info "[uninstall] Pre-install qgroups were disabled (or state unclear); leaving qgroups disabled. Re-enable manually with: sudo btrfs quota enable /"
+        fi
+    else
+        log_info "[uninstall] No qgroups pre-install state file; leaving Btrfs qgroups in current state."
+    fi
+
     # 6. Remove logs and caches
     if [ "${UNINSTALL_KEEP_LOGS:-0}" -eq 1 ]; then
         log_info "Leaving all logs under $LOG_DIR intact (--keep-logs requested)."
@@ -49603,6 +50005,7 @@ run_uninstall_helper_only() {
                 /var/lib/zypper-auto/self-update-state.json \
                 /var/lib/zypper-auto/snapper-auto-disabled.intent \
                 /var/lib/zypper-auto/distro-upgrade.json \
+                /var/lib/zypper-auto/qgroups-preinstall.state \
                 /var/lib/zypper-auto/dashboard-history.sqlite3 \
                 /var/lib/zypper-auto/dashboard-history.sqlite3-wal \
                 /var/lib/zypper-auto/dashboard-history.sqlite3-shm \
@@ -50383,7 +50786,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "Commands:"
     echo "  install                 Install or update the zypper auto-updater system (default)"
     echo "  debug                   Open interactive debug/diagnostics tools menu"
-    echo "  snapper                 Open Snapper tools menu (status/list/create/cleanup/timers)"
+    echo "  snapper                 Open Snapper tools menu (status/list/create/cleanup/timers/qgroups)"
     echo "  scrub-ghost             Boot entry scrubber (embedded scrub.sh; supports --dry-run/--force/--list-backups/etc.)"
     echo "  --verify                Run verification and auto-repair checks"
     echo "  --repair                Same as --verify (alias)"
@@ -59309,6 +59712,8 @@ def _compute_system_capabilities() -> dict:
         "kernel_purge": False,
         "kernel_purge_missing_reasons": [],
         "boot_entry_cleanup": False,
+        "btrfs_qgroups": False,
+        "qgroups_missing_reasons": [],
         "os_id": "",
         "os_id_like": "",
     }
@@ -59406,6 +59811,23 @@ def _compute_system_capabilities() -> dict:
         out["snapper_root_config_present"] = bool(os.path.isfile("/etc/snapper/configs/root"))
         snapper_supported = bool(out["btrfs_root"] and out["snapper_installed"] and out["snapper_root_config_present"])
         out["snapper"] = snapper_supported
+        # Btrfs qgroup management capability (btrfs root + btrfs binary + snapper root config).
+        try:
+            btrfs_cmd = bool(shutil.which("btrfs"))
+            qg_supported = bool(out["btrfs_root"] and btrfs_cmd and out["snapper_installed"] and out["snapper_root_config_present"])
+            out["btrfs_qgroups"] = qg_supported
+            qg_reasons = []
+            if not out["btrfs_root"]:
+                qg_reasons.append(f"Root filesystem is '{out['root_fstype']}' (requires btrfs)")
+            if not btrfs_cmd:
+                qg_reasons.append("btrfs command is not installed")
+            if not out["snapper_installed"]:
+                qg_reasons.append("snapper command is not installed")
+            if not out["snapper_root_config_present"]:
+                qg_reasons.append("Missing /etc/snapper/configs/root")
+            out["qgroups_missing_reasons"] = qg_reasons
+        except Exception:
+            pass
         reasons = []
         if not out["btrfs_root"]:
             reasons.append(f"Root filesystem is '{out['root_fstype']}' (requires btrfs)")
@@ -64287,6 +64709,36 @@ class Handler(BaseHTTPRequestHandler):
             }, origin)
 
         # --- Snapper (dashboard) ---
+        if path == "/api/snapper/qgroups":
+            # Btrfs qgroup (quota) state for the Snapper Manager "Btrfs qgroups"
+            # tile. Read-only; the toggle uses /api/snapper/run with qgroup-enable
+            # / qgroup-disable actions (typed confirmation QGROUPS).
+            qg_cmd = [HELPER_BIN, "snapper", "qgroup-status"]
+            qg_rc, qg_out = _run_cmd(qg_cmd, timeout_s=20, log=getattr(self.server, "_znh_log", None))
+            qg_text = str(qg_out or "")
+            qg_lines = [ln for ln in qg_text.splitlines() if str(ln).strip()]
+            qg_state = "unknown"
+            if qg_lines:
+                qg_state = str(qg_lines[0]).strip().lower()
+            snapper_qgroup = ""
+            try:
+                for _ln in qg_lines:
+                    if str(_ln).startswith("snapper QGROUP="):
+                        snapper_qgroup = str(_ln).split("=", 1)[1].strip().strip('"')
+                        break
+            except Exception:
+                snapper_qgroup = ""
+            supported = qg_state != "unsupported"
+            enabled = qg_state == "enabled"
+            return _json_response(self, 200, {
+                "ok": True,
+                "supported": bool(supported),
+                "enabled": bool(enabled),
+                "state": qg_state,
+                "snapper_qgroup": snapper_qgroup,
+                "rc": int(qg_rc),
+                "output": qg_text,
+            }, origin)
         if path == "/api/snapper/capabilities":
             def _root_fstype() -> str:
                 try:
@@ -64436,6 +64888,7 @@ class Handler(BaseHTTPRequestHandler):
                 "grub_bls_mode": bool(grub_bls_mode),
                 "ghost_scrub_supported": bool(ghost_supported),
                 "ghost_missing_reasons": ghost_missing_reasons,
+                "qgroups_supported": bool(btrfs_root and snapper_installed and snapper_root_config_present and shutil.which("btrfs")),
                 "os_id": os_id,
                 "os_id_like": os_id_like,
                 "opensuse_like": bool(opensuse_like),
@@ -69006,6 +69459,8 @@ class Handler(BaseHTTPRequestHandler):
                 "timer-disable-timeline": "Type DISABLE to confirm disabling snapper-timeline.timer.",
                 "timer-disable-cleanup": "Type DISABLE to confirm disabling snapper-cleanup.timer.",
                 "timer-disable-boot": "Type DISABLE to confirm disabling snapper-boot.timer.",
+                "qgroup-enable": "Type QGROUPS to confirm enabling Btrfs qgroups (quota) on /. This can slow snapper cleanup/list and start a background qgroup rescan.",
+                "qgroup-disable": "Type QGROUPS to confirm disabling Btrfs qgroups (quota) on /. Recommended: keeps snapper cleanup/list fast.",
             }
             if action not in allowed:
                 return _json_response(self, 400, {"error": f"unsupported confirm action: {action}"}, origin)
@@ -69042,6 +69497,8 @@ class Handler(BaseHTTPRequestHandler):
                 phrase = "ENABLE"
             elif action in ("timer-disable-timeline", "timer-disable-cleanup", "timer-disable-boot"):
                 phrase = "DISABLE"
+            elif action in ("qgroup-enable", "qgroup-disable"):
+                phrase = "QGROUPS"
 
             return _json_response(self, 200, {
                 "confirm_token": token,
@@ -69121,8 +69578,10 @@ class Handler(BaseHTTPRequestHandler):
                 "timer-disable-timeline",
                 "timer-disable-cleanup",
                 "timer-disable-boot",
+                "qgroup-enable",
+                "qgroup-disable",
             )
-            if action in ("status", "list"):
+            if action in ("status", "list", "qgroup-status"):
                 needs_confirm = False
 
             confirm_token = str(body.get("confirm_token", "") or "").strip()
@@ -69151,6 +69610,8 @@ class Handler(BaseHTTPRequestHandler):
                         "timer-disable-timeline": "DISABLE",
                         "timer-disable-cleanup": "DISABLE",
                         "timer-disable-boot": "DISABLE",
+                        "qgroup-enable": "QGROUPS",
+                        "qgroup-disable": "QGROUPS",
                     }.get(action, "")
 
                     if required_phrase and confirm_phrase.upper() != required_phrase:
@@ -69240,6 +69701,18 @@ class Handler(BaseHTTPRequestHandler):
                 cmd = [HELPER_BIN, "snapper", "timer-disable", "boot"]
                 timeout_s = 5 * 60
                 title = "snapper disable boot timer"
+            elif action == "qgroup-status":
+                cmd = [HELPER_BIN, "snapper", "qgroup-status"]
+                timeout_s = 30
+                title = "btrfs qgroup status"
+            elif action == "qgroup-enable":
+                cmd = [HELPER_BIN, "snapper", "qgroup-enable"]
+                timeout_s = 180
+                title = "btrfs qgroup enable"
+            elif action == "qgroup-disable":
+                cmd = [HELPER_BIN, "snapper", "qgroup-disable"]
+                timeout_s = 180
+                title = "btrfs qgroup disable"
             else:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 
@@ -69500,8 +69973,10 @@ class Handler(BaseHTTPRequestHandler):
                 "timer-disable-timeline",
                 "timer-disable-cleanup",
                 "timer-disable-boot",
+                "qgroup-enable",
+                "qgroup-disable",
             )
-            if action in ("status", "list"):
+            if action in ("status", "list", "qgroup-status"):
                 needs_confirm = False
 
             confirm_token = str(body.get("confirm_token", "")).strip()
@@ -69530,6 +70005,8 @@ class Handler(BaseHTTPRequestHandler):
                         "timer-disable-timeline": "DISABLE",
                         "timer-disable-cleanup": "DISABLE",
                         "timer-disable-boot": "DISABLE",
+                        "qgroup-enable": "QGROUPS",
+                        "qgroup-disable": "QGROUPS",
                     }.get(action, "")
 
                     if required_phrase and confirm_phrase.upper() != required_phrase:
@@ -69606,6 +70083,15 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "timer-disable-boot":
                 cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "timer-disable", "boot"]
                 timeout_s = 300
+            elif action == "qgroup-status":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "qgroup-status"]
+                timeout_s = 30
+            elif action == "qgroup-enable":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "qgroup-enable"]
+                timeout_s = 180
+            elif action == "qgroup-disable":
+                cmd = ["/usr/local/bin/zypper-auto-helper", "snapper", "qgroup-disable"]
+                timeout_s = 180
             else:
                 return _json_response(self, 400, {"error": f"unsupported action: {action}"}, origin)
 
@@ -70602,6 +71088,12 @@ chmod 700 "${DASH_API_TOKEN_DIR}" 2>/dev/null || true
 
 # Write dashboard schema used by the Settings API/UI
 __znh_write_dashboard_schema_json "${DASH_API_TOKEN_DIR}/dashboard-schema.json" || true
+
+# Btrfs qgroups: disable by default on install (qgroups slow snapper cleanup/list
+# and can hang btrfs-cleaner). Records pre-install state so --uninstall-zypper can
+# restore it. Best-effort; gated on btrfs root + btrfs binary + snapper root config.
+# The dashboard Snapper Manager "Btrfs qgroups" toggle can re-enable them anytime.
+__znh_snapper_qgroup_install_default || true
 
 # Install scrub-ghost (boot entry scrubber) from the embedded source.
 log_info ">>> Installing scrub-ghost tool (/usr/local/bin/scrub-ghost)..."
