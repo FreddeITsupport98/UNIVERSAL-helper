@@ -16,7 +16,7 @@
 #  - Per-PM __znh_pm_is_update_cmd verbs.
 #  - __znh_pm_is_nothing_to_do / __znh_pm_post_update_service_check /
 #    __znh_pm_needs_reboot / __znh_pm_is_rpm_based helpers.
-#  - The command exec uses __znh_pm_binary with NO "2>&1" before "| tee".
+#  - The command exec uses __znh_run_pm_pty (script PTY) with NO "| tee" pipe.
 #  - Fish sudo-handler intercepts all 5 PMs; zypper-wrapper.fish defines all 5.
 #  - Generator creates the dnf/apt/apt-get/pacman-with-ps symlinks.
 #  - Uninstaller removes the symlinks + alias lines.
@@ -87,6 +87,8 @@ require_contains '__znh_pm_is_nothing_to_do' "Missing __znh_pm_is_nothing_to_do 
 require_contains '__znh_pm_post_update_service_check' "Missing __znh_pm_post_update_service_check helper"
 require_contains '__znh_pm_needs_reboot' "Missing __znh_pm_needs_reboot helper"
 require_contains '__znh_pm_is_rpm_based' "Missing __znh_pm_is_rpm_based helper"
+require_contains '__znh_run_pm_pty' "Missing __znh_run_pm_pty helper (PTY fix for the stuck-after-y bug)"
+require_contains 'script -qec' "__znh_run_pm_pty does not use script -qec to allocate a PTY"
 require_contains 'WRAPPER_PM="$(__znh_wrapper_pm_from_invocation)"' "WRAPPER_PM is not derived from __znh_wrapper_pm_from_invocation"
 
 # --- 2) Per-PM update-verb detection ---
@@ -102,13 +104,13 @@ require_contains 'needrestart -l' "apt needrestart -l post-update check missing"
 require_contains 'dnf needs-restarting -r' "dnf needs-restarting -r reboot check missing"
 require_contains '/run/reboot-required' "Reboot-required marker fallback missing"
 
-# --- 4) The bug fix: NO "2>&1" before "| tee" in the PM command exec ---
-# The command exec line must use __znh_pm_binary and must NOT contain "2>&1".
-# We assert the positive (uses __znh_pm_binary | tee) and that the old buggy
-# "2>&1 | tee" pattern is gone from the update-flow command exec.
-require_extended_grep 'sudo "\$\(__znh_pm_binary\)" "\$@" \| tee' "Command exec does not use __znh_pm_binary | tee"
-# The old buggy line (sudo /usr/bin/zypper "$@" 2>&1 | tee) must be gone.
-require_not_contains 'sudo /usr/bin/zypper "$@" 2>&1 | tee' "Old buggy 2>&1 | tee command exec still present (stuck-after-y bug)"
+# --- 4) The bug fix: PM runs under a PTY via __znh_run_pm_pty (no | tee) ---
+# The update-flow exec must call __znh_run_pm_pty (which uses `script` to
+# allocate a PTY) instead of `sudo <pm> | tee`, which hung because sudo's
+# setsid() put the PM in a session that wasn't the terminal's foreground pg.
+require_contains '__znh_run_pm_pty "$ZYPPER_OUT_FILE"' "Update-flow exec does not call __znh_run_pm_pty"
+require_not_contains 'sudo "/usr/bin/zypper" "$@" | tee' "Old | tee command exec still present (stuck-after-y bug)"
+require_not_contains 'sudo "$(\$__znh_pm_binary)" "$@" | tee' "Old | tee command exec (PM-aware) still present"
 
 # --- 5) RPM-only guards (zypp lock + duplicate cleanup) ---
 if grep -Fq 'if [[ "${WRAPPER_PM}" == "zypper" ]]; then' "${TARGET_FILE}"; then

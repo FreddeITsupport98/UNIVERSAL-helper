@@ -53868,6 +53868,40 @@ __znh_pm_is_rpm_based() {
     [[ "${WRAPPER_PM}" == "zypper" || "${WRAPPER_PM}" == "dnf" ]]
 }
 
+# Run the active PM interactively under a PTY, optionally recording output to
+# $1 for post-run "Nothing to do." / lock-output detection.
+#
+# WHY this exists (the "stuck after typing y" bug):
+#   `sudo <pm> ... | tee <file>` breaks interactivity because sudo calls
+#   setsid(), placing the PM in a new session/process-group that is NOT the
+#   terminal's foreground process group. The PM's stdin points at the
+#   terminal, but keystrokes typed there are delivered to the pipeline's
+#   foreground pg (sudo|tee), never to the PM — so the PM hangs forever at
+#   its "Continue? [y/n]" prompt. Piping stdout through `tee` (non-TTY)
+#   also makes some PMs decide non-interactive.
+#
+# `script` allocates its own PTY pair and bridges real-terminal stdin ->
+# PTY slave, so the PM reads your `y` correctly, sees a TTY for stdout
+# (stays interactive), and its output is recorded to $1 for detection.
+# `-e` makes script return the PM's exit code. Falls back to a direct
+# exec (interactive, no capture) if `script` is unavailable.
+__znh_run_pm_pty() {
+    local out_file="${1:-}"
+    local pm_cmd
+    pm_cmd="sudo $(__znh_pm_binary)$(printf ' %q' "$@")"
+    if command -v script >/dev/null 2>&1; then
+        if [ -n "$out_file" ]; then
+            script -qec "$pm_cmd" "$out_file"
+        else
+            script -qec "$pm_cmd" /dev/null
+        fi
+        return $?
+    fi
+    # Fallback: run directly so interactive prompts still work (no capture).
+    sudo "$(__znh_pm_binary)" "$@"
+    return $?
+}
+
 # Enterprise extensions (optional)
 HOOKS_ENABLED="${HOOKS_ENABLED:-true}"
 HOOKS_BASE_DIR="${HOOKS_BASE_DIR:-/etc/zypper-auto/hooks}"
@@ -54476,17 +54510,17 @@ if __znh_pm_is_update_cmd "$@"; then
     FINAL_OUTPUT_LOCK=0
     while [ "$run_attempt" -le "$run_attempt_max" ]; do
         ZYPPER_OUT_FILE="$(mktemp /tmp/znh-zypper-with-ps.XXXXXX 2>/dev/null || echo /tmp/znh-zypper-with-ps.$$)"
-        # IMPORTANT: do NOT merge stderr into the tee pipe (no "2>&1").
-        # The PM's interactive "Continue? [y/n]" prompt + download progress
-        # rely on STDERR being a TTY. With "2>&1 | tee", zypper saw a
-        # non-TTY stderr and entered non-interactive mode, silently
-        # auto-cancelling the Continue prompt — so "sudo zypper dup" did
-        # nothing after the user typed y (no download, no install).
-        # Keep stderr on the TTY (inherited) so the PM stays interactive;
-        # pipe only stdout through tee for real-time display + "Nothing to
-        # do." detection. Lock retry still works via zypper rc=7.
-        sudo "$(__znh_pm_binary)" "$@" | tee "$ZYPPER_OUT_FILE"
-        EXIT_CODE=${PIPESTATUS[0]}
+        # Run the PM under a PTY via `script` so interactive "Continue? [y/n]"
+        # prompts work AND output is recorded to ZYPPER_OUT_FILE for
+        # "Nothing to do." / lock-output detection.
+        #
+        # The previous `sudo <pm> | tee` form hung after the user typed y:
+        # sudo calls setsid(), putting the PM in a session/pg that is NOT the
+        # terminal's foreground pg, so keystrokes never reached the PM.
+        # `script` allocates its own PTY and bridges stdin, fixing that.
+        # See __znh_run_pm_pty for the full rationale.
+        __znh_run_pm_pty "$ZYPPER_OUT_FILE"
+        EXIT_CODE=$?
         DID_UPDATES=1
         if __znh_pm_is_nothing_to_do "$ZYPPER_OUT_FILE"; then
             DID_UPDATES=0
@@ -54898,8 +54932,11 @@ if __znh_pm_is_update_cmd "$@"; then
     exit $EXIT_CODE
 else
     # Not an update command, just run the package manager normally.
-    # Keep stderr on the TTY (no 2>&1) so interactive prompts work.
-    sudo "$(__znh_pm_binary)" "$@"
+    # Use __znh_run_pm_pty so interactive prompts (e.g. zypper install
+    # confirmations, dnf/apt prompts) work — same setsid/PTY reason as the
+    # update flow. No output capture needed here.
+    __znh_run_pm_pty ""
+    exit $?
 fi
 EOF
 chown "$SUDO_USER:$SUDO_USER" "$ZYPPER_WRAPPER_PATH"
