@@ -55013,28 +55013,74 @@ if [ -d "$SUDO_USER_HOME/.config/fish" ]; then
 
 # Wrap zypper command
 function zypper --wraps zypper --description "Wrapper for zypper with post-update checks"
-    # Call the wrapper script (which handles sudo and locking internally)
-    ~/.local/bin/zypper-with-ps $argv
+    # Only route through the wrapper for commands that need post-update checks
+    # or sudo elevation (updates, installs, removals, patches, repo management).
+    # For everything else (search, list, info, --xmlout, help, etc.) — including
+    # fish's built-in completion calls like 'zypper --xmlout search' — pass
+    # through to the real zypper so fish's completion system works correctly.
+    # Without this, the wrapper's sudo+script PTY output breaks fish's XML parser.
+    if test (count $argv) -ge 1
+        switch $argv[1]
+            case dup dist-upgrade update up in install rm remove patch \
+                 ar addrepo rr removerepo mr modifyrepo refresh ref
+                ~/.local/bin/zypper-with-ps $argv
+                return $status
+        end
+    end
+    command zypper $argv
 end
 
 # Wrap dnf command (Fedora/RHEL/Rocky/Alma)
 function dnf --wraps dnf --description "Wrapper for dnf with post-update checks"
-    ~/.local/bin/dnf-with-ps $argv
+    # Only route write-commands through the wrapper; pass search/list/info
+    # through to the real dnf so fish completions work.
+    if test (count $argv) -ge 1
+        switch $argv[1]
+            case install upgrade remove distro-sync reinstall downgrade
+                ~/.local/bin/dnf-with-ps $argv
+                return $status
+        end
+    end
+    command dnf $argv
 end
 
 # Wrap apt command (Debian/Ubuntu/Mint)
 function apt --wraps apt --description "Wrapper for apt with post-update checks"
-    ~/.local/bin/apt-with-ps $argv
+    if test (count $argv) -ge 1
+        switch $argv[1]
+            case install upgrade dist-upgrade full-upgrade remove purge autoremove
+                ~/.local/bin/apt-with-ps $argv
+                return $status
+        end
+    end
+    command apt $argv
 end
 
 # Wrap apt-get command (Debian/Ubuntu/Mint)
 function apt-get --wraps apt-get --description "Wrapper for apt-get with post-update checks"
-    ~/.local/bin/apt-get-with-ps $argv
+    if test (count $argv) -ge 1
+        switch $argv[1]
+            case install upgrade dist-upgrade full-upgrade remove purge autoremove
+                ~/.local/bin/apt-get-with-ps $argv
+                return $status
+        end
+    end
+    command apt-get $argv
 end
 
 # Wrap pacman command (Arch/Manjaro/EndeavourOS)
 function pacman --wraps pacman --description "Wrapper for pacman with post-update checks"
-    ~/.local/bin/pacman-with-ps $argv
+    # pacman uses flag-based subcommands (-S, -R, -U, -Syu, etc.).
+    # Route sync/remove/upgrade through the wrapper; pass queries (-Q, -Si,
+    # -Ss) through to the real pacman so fish completions work.
+    if test (count $argv) -ge 1
+        # -S*/-R*/-U* = sync/remove/upgrade (write operations)
+        if string match -q -- '-S*' $argv[1]; or string match -q -- '-R*' $argv[1]; or string match -q -- '-U*' $argv[1]
+            ~/.local/bin/pacman-with-ps $argv
+            return $status
+        end
+    end
+    command pacman $argv
 end
 FISHEOF
 

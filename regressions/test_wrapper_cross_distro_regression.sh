@@ -135,6 +135,17 @@ require_contains 'function pacman --wraps pacman' "Fish wrapper missing 'functio
 require_contains '~/.local/bin/dnf-with-ps' "Fish dnf function does not call dnf-with-ps"
 require_contains '~/.local/bin/pacman-with-ps' "Fish pacman function does not call pacman-with-ps"
 
+# --- 7b) Fish wrappers only route write-commands; read-only pass to command <pm> ---
+# This prevents the fish completion syntax error (fish's built-in zypper
+# completions call 'zypper --xmlout search' which must NOT go through the
+# wrapper's sudo+script PTY layer).
+require_contains 'command zypper $argv' "Fish zypper function missing 'command zypper' pass-through for read-only commands"
+require_contains 'command dnf $argv' "Fish dnf function missing 'command dnf' pass-through"
+require_contains 'command apt $argv' "Fish apt function missing 'command apt' pass-through"
+require_contains 'command apt-get $argv' "Fish apt-get function missing 'command apt-get' pass-through"
+require_contains 'command pacman $argv' "Fish pacman function missing 'command pacman' pass-through"
+require_contains 'case dup dist-upgrade update up in install rm remove patch' "Fish zypper function missing write-command switch/case"
+
 # --- 8) Generator creates the symlinks ---
 require_contains 'ln -sf zypper-with-ps "${USER_BIN_DIR}/${_znh_pm_sym}-with-ps"' "Generator does not create the cross-distro PM symlinks"
 require_contains 'Cross-distro PM wrapper symlinks created' "Generator missing symlink-creation success log"
