@@ -55034,9 +55034,13 @@ end
 function dnf --wraps dnf --description "Wrapper for dnf with post-update checks"
     # Only route write-commands through the wrapper; pass search/list/info
     # through to the real dnf so fish completions work.
+    # Includes dnf's unambiguous command abbreviations (in=install, up=upgrade,
+    # rm=remove) so `dnf in foo` auto-elevates via the wrapper just like
+    # `dnf install foo` — otherwise abbreviations fell through to the real dnf
+    # with no elevation and failed with "requires superuser privileges".
     if test (count $argv) -ge 1
         switch $argv[1]
-            case install upgrade remove distro-sync reinstall downgrade
+            case install in upgrade up remove rm distro-sync reinstall downgrade
                 ~/.local/bin/dnf-with-ps $argv
                 return $status
         end
@@ -55088,28 +55092,47 @@ FISHEOF
     FISH_SUDO_FILE="$FISH_CONFIG_DIR/sudo-handler.fish"
     log_debug "Creating sudo wrapper for Fish at $FISH_SUDO_FILE"
     cat > "$FISH_SUDO_FILE" << 'FISHEOF'
-# Wrapper to catch 'sudo <pm>' and redirect it to the safe helper.
+# Wrapper to catch 'sudo <pm>' and route it straight to the safe helper.
 # Cross-distro: intercepts zypper, dnf, apt, apt-get, and pacman so that
-# 'sudo <pm> <update-cmd>' goes through the corresponding ~/.local/bin/<pm>-with-ps
-# wrapper (post-update service/reboot checks + safe duplicate-RPM cleanup).
+# 'sudo <pm> <cmd>' goes through the corresponding ~/.local/bin/<pm>-with-ps
+# wrapper, which elevates internally (sudo /usr/bin/<pm> ...) and then runs the
+# post-update service/reboot checks + safe duplicate-RPM cleanup.
+#
+# WHY route directly to the -with-ps wrapper instead of calling the <pm> fish
+# function: the <pm> fish functions only route a fixed list of write-verbs
+# (install/upgrade/remove/...) to the wrapper and pass everything else to the
+# real binary. dnf abbreviations like `dnf in` (= install) are NOT in that list,
+# so `sudo dnf in xen` previously dropped sudo, fell through to
+# `command dnf in xen` WITH NO ELEVATION, and failed with "requires superuser
+# privileges". Going straight to the wrapper fixes this for every subcommand
+# and abbreviation, because the wrapper forwards the args to the real PM (which
+# resolves abbreviations) under sudo.
 function sudo --description "Wrapper to handle sudo aliases for package managers"
     if test (count $argv) -ge 1
-        switch $argv[1]
+        set -l _znh_pm $argv[1]
+        set -l _znh_pm_args $argv[2..-1]
+        set -l _znh_wrapper ""
+        switch $_znh_pm
             case zypper
-                zypper $argv[2..-1]
-                return $status
+                set _znh_wrapper "$HOME/.local/bin/zypper-with-ps"
             case dnf
-                dnf $argv[2..-1]
-                return $status
+                set _znh_wrapper "$HOME/.local/bin/dnf-with-ps"
             case apt
-                apt $argv[2..-1]
-                return $status
+                set _znh_wrapper "$HOME/.local/bin/apt-with-ps"
             case apt-get
-                apt-get $argv[2..-1]
-                return $status
+                set _znh_wrapper "$HOME/.local/bin/apt-get-with-ps"
             case pacman
-                pacman $argv[2..-1]
-                return $status
+                set _znh_wrapper "$HOME/.local/bin/pacman-with-ps"
+        end
+        # If the -with-ps wrapper exists, run it (it handles sudo elevation +
+        # post-update checks). Otherwise fall back to real sudo + real PM so the
+        # command still works before/after the helper is installed.
+        if test -n "$_znh_wrapper"; and test -x "$_znh_wrapper"
+            "$_znh_wrapper" $_znh_pm_args
+            return $status
+        else if test -n "$_znh_wrapper"
+            command sudo $_znh_pm $_znh_pm_args
+            return $status
         end
     end
     # For everything else, run real sudo

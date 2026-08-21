@@ -127,6 +127,20 @@ require_contains 'case apt' "Fish sudo-handler missing 'case apt'"
 require_contains 'case apt-get' "Fish sudo-handler missing 'case apt-get'"
 require_contains 'case pacman' "Fish sudo-handler missing 'case pacman'"
 
+# --- 6b) Fish sudo-handler routes `sudo <pm>` straight to the -with-ps wrapper ---
+# Regression for `sudo dnf in xen` losing root: the handler used to drop sudo
+# and call the <pm> fish function, which only routes a fixed verb list and let
+# dnf abbreviations like `in` (= install) fall through to the real PM with no
+# elevation -> "requires superuser privileges". The handler now resolves the
+# matching $HOME/.local/bin/<pm>-with-ps wrapper (which elevates internally)
+# and only falls back to `command sudo <pm>` when the wrapper is absent.
+require_contains 'set -l _znh_wrapper' "Fish sudo-handler missing _znh_wrapper path variable"
+require_contains '$HOME/.local/bin/dnf-with-ps' "Fish sudo-handler does not route sudo dnf to the dnf-with-ps wrapper"
+require_contains 'command sudo $_znh_pm $_znh_pm_args' "Fish sudo-handler missing fallback to command sudo <pm>"
+# dnf fish function must accept the in/up/rm abbreviations so non-sudo
+# `dnf in foo` also auto-elevates via the wrapper (matches zypper's convention).
+require_contains 'case install in upgrade up remove rm distro-sync reinstall downgrade' "Fish dnf function missing in/up/rm abbreviations"
+
 # --- 7) Fish wrapper functions for each PM ---
 require_contains 'function dnf --wraps dnf' "Fish wrapper missing 'function dnf'"
 require_contains 'function apt --wraps apt' "Fish wrapper missing 'function apt'"
