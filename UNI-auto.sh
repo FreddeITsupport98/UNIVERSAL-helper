@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 65 - Enterprise Edition: dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 66 - Enterprise Edition: universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -49678,8 +49678,12 @@ run_uninstall_helper_only() {
     echo "This will remove timers, services, helper binaries, logs, and user" | tee -a "${LOG_FILE}"
     echo "scripts/aliases installed by zypper-auto-helper for user $SUDO_USER." | tee -a "${LOG_FILE}"
     echo "The installer script (zypper-auto.sh) and your Soar/Homebrew installs" | tee -a "${LOG_FILE}"
-    echo "will be left untouched. It also does NOT remove snapd, Flatpak, Soar," | tee -a "${LOG_FILE}"
-    echo "Homebrew itself, or any zypper configuration such as /etc/zypp/zypper.conf." | tee -a "${LOG_FILE}"
+    echo "will be left untouched. It also does NOT remove snapd, Flatpak, Soar,"
+    echo "Homebrew itself, or any zypper configuration such as /etc/zypp/zypper.conf."
+    echo "Flatpak remotes configured by --setup-SF (Flathub, Flathub Beta, Fedora"
+    echo "OCI stable/testing, AppCenter, GNOME Nightly) are intentionally kept"
+    echo "because installed Flatpak apps still depend on them. Remove one manually"
+    echo "with: flatpak remote-delete <name>  (append --user for per-user remotes)."
     echo "" | tee -a "${LOG_FILE}"
     echo "NOTE: Snapper/btrfs/fstrim timers are OS features and are NOT disabled by" | tee -a "${LOG_FILE}"
     echo "default. If you want the uninstaller to also disable those timers (Option 5" | tee -a "${LOG_FILE}"
@@ -50379,11 +50383,15 @@ run_pipx_helper_only() {
 }
 
 # --- Helper: Service reachability check (used by --setup-SF) ---
-# Usage: __znh_check_service_reachable <url> <service_name> [timeout_seconds]
+# Usage: __znh_check_service_reachable <url> <service_name> [timeout_seconds] [extra_ok_codes]
 # Returns 0 if the URL responds (HTTP 2xx/3xx), 1 if unreachable.
+# Optional 4th arg (space-separated list of HTTP codes) widens the accepted
+# responses; used for OCI container registries whose Docker Registry v2
+# endpoint legitimately answers 401 Unauthorized to unauthenticated probes
+# while still being fully reachable for anonymous Flatpak pulls (pass "401").
 # Logs the result to LOG_FILE with the service name.
 __znh_check_service_reachable() {
-    local url="$1" service_name="$2" timeout="${3:-10}"
+    local url="$1" service_name="$2" timeout="${3:-10}" extra_ok_codes="${4:-}"
     local http_code=""
 
     if ! command -v curl >/dev/null 2>&1; then
@@ -50397,14 +50405,51 @@ __znh_check_service_reachable() {
     if [[ "${http_code}" =~ ^[23] ]]; then
         log_success "[reachability] ${service_name} is reachable (HTTP ${http_code})"
         return 0
-    else
-        log_error "[reachability] ${service_name} is NOT reachable (HTTP ${http_code:-000}). The service may be down or your network may be blocking it."
-        log_error "[reachability]   URL tested  : ${url}"
-        log_error "[reachability]   HTTP status : ${http_code:-000} (expected 2xx/3xx)"
-        log_error "[reachability]   Action      : Skipping ${service_name} operations. Retry later with: zypper-auto-helper --setup-SF"
-        return 1
     fi
+
+    # Service-specific acceptable codes (e.g. 401 for OCI registries).
+    if [ -n "${extra_ok_codes}" ]; then
+        local _extra_code
+        # shellcheck disable=SC2086  # intentional word splitting of the code list
+        for _extra_code in ${extra_ok_codes}; do
+            if [ "${http_code}" = "${_extra_code}" ]; then
+                log_success "[reachability] ${service_name} is reachable (HTTP ${http_code} accepted as OK for this service type)"
+                return 0
+            fi
+        done
+    fi
+
+    log_error "[reachability] ${service_name} is NOT reachable (HTTP ${http_code:-000}). The service may be down or your network may be blocking it."
+    log_error "[reachability]   URL tested  : ${url}"
+    log_error "[reachability]   HTTP status : ${http_code:-000} (expected 2xx/3xx${extra_ok_codes:+ or ${extra_ok_codes}})"
+    log_error "[reachability]   Action      : Skipping ${service_name} operations. Retry later with: zypper-auto-helper --setup-SF"
+    return 1
 }
+
+# --- Universal Flatpak remote table (used by --setup-SF) ---
+# Format: name|remote-add-URL|reachability-URL|extra-ok-http-codes
+#
+# The SAME universal remote set is configured on every distro (zypper/apt/
+# dnf/pacman hosts alike) so the Flatpak side of the helper behaves
+# identically everywhere:
+#   - flathub        : the de-facto standard app repository
+#   - flathub-beta   : Flathub beta channel
+#   - fedora         : Fedora Flatpaks (OCI registry; built from Fedora RPMs)
+#   - fedora-testing : Fedora Flatpaks testing tag (Bodhi updates)
+#   - appcenter      : elementary AppCenter repository
+#   - gnome-nightly  : GNOME nightly builds
+#
+# OCI remotes (oci+https://...) answer 401 to unauthenticated registry API
+# probes while still being fully reachable for anonymous Flatpak pulls, so
+# their rows accept 401 in addition to the default 2xx/3xx.
+ZNH_FLATPAK_REMOTE_SPECS=(
+    "flathub|https://dl.flathub.org/repo/flathub.flatpakrepo|https://dl.flathub.org/repo/flathub.flatpakrepo|"
+    "flathub-beta|https://dl.flathub.org/beta-repo/flathub-beta.flatpakrepo|https://dl.flathub.org/beta-repo/flathub-beta.flatpakrepo|"
+    "fedora|oci+https://registry.fedoraproject.org|https://registry.fedoraproject.org/v2/|401"
+    "fedora-testing|oci+https://registry.fedoraproject.org#testing|https://registry.fedoraproject.org/v2/|401"
+    "appcenter|https://flatpak.elementary.io/repo.flatpakrepo|https://flatpak.elementary.io/repo.flatpakrepo|"
+    "gnome-nightly|https://nightly.gnome.org/gnome-nightly.flatpakrepo|https://nightly.gnome.org/gnome-nightly.flatpakrepo|"
+)
 
 # --- Helper: Snap & Flatpak setup mode (CLI) ---
 run_setup_sf_only() {
@@ -50418,11 +50463,13 @@ run_setup_sf_only() {
     echo "This helper will:" | tee -a "${LOG_FILE}"
     echo "  - Ensure snapd (snap) is installed" | tee -a "${LOG_FILE}"
     echo "  - Ensure flatpak is installed" | tee -a "${LOG_FILE}"
-    echo "  - Add common Flatpak remotes (Flathub, Flathub Beta, AppCenter)" | tee -a "${LOG_FILE}"
+    echo "  - Add the universal Flatpak remotes (Flathub, Flathub Beta, Fedora OCI" | tee -a "${LOG_FILE}"
+    echo "    stable/testing, AppCenter, GNOME Nightly)" | tee -a "${LOG_FILE}"
     echo "" | tee -a "${LOG_FILE}"
 
     local rc=0
-    local snap_ok=0 flatpak_ok=0 flathub_ok=0 flathub_beta_ok=0 appcenter_ok=0
+    local snap_ok=0 flatpak_ok=0 flathub_ok=0
+    local _fp_results=""
     local snap_store_reachable=0 flathub_reachable=0
     local snapd_pkg flatpak_pkg
     snapd_pkg="$(znh_resolve_package_name "snapd")"
@@ -50527,44 +50574,71 @@ run_setup_sf_only() {
         fi
     fi
 
-    # 3) Configure common Flatpak remotes (with reachability pre-check)
+    # 3) Configure the universal Flatpak remote set (table-driven, with
+    #    per-remote reachability pre-checks). The same remote set is
+    #    configured on every distro (zypper/apt/dnf/pacman hosts alike):
+    #      flathub, flathub-beta, fedora (OCI), fedora-testing (OCI),
+    #      appcenter, gnome-nightly
+    #    Scope: remotes are added system-wide (shared by all users) when
+    #    this helper runs as root, and per-user (--user, exactly like
+    #    running `flatpak remote-add --user ...` by hand) when it runs
+    #    unprivileged, so the same code path works universally at any
+    #    privilege level.
     if command -v flatpak >/dev/null 2>&1; then
-        log_info "Configuring common Flatpak remotes (Flathub, Flathub Beta, AppCenter)..."
-
-        # Pre-check: is Flathub reachable?
-        if __znh_check_service_reachable "https://dl.flathub.org/repo/flathub.flatpakrepo" "Flathub (dl.flathub.org)"; then
-            flathub_reachable=1
+        local -a _fp_scope=()
+        if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+            _fp_scope=(--user)
+            log_info "Running unprivileged: adding Flatpak remotes with --user scope."
         else
-            log_warn "Flathub service appears down or unreachable; skipping Flatpak remote and app installation."
-            log_warn "Retry later with: sudo zypper-auto-helper --setup-SF"
-            rc=1
+            log_info "Running as root: adding Flatpak remotes system-wide (shared by all users)."
         fi
+        log_info "Configuring universal Flatpak remotes (Flathub, Flathub Beta, Fedora OCI stable/testing, AppCenter, GNOME Nightly)..."
 
-    if [ "${flathub_reachable}" -eq 1 ]; then
-            if execute_guarded "Add Flatpak remote: flathub" flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo; then
-                log_success "Flathub remote configured (or already present)"
-                flathub_ok=1
-            else
-                log_error "Failed to add Flathub remote despite service being reachable."
+        local _spec _rname _rurl _rcheck _rextra
+        for _spec in "${ZNH_FLATPAK_REMOTE_SPECS[@]}"; do
+            IFS='|' read -r _rname _rurl _rcheck _rextra <<<"${_spec}"
+            [ -n "${_rname}" ] || continue
+
+            # Per-remote reachability pre-check (best-effort). OCI remotes
+            # pass "401" as an extra accepted code because unauthenticated
+            # Docker Registry v2 probes legitimately answer 401 while the
+            # registry still serves anonymous Flatpak pulls.
+            if [ -n "${_rcheck}" ] \
+               && ! __znh_check_service_reachable "${_rcheck}" "${_rname} remote" 10 "${_rextra}"; then
+                log_warn "${_rname} service appears down or unreachable; skipping its Flatpak remote for now."
+                log_warn "Retry later with: sudo zypper-auto-helper --setup-SF"
+                _fp_results+="${_rname} 0"$'\n'
                 rc=1
+                continue
+            fi
+            if [ "${_rname}" = "flathub" ]; then
+                # Keep the legacy Flathub-reachable gate semantics for the
+                # Discover-removal and Bazaar-install steps below.
+                flathub_reachable=1
             fi
 
-            if execute_guarded "Add Flatpak remote: flathub-beta" flatpak remote-add --if-not-exists flathub-beta https://flathub.org/beta-repo/flathub-beta.flatpakrepo; then
-                log_success "Flathub Beta remote configured (or already present)"
-                flathub_beta_ok=1
+            if execute_guarded "Add Flatpak remote: ${_rname}" \
+                flatpak remote-add --if-not-exists ${_fp_scope[@]+"${_fp_scope[@]}"} "${_rname}" "${_rurl}"; then
+                log_success "Flatpak remote '${_rname}' configured (or already present)"
+                _fp_results+="${_rname} 1"$'\n'
+                if [ "${_rname}" = "flathub" ]; then
+                    flathub_ok=1
+                fi
             else
-                log_error "Failed to add Flathub Beta remote (check network/connectivity)."
+                log_error "Failed to add Flatpak remote '${_rname}' despite service being reachable (check network/connectivity or remote URL)."
+                _fp_results+="${_rname} 0"$'\n'
                 rc=1
             fi
+        done
 
-            if execute_guarded "Add Flatpak remote: appcenter" flatpak remote-add --if-not-exists appcenter https://flatpak.elementary.io/repo.flatpakrepo; then
-                log_success "AppCenter remote configured (or already present)"
-                appcenter_ok=1
-            else
-                log_error "Failed to add AppCenter remote (check network/connectivity or remote URL)."
-                rc=1
-            fi
-        fi
+        # Show the resulting remote configuration (mirrors `flatpak remotes`
+        # for both scopes so the user sees exactly what is configured).
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Configured Flatpak remotes (system scope):" | tee -a "${LOG_FILE}"
+        flatpak remotes 2>/dev/null | tee -a "${LOG_FILE}" || true
+        echo "Configured Flatpak remotes (user scope):" | tee -a "${LOG_FILE}"
+        flatpak remotes --user 2>/dev/null | tee -a "${LOG_FILE}" || true
+        echo "" | tee -a "${LOG_FILE}"
     else
         log_error "Flatpak is not installed; skipping remote configuration."
         rc=1
@@ -50781,9 +50855,12 @@ run_setup_sf_only() {
             echo "Checks:"
             echo "  - snapd installed        : $([ "$snap_ok" -eq 1 ] && echo OK || echo FAILED)"
             echo "  - flatpak installed      : $([ "$flatpak_ok" -eq 1 ] && echo OK || echo FAILED)"
-            echo "  - Flathub remote         : $([ "$flathub_ok" -eq 1 ] && echo OK || echo FAILED)"
-            echo "  - Flathub Beta remote    : $([ "$flathub_beta_ok" -eq 1 ] && echo OK || echo FAILED)"
-            echo "  - AppCenter remote       : $([ "$appcenter_ok" -eq 1 ] && echo OK || echo FAILED)"
+            local _rr_name _rr_state
+            while read -r _rr_name _rr_state; do
+                [ -n "${_rr_name}" ] || continue
+                printf '  - Flatpak remote %-14s : %s\n' "${_rr_name}" \
+                    "$([ "${_rr_state}" = "1" ] && echo OK || echo FAILED)"
+            done <<<"${_fp_results}"
             echo ""
             echo "Next steps:"
             echo "  - For any FAILED item, re-run 'zypper-auto-helper --setup-SF' after fixing network/remote issues."
@@ -50820,7 +50897,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --self-update-rollback   Roll back to the most recent self-update backup (script + config snapshot)"
     echo "  --rollback               Open Snapper rollback wizard (DANGEROUS: reverts system snapshot and reboots)"
     echo "  --pip-package           Install/upgrade pipx and show how to manage Python CLI tools with pipx"
-    echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + common Flatpak remotes, optional Discover removal)"
+    echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + universal Flatpak remotes:"
+    echo "                          Flathub, Flathub Beta, Fedora OCI stable/testing, AppCenter, GNOME Nightly;"
+    echo "                          optional Discover removal)"
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -63408,7 +63487,7 @@ def _quick_action_table() -> dict:
             "timeout_s": 15 * 60,
             "needs_confirm": True,
             "phrase": "SETUPSF",
-            "explain": "Installs and configures Snapd and Flatpak together: ensures snapd is installed and running, installs flatpak, adds Flathub/AppCenter remotes, optionally installs Snap Store and Bazaar apps, and optionally removes KDE Discover to avoid conflicting update stacks.",
+            "explain": "Installs and configures Snapd and Flatpak together: ensures snapd is installed and running, installs flatpak, adds the universal Flatpak remotes (Flathub, Flathub Beta, Fedora OCI stable/testing, AppCenter, GNOME Nightly; system-wide when run as root, --user scope otherwise), optionally installs Snap Store and Bazaar apps, and optionally removes KDE Discover to avoid conflicting update stacks.",
             "warning": "This installs system packages and modifies Flatpak remotes. On openSUSE you may be prompted to add the snappy repository via opi.",
         },
         "soar": {
