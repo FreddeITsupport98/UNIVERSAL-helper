@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 68 - Enterprise Edition: copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 69 - Enterprise Edition: notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -4336,6 +4336,7 @@ __znh_write_dashboard_schema_json() {
     "WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED": {"type": "bool", "default": "true"},
     "WEBUI_HISTORY_RETENTION_DAYS": {"type": "enum", "allowed": ["7","30","90"], "default": "30"},
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
+    "UPDATES_READY_REMINDER_REPEAT_ENABLED": {"type": "bool", "default": "false"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
     "SELF_UPDATE_STABLE_POLICY": {"type": "enum", "allowed": ["release","candidate","prerelease"], "default": "release"},
@@ -11339,11 +11340,20 @@ NO_UPDATES_REMINDER_REPEAT_ENABLED=true
 # UPDATES_READY_REMINDER_REPEAT_ENABLED
 # When "true", the notifier may re-show identical "Updates ready" messages
 # on subsequent checks while the same snapshot / update set is still pending.
-# When "false", the "Updates ready" notification is shown once per state and
-# then suppressed until a new snapshot or different set of updates is detected.
+# When "false", the "Updates ready" notification is shown once per update
+# set and then suppressed until a different set of updates is detected.
 #
-# Valid values: true / false (case-sensitive). Default: true.
-UPDATES_READY_REMINDER_REPEAT_ENABLED=true
+# WHY THIS DEFAULTS TO false (changed from true): the "Updates ready" popup
+# is persistent (it stays visible until you act on it), so re-showing the
+# identical popup on every hourly notifier tick just stacks duplicate popups
+# (KDE Plasma does not honor the GNOME replace-by-tag hint). One popup per
+# pending update set is enough; a new popup appears when the update set
+# actually changes. The dedupe comparison also ignores the volatile
+# "Downloads complete: downloaded N package(s) in Xs" note, so the same
+# pending set is correctly recognized as unchanged.
+#
+# Valid values: true / false (case-sensitive). Default: false.
+UPDATES_READY_REMINDER_REPEAT_ENABLED=false
 
 # VERIFY_NOTIFY_USER_ENABLED
 # When "true", the periodic verification/auto-repair service sends a
@@ -12133,7 +12143,7 @@ EOF
                     log_info "  - NO_UPDATES_REMINDER_REPEAT_ENABLED: controls whether identical \"No updates found\" notifications can repeat while the system remains up to date."
                     ;;
                 UPDATES_READY_REMINDER_REPEAT_ENABLED)
-                    log_info "  - UPDATES_READY_REMINDER_REPEAT_ENABLED: controls whether identical \"Updates ready\" notifications can repeat while the same update set remains pending."
+                    log_info "  - UPDATES_READY_REMINDER_REPEAT_ENABLED: when true, the notifier re-shows the identical persistent 'Updates ready' popup on every hourly check while the same update set is pending; default false since the popup is persistent and KDE stacks re-shows as duplicates. The dedupe comparison ignores the volatile download-duration note."
                     ;;
                 DOWNLOADER_DOWNLOAD_MODE)
                     log_info "  - DOWNLOADER_DOWNLOAD_MODE: controls whether the background helper only detects updates (detect-only) or also pre-downloads them (full)."
@@ -21250,6 +21260,7 @@ generate_dashboard() {
         { key: 'WEBUI_SELF_UPDATE_BACKGROUND_NOTIFY_ENABLED', type: 'bool', label: 'WebUI: self-update background notifications', help: 'When ON, background self-update checks can send Notification Center + desktop update-available notifications.' },
         { key: 'WEBUI_HISTORY_RETENTION_DAYS', type: 'enum', label: 'WebUI: server job history retention (days)', help: 'How long the Dashboard API keeps job history in its SQLite database for Managers (Server tab). Options are 7/30/90.' },
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
+        { key: 'UPDATES_READY_REMINDER_REPEAT_ENABLED', type: 'bool', label: 'Notifier: repeat identical "Updates ready" popups', help: 'When ON, the notifier re-shows the identical persistent "Updates Ready to Install" popup on every hourly check while the same update set is pending. Default OFF since the popup is persistent (stays visible until you act) and KDE Plasma stacks re-shows as duplicates instead of replacing.' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
         { key: 'SELF_UPDATE_STABLE_POLICY', type: 'enum', label: 'Self-update stable policy (release/candidate/prerelease)', help: 'Controls stable-channel target selection policy for self-update status, changelog notes, and install flow.' },
@@ -57300,7 +57311,11 @@ def _read_int_from_config(
 DUP_EXTRA_FLAGS = _read_dup_extra_flags()
 LOCK_REMINDER_ENABLED = _read_bool_from_config("LOCK_REMINDER_ENABLED", True)
 NO_UPDATES_REMINDER_REPEAT_ENABLED = _read_bool_from_config("NO_UPDATES_REMINDER_REPEAT_ENABLED", True)
-UPDATES_READY_REMINDER_REPEAT_ENABLED = _read_bool_from_config("UPDATES_READY_REMINDER_REPEAT_ENABLED", True)
+# Default false (changed from true): the "Updates ready" popup is persistent
+# (timeout 0), so re-showing the identical popup on every hourly notifier tick
+# just stacks duplicate popups (KDE Plasma does not honor the GNOME
+# replace-by-tag hint). One popup per pending update set is enough.
+UPDATES_READY_REMINDER_REPEAT_ENABLED = _read_bool_from_config("UPDATES_READY_REMINDER_REPEAT_ENABLED", False)
 INSTALL_CLICK_SUPPRESS_MINUTES = _read_int_from_config(
     "INSTALL_CLICK_SUPPRESS_MINUTES",
     120,
@@ -58486,6 +58501,56 @@ def get_updates():
         update_status("FAILED: Unexpected error while loading dry-run data")
         return ""
 
+def _pm_db_mtime() -> float:
+    """Best-effort mtime of the system package database (changes on installs).
+
+    Checks the transaction-backed database files first (RPM sqlite/Berkeley
+    DB, dpkg status, pacman local db) and deliberately skips the sqlite
+    -wal/-shm sidecar files because plain READS also touch those (they
+    would make every 'rpm -q' look like an install and re-trigger the
+    stale-cache guard forever).
+    """
+    candidates = [
+        "/usr/lib/sysimage/rpm/rpmdb.sqlite",  # RPM: Fedora 41+ default
+        "/var/lib/rpm/rpmdb.sqlite",            # RPM: classic sqlite
+        "/var/lib/rpm/Packages",               # RPM: Berkeley DB backend
+        "/var/lib/dpkg/status",                 # APT: Debian/Ubuntu/Mint
+        "/var/lib/pacman/local",                # pacman: Arch
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return os.path.getmtime(path)
+        except Exception:
+            continue
+    return 0.0
+
+def _cache_stale_after_install() -> bool:
+    """True when a package install happened AFTER the dry-run cache was written.
+
+    The cached dry-run output (written by the root downloader) is this
+    notifier's data source, but only the zypper-run-install path clears it
+    after an update. Updates installed through the WebUI Rocket flow, a
+    plain manual upgrade, or any other path leave the PRE-update pending set
+    cached, and the next notifier tick would re-show "Updates Ready to
+    Install" for updates that are ALREADY installed. Comparing the package
+    database mtime against the cache mtime detects exactly that situation.
+    """
+    try:
+        if not os.path.exists(DRYRUN_OUTPUT_FILE):
+            return False
+        cache_mtime = os.path.getmtime(DRYRUN_OUTPUT_FILE)
+        db_mtime = _pm_db_mtime()
+        if db_mtime > 0 and db_mtime > cache_mtime:
+            log_info(
+                "Install detected after the dry-run cache was written "
+                f"(cache={cache_mtime:.0f}, pm-db={db_mtime:.0f}); cache is stale"
+            )
+            return True
+    except Exception as e:
+        log_debug(f"Stale-cache detection failed: {e}")
+    return False
+
 def _query_pm_preview_summary_from_output(output: str, max_packages: int = 3) -> dict[str, str] | None:
     """Ask the shared PM runtime helper to summarize preview output."""
     text = output or ""
@@ -59408,6 +59473,26 @@ def main():
             log_info("No preview output available from downloader (or environment not safe). Exiting.")
             return
 
+        # STALE-CACHE GUARD ("update ready to install shows again after I
+        # updated"): if packages were installed AFTER the downloader wrote the
+        # cached dry-run (WebUI Rocket flow / plain manual upgrade / any path
+        # that does not clear the cache), re-run a FRESH preview so we never
+        # re-show "Updates Ready to Install" for updates that are already
+        # installed. If the fresh preview finds nothing pending, the normal
+        # up-to-date path below handles it.
+        if output and output.strip() and _cache_stale_after_install():
+            log_info("Re-running a fresh preview (stale-cache guard) before showing 'Updates Ready'")
+            try:
+                rc_guard, guard_output = _run_preview_command(timeout=60)
+                if guard_output and guard_output.strip():
+                    output = guard_output
+                else:
+                    log_info("Fresh preview returned no data; skipping notification this tick (stale-cache guard)")
+                    update_status("SKIPPED: stale dry-run cache (install detected); no fresh preview data")
+                    return
+            except Exception as e:
+                log_debug(f"Fresh preview for the stale-cache guard failed: {e}")
+
         title, message, snapshot, package_count = parse_output(output)
         if not title:
             # No updates available: check if we already showed this
@@ -59461,16 +59546,32 @@ def main():
         if warnings:
             message += "\n\n" + "\n".join(warnings)
 
-        # Check if this notification is different from the last one
+        # Check if this notification is different from the last one.
+        # DEDUPE FIX: the comparison must ignore the volatile
+        # "✅ Downloads complete: downloaded N package(s) in Xs" note — its
+        # duration text changes on every downloader run, which previously made
+        # the SAME pending update set look "changed" and re-showed the
+        # persistent "Updates Ready to Install" popup on every notifier tick
+        # (the user saw the same popup twice or more for one update set).
+        def _strip_volatile_note(text):
+            # Removes the completion-note line from a notification message.
+            try:
+                return re.sub(r"✅ Downloads complete[^\n]*\n?", "", text or "").strip()
+            except Exception:
+                return (text or "").strip()
+        
         last_notification = _read_last_notification()
         current_notification = f"{title}|{message}"
+        _last_title, _, _last_msg = (last_notification or "").partition("|")
+        last_key = f"{_last_title}|{_strip_volatile_note(_last_msg)}"
+        current_key = f"{title}|{_strip_volatile_note(message)}"
         
-        if (not UPDATES_READY_REMINDER_REPEAT_ENABLED) and last_notification == current_notification:
-            log_info("'Updates ready' notification already shown, skipping duplicate (UPDATES_READY_REMINDER_REPEAT_ENABLED=false)")
+        if (not UPDATES_READY_REMINDER_REPEAT_ENABLED) and last_key == current_key:
+            log_info("'Updates ready' notification already shown, skipping duplicate (same update set; volatile download note ignored; UPDATES_READY_REMINDER_REPEAT_ENABLED=false)")
             return
         
-        if last_notification == current_notification:
-            log_debug("Notification unchanged, re-showing to keep it visible")
+        if last_key == current_key:
+            log_debug("Notification unchanged (same update set; volatile download note ignored), re-showing to keep it visible")
         else:
             log_info(f"Notification changed from [{last_notification}] to [{current_notification}]")
         
@@ -70725,6 +70826,15 @@ class Handler(BaseHTTPRequestHandler):
                     'echo "" >>"$LOG"',
                     'echo "[webui] ${PM_NAME} update rc=$rc" >>"$LOG"',
                     'if [ ${rc} -eq 0 ]; then write_status 0 ${rc} running-package-manager-done; else write_status 0 ${rc} failed; fi',
+                    # After a successful (non-simulated) update, clear the cached
+                    # dry-run/downloader state so the next notifier tick does NOT
+                    # re-show a stale "Updates Ready to Install" popup for updates
+                    # that were just installed (mirrors the post-update cache
+                    # clearing in zypper-run-install).
+                    'if [ ${rc} -eq 0 ] && [ "${SIMULATE:-0}" != "1" ]; then',
+                    '  rm -f /var/log/zypper-auto/dry-run-last.txt /var/log/zypper-auto/download-status.txt 2>/dev/null || true',
+                    '  echo "[webui] Cleared stale dry-run/download cache after successful update" >>"$LOG" || true',
+                    'fi',
                     'if [ "${SIMULATE:-0}" = "1" ]; then echo "[webui] Simulation mode: skipping optional updates." >>"$LOG"; fi',
                     'if [ ${rc} -ne 0 ]; then echo "[webui] ${PM_NAME} update failed; skipping optional updates." >>"$LOG"; fi',
 
