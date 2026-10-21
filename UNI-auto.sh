@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 68 - Enterprise Edition: copr-search TUI + media-repos all-distro + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 68 - Enterprise Edition: copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -29718,6 +29718,9 @@ generate_dashboard() {
 
         return {
             release: chosen || {},
+            // Full non-draft candidate list (newest first) so changelog views can
+            // list multiple releases, each with its title + message body.
+            releases: candidates,
             provenance: {
                 policy: pol,
                 selection: selection,
@@ -29740,21 +29743,104 @@ generate_dashboard() {
         });
     }
 
+    // --- Changelog formatting: TITLE + full commit/release MESSAGE bodies ---
+    // Every changelog entry now renders its TITLE (commit message first line /
+    // release name) plus the full MESSAGE body (indented, bounded so one huge
+    // body cannot flood the view). Shared by every changelog surface: the
+    // Self-Update "Fetch changelog" button, the post-install release-notes
+    // views (view-only + dry-run), and the welcome overlay release notes.
+    function _suChangelogShortDate(iso) {
+        var d = '';
+        try { d = String(iso || ''); } catch (e) { d = ''; }
+        if (d.indexOf('T') >= 0) d = d.split('T')[0];
+        return d;
+    }
+
+    function _suChangelogIndentBody(text, maxChars) {
+        var t = '';
+        try { t = String(text || ''); } catch (e) { t = ''; }
+        t = t.replace(/^\s+|\s+$/g, '');
+        if (!t) return '';
+        var n = parseInt(maxChars || 0, 10) || 0;
+        if (n > 0 && t.length > n) {
+            t = t.slice(0, n).replace(/\s+$/, '') + '\n…(truncated)';
+        }
+        var lines = t.split('\n');
+        var out = [];
+        for (var i = 0; i < lines.length; i++) out.push('    ' + lines[i]);
+        return out.join('\n');
+    }
+
+    function _suFormatCommitBlock(c, bodyMax) {
+        // Formats ONE GitHub commit as: header line + 'Title:' + 'Message:' body.
+        c = c || {};
+        var sha = (c.sha) ? String(c.sha).slice(0, 7) : '???????';
+        var full = '';
+        try { full = String(((c || {}).commit || {}).message || ''); } catch (e) { full = ''; }
+        var lines = full.split('\n');
+        var title = (lines[0] || '').replace(/^\s+|\s+$/g, '');
+        var body = lines.slice(1).join('\n');
+        var dt = '';
+        try { dt = _suChangelogShortDate((((c || {}).commit || {}).author || {}).date || ''); } catch (eD) { dt = ''; }
+        var author = '';
+        try { author = String((((c || {}).commit || {}).author || {}).name || '') || String(((c || {}).author || {}).login || ''); } catch (eA) { author = ''; }
+        var out = [];
+        out.push('- ' + sha + (dt ? ('  ' + dt) : '') + (author ? ('  ' + author) : ''));
+        out.push('  Title: ' + (title || '(no commit title)'));
+        var ind = _suChangelogIndentBody(body, bodyMax || 900);
+        if (ind) {
+            out.push('  Message:');
+            out.push(ind);
+        }
+        return out.join('\n');
+    }
+
+    function _suFormatReleaseBlock(r, bodyMax) {
+        // Formats ONE GitHub release as: header line + 'Title:' + 'Message:' body.
+        r = r || {};
+        var tag = '';
+        try { tag = String(r.tag_name || ''); } catch (eT) { tag = ''; }
+        var name = '';
+        try { name = String(r.name || ''); } catch (eN) { name = ''; }
+        var dt = '';
+        try { dt = _suChangelogShortDate(r.published_at || r.created_at || ''); } catch (eD) { dt = ''; }
+        var out = [];
+        out.push('- ' + (tag || 'untagged') + (dt ? ('  ' + dt) : '') + (r.prerelease ? '  (prerelease)' : ''));
+        out.push('  Title: ' + (name || tag || '(no release title)'));
+        var body = '';
+        try { body = String(r.body || ''); } catch (eB) { body = ''; }
+        var ind = _suChangelogIndentBody(body, bodyMax || 4000);
+        if (ind) {
+            out.push('  Message:');
+            out.push(ind);
+        } else {
+            out.push('  Message: (no release notes)');
+        }
+        return out.join('\n');
+    }
+
     function _suFetchStableReleaseNotesText(statusHint) {
         return _suFetchLatestStableReleaseCandidate(statusHint || null).then(function(sel) {
             var j = (sel && sel.release) ? sel.release : {};
             var prov = (sel && sel.provenance) ? sel.provenance : {};
+            var rest = (sel && sel.releases && sel.releases.length) ? sel.releases : [];
             var out = [];
             out.push('Stable channel (policy-aware release candidate)');
             out.push('Policy: ' + String((prov && prov.policy) ? prov.policy : 'release'));
             out.push('Selection: ' + String((prov && prov.selection) ? prov.selection : 'release'));
             if (prov && prov.fallback_reason) out.push('Fallback: ' + String(prov.fallback_reason));
-            out.push('Tag: ' + String(j.tag_name || 'unknown'));
-            if (j.name) out.push('Name: ' + String(j.name));
-            if (j.published_at) out.push('Published: ' + String(j.published_at));
-            if (j.prerelease) out.push('Type: prerelease candidate');
             out.push('');
-            out.push(String(j.body || '(no release notes)'));
+            out.push(_suFormatReleaseBlock(j, 4000));
+            // Earlier releases: list each with its title + message body (smaller
+            // bound per release so the view stays readable + scrollable).
+            if (rest.length > 1) {
+                out.push('');
+                out.push('Earlier releases (title + message each):');
+                for (var i = 1; i < rest.length && i <= 5; i++) {
+                    out.push('');
+                    out.push(_suFormatReleaseBlock(rest[i], 700));
+                }
+            }
             return out.join('\n');
         });
     }
@@ -29763,7 +29849,7 @@ generate_dashboard() {
         var base = 'https://api.github.com/repos/' + encodeURIComponent(GITHUB_OWNER) + '/' + encodeURIComponent(GITHUB_REPO);
         return _githubApiJson(base + '/commits?per_page=18').then(function(arr) {
             var out = [];
-            out.push('Rolling channel (latest commits on main)');
+            out.push('Rolling channel (latest commits on main — title + commit message)');
             out.push('');
 
             // Robustness: GitHub may return a JSON object instead of an array (rate limit, auth error, etc.).
@@ -29780,13 +29866,7 @@ generate_dashboard() {
             }
 
             arr.forEach(function(c) {
-                var sha = (c && c.sha) ? String(c.sha).slice(0, 7) : '???????';
-                var msg = '';
-                try { msg = String(((c || {}).commit || {}).message || ''); } catch (e) { msg = ''; }
-                msg = msg.split('\n')[0];
-                var dt = '';
-                try { dt = String((((c || {}).commit || {}).author || {}).date || ''); } catch (e) { dt = ''; }
-                out.push('- ' + sha + (dt ? (' ' + dt) : '') + ' ' + msg);
+                out.push(_suFormatCommitBlock(c, 900));
             });
             return out.join('\n');
         });
@@ -31007,17 +31087,23 @@ generate_dashboard() {
             return _suFetchLatestStableReleaseCandidate(statusHint).then(function(sel) {
                 var j = (sel && sel.release) ? sel.release : {};
                 var prov = (sel && sel.provenance) ? sel.provenance : {};
+                var rest = (sel && sel.releases && sel.releases.length) ? sel.releases : [];
                 var out = [];
                 out.push('Stable channel (policy-aware release candidate)');
                 out.push('Policy: ' + String((prov && prov.policy) ? prov.policy : 'release'));
                 out.push('Selection: ' + String((prov && prov.selection) ? prov.selection : 'release'));
                 if (prov && prov.fallback_reason) out.push('Fallback: ' + String(prov.fallback_reason));
-                out.push('Tag: ' + String(j.tag_name || 'unknown'));
-                if (j.name) out.push('Name: ' + String(j.name));
-                if (j.published_at) out.push('Published: ' + String(j.published_at));
-                if (j.prerelease) out.push('Type: prerelease candidate');
                 out.push('');
-                out.push(String(j.body || '(no release notes)'));
+                out.push(_suFormatReleaseBlock(j, 4000));
+                // Earlier releases: each listed with its title + message body.
+                if (rest.length > 1) {
+                    out.push('');
+                    out.push('Earlier releases (title + message each):');
+                    for (var sri = 1; sri < rest.length && sri <= 5; sri++) {
+                        out.push('');
+                        out.push(_suFormatReleaseBlock(rest[sri], 700));
+                    }
+                }
                 _selfUpdateSetChangelog(out.join('\n'));
                 toast('Changelog loaded', 'Stable notes fetched (' + String((prov && prov.selection) ? prov.selection : 'release') + ')', 'ok');
                 return j;
@@ -31031,22 +31117,27 @@ generate_dashboard() {
             });
         }
 
-        // rolling: show latest commits on main
+        // rolling: show latest commits on main — each with its commit TITLE
+        // plus the full commit MESSAGE body (bounded), not just the first line.
         return _githubApiJson(base + '/commits?per_page=12').then(function(arr) {
             var out2 = [];
-            out2.push('Rolling channel (latest commits on main)');
+            out2.push('Rolling channel (latest commits on main — title + commit message)');
             out2.push('');
-            (arr || []).forEach(function(c) {
-                var sha = (c && c.sha) ? String(c.sha).slice(0, 7) : '???????';
-                var msg = '';
-                try { msg = String(((c || {}).commit || {}).message || ''); } catch (e) { msg = ''; }
-                msg = msg.split('\n')[0];
-                var dt = '';
-                try { dt = String((((c || {}).commit || {}).author || {}).date || ''); } catch (e) { dt = ''; }
-                out2.push('- ' + sha + (dt ? (' ' + dt) : '') + ' ' + msg);
+            if (!Array.isArray(arr)) {
+                var msgRA = '';
+                try { msgRA = String((arr && arr.message) ? arr.message : 'unexpected GitHub response'); } catch (eRA) { msgRA = 'unexpected GitHub response'; }
+                out2.push('ERROR: ' + msgRA);
+                _selfUpdateSetChangelog(out2.join('\n'));
+                return arr;
+            }
+            if (arr.length === 0) {
+                out2.push('(no commits returned)');
+            }
+            arr.forEach(function(c) {
+                out2.push(_suFormatCommitBlock(c, 900));
             });
             _selfUpdateSetChangelog(out2.join('\n'));
-            toast('Changelog loaded', 'Recent commits fetched', 'ok');
+            toast('Changelog loaded', 'Recent commits fetched (title + message)', 'ok');
             return arr;
         }).catch(function(e) {
             var msg2 = (e && e.message) ? e.message : 'failed';
