@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 67 - Enterprise Edition: media-repos module + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 68 - Enterprise Edition: copr-search TUI + media-repos all-distro + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -1539,7 +1539,7 @@ if [[ $# -gt 0 ]]; then
             exit 2
             ;;
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
-        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--uninstall-zypper|\
+        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--copr-search|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--stale-module-dirs|--stale-modules|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-bg|--dash-bg-enable|--dash-bg-disable|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
@@ -4413,7 +4413,8 @@ __znh_write_dashboard_schema_json() {
     "KERNEL_FAMILY_PURGE_DRY_RUN": {"type": "bool", "default": "false", "requires": {"kernel_purge": true}},
     "KERNEL_FAMILY_PURGE_TIMEOUT_SECONDS": {"type": "int", "min": 60, "max": 7200, "step": 60, "default": "900", "requires": {"kernel_purge": true}},
 
-    "BTRFS_QGROUPS_ENABLED": {"type": "bool", "default": "false", "requires": {"snapper": true}}
+    "BTRFS_QGROUPS_ENABLED": {"type": "bool", "default": "false", "requires": {"snapper": true}},
+    "MEDIA_REPOS_MESA_OVERRIDE": {"type": "bool", "default": "false", "requires": {"pm": ["dnf"]}}
   }
 }
 EOF
@@ -11081,6 +11082,22 @@ BTRFS_MAINTENANCE_TUNE_CONFIRM=true
 BTRFS_QGROUPS_ENABLED=false
 
 # ---------------------------------------------------------------------
+# Multimedia & codec repositories (--media-repos)
+# ---------------------------------------------------------------------
+
+# MEDIA_REPOS_MESA_OVERRIDE
+# When true, `zypper-auto-helper --media-repos` enables the OPTIONAL Terra
+# Mesa override (terra-release-mesa) without asking. terra-release-mesa
+# replaces Fedora's Mesa with Terra's patched, codec-complete build and can
+# conflict with RPM Fusion *-freeworld packages (e.g.
+# mesa-va-drivers-freeworld, which gets swapped to Terra's mesa-va-drivers)
+# and can affect HDR support. Keep false unless you specifically want
+# Terra's Mesa. You can also enable it per-run with:
+#   sudo zypper-auto-helper --media-repos --mesa-override
+# Default: false (opt-in only).
+MEDIA_REPOS_MESA_OVERRIDE=false
+
+# ---------------------------------------------------------------------
 # Boot menu hygiene: auto-clean old kernel entries (systemd-boot / BLS)
 # ---------------------------------------------------------------------
 
@@ -11573,6 +11590,7 @@ EOF
     validate_bool_flag ENABLE_SOAR_UPDATES true
     validate_bool_flag ENABLE_BREW_UPDATES true
     validate_bool_flag ENABLE_PIPX_UPDATES true
+    validate_bool_flag MEDIA_REPOS_MESA_OVERRIDE false
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_allowed_set DASHBOARD_PERFORMANCE_MODE powersaving "powersaving,balanced,performance"
@@ -12409,6 +12427,9 @@ EOF
                 BTRFS_QGROUPS_ENABLED)
                     log_info "  - BTRFS_QGROUPS_ENABLED: when true, Btrfs quota groups (qgroups) are left enabled for per-snapshot size accounting. Defaults to false because qgroups make snapper cleanup/list slow and can hang btrfs-cleaner; the dashboard Snapper Manager can toggle this."
                     ;;
+                MEDIA_REPOS_MESA_OVERRIDE)
+                    log_info "  - MEDIA_REPOS_MESA_OVERRIDE: when true, --media-repos enables the optional Terra Mesa override without asking (conflicts with *-freeworld packages, can affect HDR); default false — also enable per-run with --media-repos --mesa-override."
+                    ;;
                 *)
                     log_info "  - ${key}: (no description available)"
                     ;;
@@ -12684,6 +12705,9 @@ EOF
                 BTRFS_QGROUPS_ENABLED)
                     # shellcheck disable=SC2034  # consumed by the dashboard API + /etc/zypper-auto.conf (schema-driven)
                     BTRFS_QGROUPS_ENABLED="false"
+                    ;;
+                MEDIA_REPOS_MESA_OVERRIDE)
+                    MEDIA_REPOS_MESA_OVERRIDE="false"
                     ;;
             esac
         done
@@ -21291,7 +21315,9 @@ generate_dashboard() {
         { key: 'CLEANUP_REPORT_FORMAT', type: 'enum', label: 'Cleanup report format' },
         { key: 'SCRUB_GHOST_AFTER_FORCE_PRUNE_ENABLED', type: 'bool', label: 'DANGEROUS: force-prune boot menu hygiene (scrub-ghost)', danger: true, danger_phrase: 'BOOT', advanced: true, help: 'When true (default), Snapper cleanup mode "force-prune" also runs scrub-ghost in safe backup mode to quarantine duplicate/stale boot entries. Can rebuild grub.cfg if enabled.' },
         { key: 'SCRUB_GHOST_AFTER_FORCE_PRUNE_REBUILD_GRUB', type: 'bool', label: 'DANGEROUS: scrub-ghost rebuild grub.cfg after force-prune', danger: true, danger_phrase: 'BOOT', advanced: true, help: 'When true (default), scrub-ghost adds --rebuild-grub after pruning boot entries. Requires danger zone unlock.' },
-        { key: 'BOOT_ENTRY_CLEANUP_MODE', type: 'enum', label: 'Boot entry cleanup mode' }
+        { key: 'BOOT_ENTRY_CLEANUP_MODE', type: 'enum', label: 'Boot entry cleanup mode' },
+
+        { key: 'MEDIA_REPOS_MESA_OVERRIDE', type: 'bool', label: 'DANGEROUS: --media-repos always enables the Terra Mesa override', danger: true, danger_phrase: 'MESA', advanced: true, help: 'When true, the multimedia/codec repository setup (--media-repos) enables terra-release-mesa without asking. Terra\'s Mesa is codec-complete but can conflict with RPM Fusion *-freeworld packages (they get swapped) and can affect HDR. Also enable per-run with: sudo zypper-auto-helper --media-repos --mesa-override. Requires danger zone unlock + typing MESA on change.' }
     ];
 
     function _settingsBanner(msg, isErr) {
@@ -49725,10 +49751,14 @@ run_uninstall_helper_only() {
     echo "because installed Flatpak apps still depend on them. Remove one manually"
     echo "with: flatpak remote-delete <name>  (append --user for per-user remotes)."
     echo "Multimedia/codec repositories configured by --media-repos (RPM Fusion"
-    echo "free/nonfree, Terra + subrepos, Arch codec packages) are also kept"
-    echo "because installed codecs and apps still depend on them. Remove manually"
-    echo "with: sudo dnf remove rpmfusion-*-release terra-release* (Fedora) or"
-    echo "sudo pacman -R <package> (Arch)."
+    echo "free/nonfree, Terra + subrepos, openSUSE Packman, deb-multimedia, Arch"
+    echo "codec packages) are also kept because installed codecs and apps still"
+    echo "depend on them. Remove manually with: sudo dnf remove rpmfusion-*-release"
+    echo "terra-release* (Fedora), sudo zypper rr packman-essentials (openSUSE),"
+    echo "sudo rm /etc/apt/sources.list.d/dmo.sources && sudo apt remove"
+    echo "deb-multimedia-keyring (Debian), or sudo pacman -R <package> (Arch)."
+    echo "Copr repositories enabled via --copr-search / dnf copr-search are kept"
+    echo "too; remove one with: sudo dnf copr remove <owner>/<project>."
     echo "" | tee -a "${LOG_FILE}"
     echo "NOTE: Snapper/btrfs/fstrim timers are OS features and are NOT disabled by" | tee -a "${LOG_FILE}"
     echo "default. If you want the uninstaller to also disable those timers (Option 5" | tee -a "${LOG_FILE}"
@@ -50964,6 +50994,14 @@ znh_media_repos_detect_family() {
             printf '%s\n' "arch"
             return 0
             ;;
+        opensuse*|sles|sled)
+            printf '%s\n' "suse"
+            return 0
+            ;;
+        debian|raspbian|devuan|ubuntu|linuxmint|lmde|pop|elementary|neon|kali|zorin)
+            printf '%s\n' "debian"
+            return 0
+            ;;
     esac
     case "${_mr_id_like}" in
         *fedora*)
@@ -50972,6 +51010,14 @@ znh_media_repos_detect_family() {
             ;;
         *arch*)
             printf '%s\n' "arch"
+            return 0
+            ;;
+        *suse*)
+            printf '%s\n' "suse"
+            return 0
+            ;;
+        *debian*|*ubuntu*)
+            printf '%s\n' "debian"
             return 0
             ;;
     esac
@@ -50993,6 +51039,8 @@ znh_media_repos_state_probe() {
     ZNH_MEDIA_FFMPEG_FULL=0
     ZNH_MEDIA_FFMPEG_FREE=0
     ZNH_MEDIA_CODECS_OK=0
+    ZNH_MEDIA_PACKMAN_OK=0
+    ZNH_MEDIA_DMO_OK=0
     ZNH_MEDIA_REPOS_INSTALLED=0
     ZNH_MEDIA_REPOS_HEALTHY=0
 
@@ -51047,6 +51095,52 @@ znh_media_repos_state_probe() {
                 ZNH_MEDIA_REPOS_HEALTHY=1
             fi
         fi
+    elif [ "${ZNH_MEDIA_REPOS_FAMILY}" = "suse" ]; then
+        # openSUSE: Packman is THE codec source. Installed = a Packman repo is
+        # configured; healthy = the codec set (from Packman) is present.
+        if command -v zypper >/dev/null 2>&1; then
+            if zypper lr -u 2>/dev/null | grep -qi packman; then
+                ZNH_MEDIA_PACKMAN_OK=1
+            fi
+        fi
+        if [ -f /etc/zypp/repos.d/packman-essentials.repo ] || [ -f /etc/zypp/repos.d/packman.repo ]; then
+            ZNH_MEDIA_PACKMAN_OK=1
+        fi
+        if command -v rpm >/dev/null 2>&1; then
+            if rpm -q ffmpeg >/dev/null 2>&1 \
+               && rpm -q gstreamer-plugins-libav >/dev/null 2>&1; then
+                ZNH_MEDIA_CODECS_OK=1
+            fi
+        fi
+        if [ "${ZNH_MEDIA_PACKMAN_OK}" -eq 1 ]; then
+            ZNH_MEDIA_REPOS_INSTALLED=1
+            if [ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ]; then
+                ZNH_MEDIA_REPOS_HEALTHY=1
+            fi
+        fi
+    elif [ "${ZNH_MEDIA_REPOS_FAMILY}" = "debian" ]; then
+        # Debian proper: deb-multimedia (DMO). Ubuntu/Mint: the codec set comes
+        # from the standard/universe repos, so no third-party repo is needed.
+        if command -v dpkg >/dev/null 2>&1; then
+            if dpkg -s deb-multimedia-keyring >/dev/null 2>&1 \
+               || [ -f /etc/apt/sources.list.d/dmo.sources ]; then
+                ZNH_MEDIA_DMO_OK=1
+            fi
+            if dpkg -s ffmpeg >/dev/null 2>&1 \
+               && dpkg -s gstreamer1.0-libav >/dev/null 2>&1; then
+                ZNH_MEDIA_CODECS_OK=1
+            fi
+        fi
+        if [ "${ZNH_MEDIA_DMO_OK}" -eq 1 ]; then
+            ZNH_MEDIA_REPOS_INSTALLED=1
+            if [ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ]; then
+                ZNH_MEDIA_REPOS_HEALTHY=1
+            fi
+        elif [ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ]; then
+            # Ubuntu/Mint-style systems: full codecs from the standard repos.
+            ZNH_MEDIA_REPOS_INSTALLED=1
+            ZNH_MEDIA_REPOS_HEALTHY=1
+        fi
     fi
     return 0
 }
@@ -51098,13 +51192,19 @@ run_media_repos_only() {
     echo "Detected distribution family: ${_mr_family:-none/unsupported}" | tee -a "${LOG_FILE}"
 
     if [ -z "${_mr_family}" ]; then
-        log_info "No supported distribution family detected via /etc/os-release (looked for the Fedora or Arch family via ID/ID_LIKE)."
-        log_info "The multimedia/codec repository setup currently supports Fedora and Arch; other families are not implemented yet."
+        log_info "No supported distribution family detected via /etc/os-release (looked for the Fedora, Arch, openSUSE or Debian family via ID/ID_LIKE)."
+        log_info "The multimedia/codec repository setup currently supports Fedora, Arch, openSUSE (Packman) and Debian/Ubuntu; other families are not implemented yet."
         log_info "Exiting cleanly; nothing was changed."
         return 0
     fi
 
     if [ "${_mr_family}" = "fedora" ]; then
+        # Nobara ships its own pre-configured multimedia repositories (including
+        # Terra); the Fedora path below stays fully idempotent, so anything
+        # Nobara already set up is detected and skipped by the probes.
+        if grep -q '^ID=nobara' "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" 2>/dev/null; then
+            log_info "Nobara detected: Nobara already ships its own pre-configured multimedia repositories. Running the idempotent Fedora path; anything already set up is detected and skipped."
+        fi
         # The Fedora path keys every repository URL off the %fedora macro. On
         # RHEL-like ID_LIKE matches (e.g. rocky: "rhel fedora") that macro does
         # not exist, so exit cleanly instead of building broken URLs.
@@ -51212,8 +51312,8 @@ run_media_repos_only() {
             log_success "Terra Mesa override already enabled (terra-release-mesa present); skipping."
         else
             local _mr_mesa_go=0
-            if [ "${MEDIA_REPOS_MESA_OVERRIDE:-0}" -eq 1 ] 2>/dev/null; then
-                log_warn "Terra Mesa override requested via --mesa-override (conflicts with *-freeworld packages and can affect HDR)."
+            if [[ "${MEDIA_REPOS_MESA_OVERRIDE:-false}" == "true" ]]; then
+                log_warn "Terra Mesa override requested (via the --mesa-override flag or MEDIA_REPOS_MESA_OVERRIDE=true in ${CONFIG_FILE:-/etc/zypper-auto.conf}; conflicts with *-freeworld packages and can affect HDR)."
                 _mr_mesa_go=1
             elif [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
                 echo "  [dry-run] Would prompt: enable the optional Terra Mesa override? (opt-in only; conflicts with *-freeworld, can affect HDR)" | tee -a "${LOG_FILE}"
@@ -51328,6 +51428,190 @@ run_media_repos_only() {
             log_error "Failed to install the Arch codec set. Resolve manually with: sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav ffmpeg"
             rc=1
         fi
+
+    elif [ "${_mr_family}" = "suse" ]; then
+        # 2) Idempotency probe + current state report (checks BEFORE any add).
+        znh_media_repos_state_probe
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Current media-repository state (probed before any change):" | tee -a "${LOG_FILE}"
+        echo "  - Packman repository          : $([ "${ZNH_MEDIA_PACKMAN_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Packman codec set installed : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        if [ "${ZNH_MEDIA_REPOS_INSTALLED}" -eq 1 ] && [ "${ZNH_MEDIA_REPOS_HEALTHY}" -eq 1 ]; then
+            log_success "openSUSE multimedia codec setup is already complete (Packman + codec set present); nothing to do."
+            update_status "SUCCESS: openSUSE media codecs already set up"
+            return 0
+        fi
+        # Preferred documented path (SDB:Installing codecs from Packman
+        # repositories): `opi codecs` — adds the Packman repo, switches
+        # vendors, installs the codec set; prompts interactively.
+        if ! command -v opi >/dev/null 2>&1 && [ "${MEDIA_REPOS_DRY_RUN:-0}" -ne 1 ] 2>/dev/null; then
+            log_info "'opi' (openSUSE Package Installer) not found; installing it via zypper (the documented codec path)"
+            if ! znh_install_package_via_system_pm opi; then
+                log_warn "Could not install 'opi'; falling back to the direct Packman Essentials commands."
+            fi
+        fi
+        if command -v opi >/dev/null 2>&1; then
+            if __znh_media_repos_run_or_dry "Install codecs via opi (adds Packman + vendor switch + codec set)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} opi codecs; then
+                log_success "opi codecs completed (Packman + codec set installed)."
+            else
+                log_error "opi codecs failed. Resolve manually with: opi codecs"
+                rc=1
+            fi
+        else
+            # Fallback (also the --dry-run preview): the documented direct
+            # SDB commands — add the release-specific Packman Essentials
+            # repo, refresh, then install the codec set pinned to Packman.
+            local _mr_suse_id _mr_suse_ver _mr_pm_url
+            _mr_suse_id=""
+            _mr_suse_ver=""
+            if [ -r "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" ]; then
+                _mr_suse_id="$(sed -n 's|^ID=||p' "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" 2>/dev/null | head -n1 | tr -d '\"')"
+                _mr_suse_ver="$(sed -n 's|^VERSION_ID=||p' "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" 2>/dev/null | head -n1 | tr -d '\"')"
+            fi
+            _mr_pm_url=""
+            case "${_mr_suse_id}" in
+                opensuse-tumbleweed)
+                    _mr_pm_url="https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Tumbleweed/Essentials/"
+                    ;;
+                opensuse-slowroll)
+                    _mr_pm_url="https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Slowroll/Essentials/"
+                    ;;
+                *)
+                    # Leap / SLES: URL keyed off VERSION_ID (e.g. 15.6 -> 15.6).
+                    if [ -n "${_mr_suse_ver}" ]; then
+                        _mr_pm_url="https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Leap_${_mr_suse_ver}/Essentials/"
+                    fi
+                    ;;
+            esac
+            if [ -n "${_mr_pm_url}" ]; then
+                if __znh_media_repos_run_or_dry "Add Packman Essentials repository (zypper addrepo -cfp 90)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} zypper --non-interactive addrepo -cfp 90 "${_mr_pm_url}" packman-essentials; then
+                    log_success "Packman Essentials repository added (priority 90, auto-refresh, GPG keys trusted)."
+                else
+                    log_error "Failed to add the Packman Essentials repository (${_mr_pm_url})."
+                    rc=1
+                fi
+                if ! __znh_media_repos_run_or_dry "Refresh repository metadata (zypper refresh, auto-import keys)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} zypper --non-interactive --gpg-auto-import-keys refresh; then
+                    log_warn "zypper refresh failed (non-fatal)."
+                fi
+                if __znh_media_repos_run_or_dry "Install the codec set from Packman (--allow-vendor-change --from packman-essentials)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} zypper --non-interactive install --allow-vendor-change --from packman-essentials \
+                    ffmpeg gstreamer-plugins-good gstreamer-plugins-bad gstreamer-plugins-ugly gstreamer-plugins-libav libavcodec-full; then
+                    log_success "Codec set installed from Packman (vendor change allowed from packman-essentials only)."
+                else
+                    log_error "Failed to install the codec set from Packman. Resolve manually with: sudo zypper install --allow-vendor-change --from packman-essentials ffmpeg gstreamer-plugins-{good,bad,ugly,libav} libavcodec-full"
+                    rc=1
+                fi
+            else
+                log_error "Could not determine the Packman Essentials URL for this openSUSE variant (ID=${_mr_suse_id:-?}, VERSION_ID=${_mr_suse_ver:-?}). Add Packman manually: https://en.opensuse.org/SDB:Installing_codecs_from_Packman_repositories"
+                rc=1
+            fi
+        fi
+
+    elif [ "${_mr_family}" = "debian" ]; then
+        # 2) Idempotency probe + current state report (checks BEFORE any add).
+        znh_media_repos_state_probe
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Current media-repository state (probed before any change):" | tee -a "${LOG_FILE}"
+        echo "  - deb-multimedia (DMO) repo   : $([ "${ZNH_MEDIA_DMO_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Codec set installed         : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        if [ "${ZNH_MEDIA_REPOS_INSTALLED}" -eq 1 ] && [ "${ZNH_MEDIA_REPOS_HEALTHY}" -eq 1 ]; then
+            log_success "Multimedia codec setup is already complete on this system; nothing to do."
+            update_status "SUCCESS: debian-family media codecs already set up"
+            return 0
+        fi
+        # Split Debian proper (needs deb-multimedia/DMO) from Ubuntu/Mint
+        # (full codecs already come from the standard/universe repositories).
+        local _mr_deb_id _mr_deb_codename
+        _mr_deb_id=""
+        _mr_deb_codename=""
+        if [ -r "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" ]; then
+            _mr_deb_id="$(sed -n 's|^ID=||p' "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" 2>/dev/null | head -n1 | tr -d '\"' | tr '[:upper:]' '[:lower:]')"
+            _mr_deb_codename="$(sed -n 's|^VERSION_CODENAME=||p' "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" 2>/dev/null | head -n1 | tr -d '\"')"
+        fi
+        case "${_mr_deb_id}" in
+            debian|raspbian|devuan)
+                # Debian proper: add deb-multimedia (DMO) via the documented
+                # keyring package (checksum-verified) + DEB822 source, then
+                # install the codec set. See https://deb-multimedia.org
+                if [ "${ZNH_MEDIA_DMO_OK}" -ne 1 ]; then
+                    local _mr_dmo_keyring_url _mr_dmo_deb _mr_dmo_sha
+                    _mr_dmo_keyring_url="https://www.deb-multimedia.org/pool/main/d/deb-multimedia-keyring/deb-multimedia-keyring_2024.9.1_all.deb"
+                    _mr_dmo_sha="8dc6cbb266c701cfe58bd1d2eb9fe2245a1d6341c7110cfbfe3b5a975dcf97ca"
+                    _mr_dmo_deb="$(mktemp /tmp/dmo-keyring.XXXXXX.deb)"
+                    if [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+                        echo "  [dry-run] Would download + verify (SHA256) + install the deb-multimedia keyring package" | tee -a "${LOG_FILE}"
+                        echo "  [dry-run]   ${_mr_dmo_keyring_url}" | tee -a "${LOG_FILE}"
+                    elif curl -fsSL --max-time 60 -o "${_mr_dmo_deb}" "${_mr_dmo_keyring_url}" \
+                         && printf '%s  %s\n' "${_mr_dmo_sha}" "${_mr_dmo_deb}" | sha256sum -c - >/dev/null 2>&1; then
+                        if __znh_media_repos_run_or_dry "Install the deb-multimedia keyring package (checksum verified)" \
+                            ${_mr_as_root[@]+"${_mr_as_root[@]}"} env DEBIAN_FRONTEND=noninteractive apt install -y "${_mr_dmo_deb}"; then
+                            log_success "deb-multimedia keyring installed (SHA256 verified)."
+                        else
+                            log_error "Failed to install the deb-multimedia keyring package."
+                            rc=1
+                        fi
+                    else
+                        log_error "Could not download/verify the deb-multimedia keyring (SHA256 mismatch or network error). Refusing to install an unverified keyring; see https://deb-multimedia.org"
+                        rc=1
+                    fi
+                    rm -f -- "${_mr_dmo_deb}" 2>/dev/null || true
+                    # DEB822 source (the modern .sources format per deb-multimedia.org)
+                    if [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+                        echo "  [dry-run] Would write /etc/apt/sources.list.d/dmo.sources (Suites: ${_mr_deb_codename:-<codename>})" | tee -a "${LOG_FILE}"
+                    elif [ -n "${_mr_deb_codename}" ] && [ -d /usr/share/keyrings ] && [ -f /usr/share/keyrings/deb-multimedia-keyring.pgp ]; then
+                        if printf '%s\n' 'Types: deb' 'URIs: https://www.deb-multimedia.org' "Suites: ${_mr_deb_codename}" 'Components: main non-free' 'Signed-By: /usr/share/keyrings/deb-multimedia-keyring.pgp' 'Enabled: yes' \
+                            | ${_mr_as_root[@]+"${_mr_as_root[@]}"} tee /etc/apt/sources.list.d/dmo.sources >/dev/null 2>&1; then
+                            log_success "deb-multimedia DEB822 source written (Suites: ${_mr_deb_codename})."
+                        else
+                            log_error "Failed to write /etc/apt/sources.list.d/dmo.sources."
+                            rc=1
+                        fi
+                    else
+                        log_error "Cannot write the DMO source (codename '${_mr_deb_codename:-?}' or keyring /usr/share/keyrings/deb-multimedia-keyring.pgp missing)."
+                        rc=1
+                    fi
+                    if ! __znh_media_repos_run_or_dry "Refresh APT metadata after adding deb-multimedia (apt update)" \
+                        ${_mr_as_root[@]+"${_mr_as_root[@]}"} env DEBIAN_FRONTEND=noninteractive apt update -y; then
+                        log_warn "apt update failed after adding deb-multimedia (non-fatal)."
+                    fi
+                else
+                    log_success "deb-multimedia repository already configured; skipping its setup."
+                fi
+                if __znh_media_repos_run_or_dry "Install the multimedia codec set (ffmpeg + GStreamer plugin set)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} env DEBIAN_FRONTEND=noninteractive apt install -y \
+                    ffmpeg gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-vaapi libavcodec-extra; then
+                    log_success "Multimedia codec set installed."
+                else
+                    log_error "Failed to install the codec set. Resolve manually with: sudo apt install ffmpeg gstreamer1.0-plugins-{base,good,bad,ugly} gstreamer1.0-libav libavcodec-extra"
+                    rc=1
+                fi
+                ;;
+            *)
+                # Ubuntu/Mint family: full codecs (ffmpeg + GStreamer set +
+                # restricted extras) are available from the standard/universe
+                # repositories — no third-party repository is needed.
+                log_info "Ubuntu/Mint-style system: full codecs come from the standard/universe repositories (no third-party repo needed)."
+                if ! __znh_media_repos_run_or_dry "Install the multimedia codec set (ffmpeg + GStreamer plugin set)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} env DEBIAN_FRONTEND=noninteractive apt install -y \
+                    ffmpeg gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-vaapi; then
+                    log_error "Failed to install the codec set. Resolve manually with: sudo apt install ffmpeg gstreamer1.0-plugins-{base,good,bad,ugly} gstreamer1.0-libav"
+                    rc=1
+                else
+                    log_success "Multimedia codec set installed."
+                fi
+                # Best-effort extras (fonts/legacy codecs; pulls EULA packages,
+                # so non-interactive answers default to their defaults).
+                if ! __znh_media_repos_run_or_dry "Install ubuntu-restricted-extras (best-effort, non-fatal)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} env DEBIAN_FRONTEND=noninteractive apt install -y ubuntu-restricted-extras; then
+                    log_warn "ubuntu-restricted-extras install failed or unavailable (non-fatal)."
+                fi
+                ;;
+        esac
     fi
 
     # Final re-probe so the summary reflects the real post-run state.
@@ -51343,6 +51627,12 @@ run_media_repos_only() {
         echo "  - Freeworld GStreamer set  : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
     elif [ "${_mr_family}" = "arch" ]; then
         echo "  - Codec set (ffmpeg + GStreamer plugins) : $([ "${ZNH_MEDIA_REPOS_INSTALLED}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+    elif [ "${_mr_family}" = "suse" ]; then
+        echo "  - Packman repository          : $([ "${ZNH_MEDIA_PACKMAN_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Packman codec set installed : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+    elif [ "${_mr_family}" = "debian" ]; then
+        echo "  - deb-multimedia (DMO) repo   : $([ "${ZNH_MEDIA_DMO_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Codec set installed         : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
     fi
     echo "" | tee -a "${LOG_FILE}"
 
@@ -51355,6 +51645,307 @@ run_media_repos_only() {
     fi
 
     return "$rc"
+}
+
+# --- Helper: Copr search + multi-select enable (CLI, opi-style TUI) ---
+#
+# `zypper-auto-helper --copr-search <query>` searches Fedora Copr via the
+# official API v3 (https://copr.fedorainfracloud.org/api_3/project/search),
+# lists every matching project with its TITLE (owner/project full name) and
+# DESCRIPTION, and offers an interactive numbered MULTI-SELECT TUI (numbers,
+# ranges like 3-7, 'all', 'none', Enter to cancel) — the same UX idea as openSUSE
+# `opi`. Each selected project is enabled via `dnf/dnf5 copr enable` (already
+# enabled ones are detected and skipped, so re-runs are idempotent), with an
+# optional package install afterwards. Also reachable as `dnf copr-search
+# <query>` through the dnf-with-ps wrapper hook.
+run_copr_search_only() {
+    # Args: the search query words (joined with spaces).
+    log_info ">>> Copr search + multi-select enable helper mode..."
+    update_status "Running Copr search..."
+
+    local rc=0
+    local _cs_query _cs_family _cs_dnf _cs_q _cs_json _cs_n _cs_i _cs_tok _cs_lo _cs_hi
+    local -a _cs_as_root=()
+    local -a _cs_names=() _cs_descs=() _cs_enabled_flags=() _cs_sel=()
+
+    _cs_query="$*"
+    if [ -z "${_cs_query}" ]; then
+        log_error "No search query given. Usage: zypper-auto-helper --copr-search <query>"
+        return 1
+    fi
+
+    # Copr is a Fedora-family ecosystem; exit cleanly elsewhere.
+    _cs_family="$(znh_media_repos_detect_family)"
+    if [ "${_cs_family}" != "fedora" ]; then
+        log_info "Copr repositories are a Fedora-family ecosystem (detected family: ${_cs_family:-none/unsupported})."
+        log_info "--copr-search currently targets Fedora-family systems only. Exiting cleanly; nothing was changed."
+        return 0
+    fi
+
+    # Use dnf5 when that is the default (Fedora 41+), otherwise dnf.
+    if command -v dnf5 >/dev/null 2>&1; then
+        _cs_dnf="dnf5"
+    elif command -v dnf >/dev/null 2>&1; then
+        _cs_dnf="dnf"
+    else
+        log_error "Neither dnf5 nor dnf found; cannot search/enable Copr repositories."
+        return 1
+    fi
+
+    # Privilege handling (copr enable needs root; the search itself does not).
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        if command -v sudo >/dev/null 2>&1; then
+            _cs_as_root=(sudo)
+        else
+            log_error "--copr-search needs root privileges to enable Copr repositories and sudo is not available. Re-run with sudo."
+            return 1
+        fi
+    fi
+
+    # Ensure the copr plugin is available (dnf5-plugins on dnf5, dnf-plugins-core
+    # on dnf4). Best-effort auto-install; a clean error if it cannot be provided.
+    if ! "${_cs_dnf}" copr list >/dev/null 2>&1; then
+        log_info "The copr command is not available (${_cs_dnf} copr); installing the Copr plugin..."
+        local _cs_copr_pkg
+        if [ "${_cs_dnf}" = "dnf5" ]; then
+            _cs_copr_pkg="dnf5-plugins"
+        else
+            _cs_copr_pkg="dnf-plugins-core"
+        fi
+        if ! znh_install_package_via_system_pm "${_cs_copr_pkg}"; then
+            log_error "Could not install ${_cs_copr_pkg} (provides the '${_cs_dnf} copr' command). Install it manually, then re-run: sudo zypper-auto-helper --copr-search ${_cs_query}"
+            return 1
+        fi
+        if ! "${_cs_dnf}" copr list >/dev/null 2>&1; then
+            log_error "The copr command is still unavailable after installing ${_cs_copr_pkg}."
+            return 1
+        fi
+    fi
+
+    # Reachability pre-check for the Copr hub (clean offline skip).
+    if ! __znh_check_service_reachable "https://copr.fedorainfracloud.org" "Copr (copr.fedorainfracloud.org)"; then
+        log_warn "Copr hub unreachable; cannot search. Retry later with: sudo zypper-auto-helper --copr-search ${_cs_query}"
+        return 1
+    fi
+
+    # URL-encode the query (python3 preferred; plain spaces fallback).
+    _cs_q="${_cs_query// /%20}"
+    if command -v python3 >/dev/null 2>&1; then
+        _cs_q="$(python3 -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.argv[1]))' "${_cs_query}" 2>/dev/null || printf '%s' "${_cs_query// /%20}")"
+    fi
+
+    # Fetch the search results from the official Copr API v3.
+    log_info "Searching Copr for '${_cs_query}'..."
+    _cs_json="$(curl -sf --max-time 30 "https://copr.fedorainfracloud.org/api_3/project/search?query=${_cs_q}" 2>/dev/null || true)"
+    if [ -z "${_cs_json}" ]; then
+        log_error "Copr search request failed (empty response from the Copr API). Check your network and retry with: sudo zypper-auto-helper --copr-search ${_cs_query}"
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 is required to parse the Copr search results. Install python3, then re-run: sudo zypper-auto-helper --copr-search ${_cs_query}"
+        return 1
+    fi
+
+    # Parse the JSON: one line per project as "full_name<TAB>description"
+    # (description: first line, truncated for the list view).
+    local _cs_tsv
+    _cs_tsv="$(printf '%s' "${_cs_json}" | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+items = data.get("items", []) or []
+for it in items:
+    full_name = str(it.get("full_name") or "").strip()
+    if not full_name:
+        continue
+    desc = " ".join(str(it.get("description") or "").split())
+    first_line = (desc.splitlines() or [""])[0] if desc else ""
+    if len(first_line) > 110:
+        first_line = first_line[:107] + "..."
+    sys.stdout.write(full_name + "\t" + first_line + "\n")
+' 2>/dev/null || true)"
+    if [ -z "${_cs_tsv}" ]; then
+        log_info "No Copr projects found for '${_cs_query}'. Nothing to do."
+        update_status "SUCCESS: no Copr projects matched the query"
+        return 0
+    fi
+    mapfile -t _cs_lines <<<"${_cs_tsv}"
+    for _cs_line in "${_cs_lines[@]}"; do
+        _cs_names+=("${_cs_line%%$'\t'*}")
+        _cs_descs+=("${_cs_line#*$'\t'}")
+    done
+    _cs_n="${#_cs_names[@]}"
+
+    # Idempotency: mark projects that are already enabled (local copr list,
+    # no network — reads /etc/yum.repos.d/*.repo).
+    local _cs_copr_list
+    _cs_copr_list="$("${_cs_dnf}" copr list 2>/dev/null || true)"
+    for _cs_i in "${!_cs_names[@]}"; do
+        _cs_enabled_flags+=(0)
+        if printf '%s\n' "${_cs_copr_list}" | grep -Fq -- "${_cs_names[${_cs_i}]}"; then
+            _cs_enabled_flags[${_cs_i}]=1
+        fi
+    done
+
+    # Display: numbered list with TITLE (owner/project) + DESCRIPTION.
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Copr projects matching '${_cs_query}' (${_cs_n} found):" | tee -a "${LOG_FILE}"
+    echo "" | tee -a "${LOG_FILE}"
+    for _cs_i in "${!_cs_names[@]}"; do
+        if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
+            printf '  %3d) %s  [ALREADY ENABLED]\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
+        else
+            printf '  %3d) %s\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
+        fi
+        if [ -n "${_cs_descs[${_cs_i}]}" ]; then
+            printf '        %s\n' "${_cs_descs[${_cs_i}]}" | tee -a "${LOG_FILE}"
+        fi
+    done
+    echo "" | tee -a "${LOG_FILE}"
+
+    # Interactive multi-select TUI (opi-style). Non-interactive runs only get
+    # the list above plus a how-to hint (selection needs a real terminal).
+    if [ ! -t 0 ] || [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null; then
+        log_info "Non-interactive mode: listing only. To select and enable projects interactively, run in a terminal:"
+        log_info "  sudo zypper-auto-helper --copr-search ${_cs_query}   (or: dnf copr-search ${_cs_query})"
+        update_status "SUCCESS: Copr search listed ${_cs_n} project(s) (interactive selection requires a terminal)"
+        return 0
+    fi
+
+    echo "Select Copr repositories to enable (multi-select):"
+    echo "  - enter numbers separated by spaces, e.g.  1 3 5"
+    echo "  - or a range, e.g.  3-7"
+    echo "  - or  all  /  none"
+    echo "  - press Enter on an empty line to cancel"
+    local _cs_answer=""
+    read -r -p "Selection: " _cs_answer || true
+    if [ -z "${_cs_answer}" ]; then
+        log_info "Selection cancelled; nothing was changed."
+        return 0
+    fi
+
+    # Parse the selection into _cs_sel (0-based indexes, validated, deduped).
+    case "${_cs_answer,,}" in
+        all)
+            for _cs_i in "${!_cs_names[@]}"; do
+                _cs_sel+=("${_cs_i}")
+            done
+            ;;
+        none)
+            log_info "No repositories selected; nothing was changed."
+            return 0
+            ;;
+        *)
+            local _cs_bad=0
+            for _cs_tok in ${_cs_answer}; do
+                case "${_cs_tok}" in
+                    *-*)
+                        _cs_lo="${_cs_tok%%-*}"
+                        _cs_hi="${_cs_tok##*-}"
+                        if [[ "${_cs_lo}" =~ ^[0-9]+$ ]] && [[ "${_cs_hi}" =~ ^[0-9]+$ ]] \
+                           && [ "${_cs_lo}" -ge 1 ] 2>/dev/null && [ "${_cs_hi}" -le "${_cs_n}" ] 2>/dev/null \
+                           && [ "${_cs_lo}" -le "${_cs_hi}" ] 2>/dev/null; then
+                            for _cs_i in $(seq "${_cs_lo}" "${_cs_hi}"); do
+                                _cs_sel+=("$((_cs_i - 1))")
+                            done
+                        else
+                            _cs_bad=1
+                        fi
+                        ;;
+                    *)
+                        if [[ "${_cs_tok}" =~ ^[0-9]+$ ]] && [ "${_cs_tok}" -ge 1 ] 2>/dev/null \
+                           && [ "${_cs_tok}" -le "${_cs_n}" ] 2>/dev/null; then
+                            _cs_sel+=("$((_cs_tok - 1))")
+                        else
+                            _cs_bad=1
+                        fi
+                        ;;
+                esac
+            done
+            if [ "${_cs_bad}" -eq 1 ] || [ "${#_cs_sel[@]}" -eq 0 ]; then
+                log_error "Invalid selection '${_cs_answer}' (use numbers 1-${_cs_n}, ranges like 3-7, 'all', or 'none'). Nothing was changed."
+                return 1
+            fi
+            # Dedupe (keep order).
+            local -a _cs_sel_d=()
+            local _cs_seen _cs_j
+            for _cs_i in "${_cs_sel[@]}"; do
+                _cs_seen=0
+                for _cs_j in "${_cs_sel_d[@]}"; do
+                    if [ "${_cs_i}" = "${_cs_j}" ]; then _cs_seen=1; break; fi
+                done
+                if [ "${_cs_seen}" -eq 0 ]; then _cs_sel_d+=("${_cs_i}"); fi
+            done
+            _cs_sel=("${_cs_sel_d[@]+"${_cs_sel_d[@]}"}")
+            ;;
+    esac
+
+    # Confirmation preview.
+    echo ""
+    echo "The following ${#_cs_sel[@]} Copr repositories will be enabled:"
+    for _cs_i in "${_cs_sel[@]}"; do
+        printf '  - %s\n' "${_cs_names[${_cs_i}]}"
+        if [ -n "${_cs_descs[${_cs_i}]}" ]; then
+            printf '      %s\n' "${_cs_descs[${_cs_i}]}"
+        fi
+    done
+    echo ""
+    echo "Copr repositories are third-party builds (installed as /etc/yum.repos.d/_copr*.repo files)."
+    local _cs_confirm=""
+    read -r -p "Proceed? [y/N]: " _cs_confirm || true
+    if [[ "${_cs_confirm}" != [Yy]* ]]; then
+        log_info "Aborted by user; nothing was changed."
+        return 0
+    fi
+
+    # Enable each selected project (already-enabled ones are skipped).
+    local _cs_enabled=0 _cs_skipped=0 _cs_failed=0
+    for _cs_i in "${_cs_sel[@]}"; do
+        if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
+            log_success "Copr repository ${_cs_names[${_cs_i}]} is already enabled; skipping."
+            _cs_skipped=$((_cs_skipped + 1))
+            continue
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        if execute_guarded "Enable Copr repository: ${_cs_names[${_cs_i}]}" \
+            ${_cs_as_root[@]+"${_cs_as_root[@]}"} "${_cs_dnf}" -y copr enable "${_cs_names[${_cs_i}]}"; then
+            log_success "Copr repository ${_cs_names[${_cs_i}]} enabled."
+            _cs_enabled=$((_cs_enabled + 1))
+        else
+            log_error "Failed to enable Copr repository ${_cs_names[${_cs_i}]}. Resolve manually with: sudo ${_cs_dnf} copr enable ${_cs_names[${_cs_i}]}"
+            _cs_failed=$((_cs_failed + 1))
+            rc=1
+        fi
+    done
+
+    # Optional package install from the freshly enabled repositories.
+    if [ "${_cs_enabled}" -gt 0 ]; then
+        echo "" | tee -a "${LOG_FILE}"
+        local _cs_install=""
+        read -r -p "Install '${_cs_query}' from the enabled Copr repositories now? [y/N]: " _cs_install || true
+        if [[ "${_cs_install}" == [Yy]* ]]; then
+            if execute_guarded "Install '${_cs_query}' from the enabled Copr repositories" \
+                ${_cs_as_root[@]+"${_cs_as_root[@]}"} "${_cs_dnf}" install -y "${_cs_query}"; then
+                log_success "'${_cs_query}' installed."
+            else
+                log_error "Failed to install '${_cs_query}'. Resolve manually with: sudo ${_cs_dnf} install ${_cs_query}"
+                rc=1
+            fi
+        else
+            log_info "Skipping the install; install later with: sudo ${_cs_dnf} install ${_cs_query}"
+        fi
+    fi
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Copr search summary: enabled=${_cs_enabled}, already-enabled skipped=${_cs_skipped}, failed=${_cs_failed}." | tee -a "${LOG_FILE}"
+    if [ "${rc}" -eq 0 ]; then
+        update_status "SUCCESS: Copr search + enable completed"
+    else
+        update_status "COMPLETED WITH WARNINGS: Copr search + enable encountered some issues"
+    fi
+    return "${rc}"
 }
 
 # Show help if requested, or when invoked as the installed CLI with no arguments
@@ -51385,13 +51976,21 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + universal Flatpak remotes:"
     echo "                          Flathub, Flathub Beta, Fedora OCI stable/testing, AppCenter, GNOME Nightly;"
     echo "                          optional Discover removal)"
-    echo "  --media-repos           Detect the running distro (Fedora/Arch family via /etc/os-release) and enable"
-    echo "                          the right third-party repos for multimedia, codecs and Mesa. Fedora: RPM Fusion"
-    echo "                          free/nonfree (+updates), Terra (+multimedia subrepo when published for the"
-    echo "                          release), the multimedia group and the full-codec ffmpeg swap. The Terra Mesa"
-    echo "                          override is opt-in only (--mesa-override; conflicts with *-freeworld, may"
-    echo "                          affect HDR). Arch: full-codec set from official repos. Idempotent; --dry-run"
-    echo "                          prints the commands without changing anything. Other distros exit cleanly."
+    echo "  --media-repos           Detect the running distro (Fedora/Arch/openSUSE/Debian family via /etc/os-release)"
+    echo "                          and enable the right third-party repos for multimedia, codecs and Mesa. Fedora:"
+    echo "                          RPM Fusion free/nonfree (+updates), Terra (+multimedia subrepo when published"
+    echo "                          for the release), the multimedia group and the full-codec ffmpeg swap. The Terra"
+    echo "                          Mesa override is opt-in only (--mesa-override or MEDIA_REPOS_MESA_OVERRIDE=true;"
+    echo "                          conflicts with *-freeworld, may affect HDR). openSUSE: opi codecs / Packman"
+    echo "                          Essentials. Debian: deb-multimedia; Ubuntu/Mint: standard-repo codec set. Arch:"
+    echo "                          full-codec set from official repos. Idempotent; --dry-run prints commands without"
+    echo "                          changing anything. Other distros exit cleanly."
+    echo "  --copr-search <query>   Search Fedora Copr (official API v3) for <query>, list every project with its"
+    echo "                          title (owner/project) and description, and offer an interactive multi-select"
+    echo "                          TUI (numbers/ranges like 3-7, all/none) to enable the chosen repositories via"
+    echo "                          'dnf/dnf5 copr enable' — opi-style. Already-enabled repos are skipped"
+    echo "                          (idempotent), with an optional package install afterwards. Also available as"
+    echo "                          'dnf copr-search <query>' via the dnf wrapper hook. Fedora family only."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -51574,7 +52173,7 @@ elif [[ "${1:-}" == "--media-repos" || "${1:-}" == "--setup-media-repos" ]]; the
                 MEDIA_REPOS_DRY_RUN=1
                 ;;
             --mesa-override)
-                MEDIA_REPOS_MESA_OVERRIDE=1
+                MEDIA_REPOS_MESA_OVERRIDE="true"
                 ;;
             --yes|-y|--non-interactive)
                 ZNH_NON_INTERACTIVE=1
@@ -51592,6 +52191,23 @@ elif [[ "${1:-}" == "--media-repos" || "${1:-}" == "--setup-media-repos" ]]; the
     trap - ERR
     set +e
     run_media_repos_only
+    rc=$?
+    set -e
+    exit $rc
+elif [[ "${1:-}" == "--copr-search" ]]; then
+    log_info "Copr search + multi-select enable helper-only mode requested"
+    shift || true
+    if [ "$#" -eq 0 ]; then
+        log_error "No search query given. Usage: zypper-auto-helper --copr-search <query>"
+        echo "Run 'zypper-auto-helper --help' for usage." >&2
+        exit 1
+    fi
+    # Like --setup-SF: helper-only mode may intentionally return non-zero
+    # (e.g. an unreachable Copr hub or an invalid selection), so disable
+    # set -e and the ERR trap while running and propagate the exit code.
+    trap - ERR
+    set +e
+    run_copr_search_only "$@"
     rc=$?
     set -e
     exit $rc
@@ -55086,6 +55702,21 @@ fi
 STATUS_DIR="/var/log/zypper-auto"
 STATUS_FILE="$STATUS_DIR/download-status.txt"
 
+# --- dnf copr-search hook (routes 'dnf copr-search <query>' to the helper) ---
+# Copr search + multi-select enable lives in zypper-auto-helper (--copr-search).
+# Intercept it here so 'dnf copr-search <query>' works in every shell: fish's
+# dnf function routes copr-search here, and the bash/zsh aliases always do.
+# (The helper runs the interactive opi-style TUI under sudo, like opi itself.)
+if [ "${WRAPPER_PM}" = "dnf" ] && [ "${1:-}" = "copr-search" ]; then
+    shift
+    if command -v zypper-auto-helper >/dev/null 2>&1; then
+        exec sudo zypper-auto-helper --copr-search "$@"
+    fi
+    echo "dnf copr-search: zypper-auto-helper is not installed; install it first:" >&2
+    echo "  sudo ./UNI-auto.sh install" >&2
+    exit 1
+fi
+
 if __znh_pm_is_update_cmd "$@"; then
     # For interactive runs, publish a best-effort "downloading" status so the
     # desktop notifier can show a progress bar while the user is running
@@ -55647,9 +56278,11 @@ function dnf --wraps dnf --description "Wrapper for dnf with post-update checks"
     # rm=remove) so `dnf in foo` auto-elevates via the wrapper just like
     # `dnf install foo` — otherwise abbreviations fell through to the real dnf
     # with no elevation and failed with "requires superuser privileges".
+    # Also routes 'dnf copr-search <query>' to the wrapper, which execs the
+    # zypper-auto-helper --copr-search TUI (dnf itself has no copr-search).
     if test (count $argv) -ge 1
         switch $argv[1]
-            case install in upgrade up remove rm distro-sync reinstall downgrade
+            case install in upgrade up remove rm distro-sync reinstall downgrade copr-search
                 ~/.local/bin/dnf-with-ps $argv
                 return $status
         end
@@ -64028,6 +64661,15 @@ def _quick_action_table() -> dict:
             "phrase": "MEDIAREPOS",
             "explain": "Detects the running distribution (Fedora or Arch family via /etc/os-release) and enables the right third-party repositories for multimedia and codecs. Fedora: installs RPM Fusion free + nonfree (including their updates repositories), then Terra (terra-release, plus terra-release-multimedia when published for the release), then the multimedia group and the full-codec ffmpeg swap (ffmpeg-free -> ffmpeg). Idempotent: existing repositories and installed codec packages are detected first and every finished step is skipped. The optional Terra Mesa override is NOT enabled by this action (opt-in only; run 'sudo zypper-auto-helper --media-repos --mesa-override' in a terminal if you want it). Unsupported distros exit cleanly with a message.",
             "warning": "This installs system packages and adds third-party repositories (RPM Fusion, Terra); the first install imports their GPG keys. The Terra Mesa override (which can conflict with *-freeworld packages and affect HDR) is not included.",
+        },
+        "media-repos-mesa": {
+            "title": "Enable Terra Mesa override (media repos)",
+            "cmd": [HELPER_BIN, "--media-repos", "--mesa-override"],
+            "timeout_s": 30 * 60,
+            "needs_confirm": True,
+            "phrase": "MEDIAREPOSMESA",
+            "explain": "Runs the multimedia/codec repository setup with the OPTIONAL Terra Mesa override forced on (--mesa-override). terra-release-mesa replaces Fedora's Mesa with Terra's patched, codec-complete build and swaps conflicting RPM Fusion *-freeworld packages (e.g. mesa-va-drivers-freeworld -> mesa-va-drivers), then distro-syncs the Mesa set. Everything else stays idempotent (existing repos and codecs are detected and skipped).",
+            "warning": "DANGEROUS-ish: the Terra Mesa override can conflict with RPM Fusion *-freeworld packages (they get swapped to Terra's builds) and can affect HDR support. Prefer the plain media-repos action first; only run this if you specifically want Terra's Mesa. Fedora family only.",
         },
         "soar": {
             "title": "Install Soar CLI",

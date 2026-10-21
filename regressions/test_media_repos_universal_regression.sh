@@ -82,9 +82,14 @@ require_contains "${source_text}" 'ZNH_OS_RELEASE_FILE="${ZNH_OS_RELEASE_FILE:-/
 # --- 2) Detection branches (ID + ID_LIKE per spec) ---
 require_contains "${source_text}" 'fedora|nobara)' "Missing ID=fedora/nobara detection branch"
 require_contains "${source_text}" '        arch)' "Missing ID=arch detection branch"
+require_contains "${source_text}" '        opensuse*|sles|sled)' "Missing ID=openSUSE detection branch (suse family)"
+require_contains "${source_text}" 'debian|raspbian|devuan|ubuntu|linuxmint|lmde|pop|elementary|neon|kali|zorin)' "Missing ID=debian-family detection branch"
 require_contains "${source_text}" '        *fedora*)' "Missing ID_LIKE contains-fedora detection branch"
 require_contains "${source_text}" '        *arch*)' "Missing ID_LIKE contains-arch detection branch"
+require_contains "${source_text}" '        *suse*)' "Missing ID_LIKE contains-suse detection branch"
+require_contains "${source_text}" '        *debian*|*ubuntu*)' "Missing ID_LIKE contains-debian/ubuntu detection branch"
 require_contains "${source_text}" 'Exiting cleanly; nothing was changed.' "Missing clean-exit message for unsupported distros"
+require_contains "${source_text}" 'Nobara detected: Nobara already ships its own pre-configured multimedia repositories' "Missing dedicated Nobara note"
 
 # --- 3) Idempotency probe: existing .repo files / package checks BEFORE adding ---
 require_contains "${source_text}" 'rpm -q rpmfusion-free-release >/dev/null 2>&1 || [ -f /etc/yum.repos.d/rpmfusion-free.repo ]' "Missing rpmfusion-free probe (.repo fallback) before adding"
@@ -132,8 +137,16 @@ require_contains "${source_text}" '__znh_check_service_reachable "https://repos.
 require_contains "${source_text}" '"${_mr_dnf}" --quiet repoquery terra-release-multimedia >/dev/null 2>&1' "Missing terra-release-multimedia availability probe (published for Fedora 43+)"
 require_contains "${source_text}" 'not published for this Fedora release (Fedora 43+ only)' "Missing clean skip when terra-release-multimedia is not published"
 
-# --- 7) Mesa override: strictly confirm-gated ---
-require_contains "${source_text}" 'MEDIA_REPOS_MESA_OVERRIDE:-0' "Missing MEDIA_REPOS_MESA_OVERRIDE gate"
+# --- 7) Mesa override: strictly confirm-gated (config key + --mesa-override flag) ---
+require_contains "${source_text}" 'MEDIA_REPOS_MESA_OVERRIDE:-false' "Missing MEDIA_REPOS_MESA_OVERRIDE gate (string form)"
+require_contains "${source_text}" '            --mesa-override)' "Missing --mesa-override dispatcher case arm"
+require_contains "${source_text}" 'MEDIA_REPOS_MESA_OVERRIDE="true"' "Missing --mesa-override dispatcher flag mapping to the config key"
+require_contains "${source_text}" 'validate_bool_flag MEDIA_REPOS_MESA_OVERRIDE false' "Missing MEDIA_REPOS_MESA_OVERRIDE config validator"
+require_contains "${source_text}" '"MEDIA_REPOS_MESA_OVERRIDE": {"type": "bool", "default": "false"' "Missing MEDIA_REPOS_MESA_OVERRIDE schema key"
+require_contains "${source_text}" 'MEDIA_REPOS_MESA_OVERRIDE=false' "Missing MEDIA_REPOS_MESA_OVERRIDE config template default"
+require_contains "${source_text}" "MEDIA_REPOS_MESA_OVERRIDE', type: 'bool'" "Missing MEDIA_REPOS_MESA_OVERRIDE SETTINGS_FIELDS row"
+require_contains "${source_text}" '"media-repos-mesa": {' "Missing media-repos-mesa WebUI quick action"
+require_contains "${source_text}" '"phrase": "MEDIAREPOSMESA"' "Missing MEDIAREPOSMESA confirmation phrase"
 require_contains "${source_text}" "Type 'YES' to proceed: " "Missing interactive YES confirmation prompt for the Mesa override"
 require_contains "${source_text}" 'Non-interactive mode: the optional Terra Mesa override is skipped' "Missing non-interactive Mesa skip (must stay opt-in)"
 require_contains "${source_text}" 'can conflict with RPM Fusion *-freeworld packages' "Missing Mesa override conflict warning (*-freeworld)"
@@ -156,11 +169,27 @@ require_contains "${source_text}" 'openh264 gstreamer1-plugin-openh264 mozilla-o
 require_contains "${source_text}" 'pacman -S --noconfirm --needed' "Missing Arch idempotent codec-set install (--needed)"
 require_contains "${source_text}" 'gst-plugins-ugly gst-libav ffmpeg; then' "Missing Arch codec package list in the install command"
 
+# --- 10b) openSUSE family path (Packman + opi) ---
+require_contains "${source_text}" 'zypper lr -u 2>/dev/null | grep -qi packman' "Missing Packman repo probe (zypper lr)"
+require_contains "${source_text}" 'opi codecs' "Missing opi codecs (preferred documented openSUSE path)"
+require_contains "${source_text}" 'zypper --non-interactive install --allow-vendor-change --from packman-essentials' "Missing Packman codec install with --allow-vendor-change --from"
+require_contains "${source_text}" 'https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Tumbleweed/Essentials/' "Missing Tumbleweed Packman Essentials URL"
+require_contains "${source_text}" 'openSUSE_Leap_${_mr_suse_ver}/Essentials/' "Missing Leap Packman Essentials URL (version-keyed)"
+
+# --- 10c) Debian/Ubuntu family path (deb-multimedia / standard codecs) ---
+require_contains "${source_text}" 'deb-multimedia-keyring_2024.9.1_all.deb' "Missing deb-multimedia keyring package URL"
+require_contains "${source_text}" '8dc6cbb266c701cfe58bd1d2eb9fe2245a1d6341c7110cfbfe3b5a975dcf97ca' "Missing deb-multimedia keyring SHA256 verification"
+require_contains "${source_text}" '/etc/apt/sources.list.d/dmo.sources' "Missing deb-multimedia DEB822 source write"
+require_contains "${source_text}" 'Signed-By: /usr/share/keyrings/deb-multimedia-keyring.pgp' "Missing DEB822 Signed-By keyring path"
+require_contains "${source_text}" 'Suites: ${_mr_deb_codename}' "Missing DEB822 Suites codename substitution"
+require_contains "${source_text}" 'libavcodec-extra' "Missing Debian codec set (libavcodec-extra)"
+require_contains "${source_text}" 'ubuntu-restricted-extras' "Missing Ubuntu/Mint restricted-extras best-effort step"
+
 # --- 11) CLI wiring: early allowlist + dispatcher + help ---
-require_contains "${source_text}" '--setup-SF|--media-repos|--setup-media-repos|--uninstall-zypper' "Missing --media-repos in the early option allowlist"
+require_contains "${source_text}" '--setup-SF|--media-repos|--setup-media-repos|--copr-search|--uninstall-zypper' "Missing --media-repos/--copr-search in the early option allowlist"
 require_contains "${source_text}" 'elif [[ "${1:-}" == "--media-repos" || "${1:-}" == "--setup-media-repos" ]]; then' "Missing --media-repos dispatcher branch"
 require_contains "${source_text}" 'run_media_repos_only' "Missing run_media_repos_only dispatch call"
-require_contains "${source_text}" '--media-repos           Detect the running distro (Fedora/Arch family via /etc/os-release) and enable' "Missing --media-repos help text"
+require_contains "${source_text}" '--media-repos           Detect the running distro (Fedora/Arch/openSUSE/Debian family via /etc/os-release)' "Missing --media-repos help text"
 
 # --- 12) WebUI: tile + status fields + JS + quick action ---
 require_contains "${source_text}" 'id="feat-media-repos-badge" data-module="media-repos" data-install-cmd="sudo zypper-auto-helper --media-repos"' "Missing Media Repos badge tile in Features & Config"
@@ -199,7 +228,12 @@ else
     printf '%s\n' 'ID=rocky' 'ID_LIKE="rhel fedora"' > "${_rt_tmpdir}/os-idlike-fedora"
     printf '%s\n' 'ID=arch' 'ID_LIKE=' > "${_rt_tmpdir}/os-arch"
     printf '%s\n' 'ID=manjaro' 'ID_LIKE=arch' > "${_rt_tmpdir}/os-idlike-arch"
-    printf '%s\n' 'ID=opensuse-tumbleweed' 'ID_LIKE="suse opensuse"' > "${_rt_tmpdir}/os-unsupported"
+    printf '%s\n' 'ID=alpine' 'ID_LIKE=' > "${_rt_tmpdir}/os-unsupported"
+
+    printf '%s\n' 'ID=opensuse-tumbleweed' 'ID_LIKE=' > "${_rt_tmpdir}/os-opensuse"
+    printf '%s\n' 'ID=sles' 'ID_LIKE="suse"' > "${_rt_tmpdir}/os-idlike-suse"
+    printf '%s\n' 'ID=debian' 'VERSION_CODENAME=trixie' > "${_rt_tmpdir}/os-debian"
+    printf '%s\n' 'ID=linuxmint' 'ID_LIKE="ubuntu debian"' > "${_rt_tmpdir}/os-mint"
 
     _detect_out() {
         # Usage: _detect_out <fixture-path>; prints the detected family.
@@ -210,6 +244,10 @@ else
     [ "$(_detect_out "${_rt_tmpdir}/os-idlike-fedora")" = "fedora" ] || record_failure "RUNTIME detection: ID_LIKE contains fedora did not detect the fedora family"
     [ "$(_detect_out "${_rt_tmpdir}/os-arch")" = "arch" ] || record_failure "RUNTIME detection: ID=arch did not detect the arch family"
     [ "$(_detect_out "${_rt_tmpdir}/os-idlike-arch")" = "arch" ] || record_failure "RUNTIME detection: ID_LIKE contains arch did not detect the arch family"
+    [ "$(_detect_out "${_rt_tmpdir}/os-opensuse")" = "suse" ] || record_failure "RUNTIME detection: ID=opensuse-tumbleweed did not detect the suse family"
+    [ "$(_detect_out "${_rt_tmpdir}/os-idlike-suse")" = "suse" ] || record_failure "RUNTIME detection: ID_LIKE contains suse did not detect the suse family"
+    [ "$(_detect_out "${_rt_tmpdir}/os-debian")" = "debian" ] || record_failure "RUNTIME detection: ID=debian did not detect the debian family"
+    [ "$(_detect_out "${_rt_tmpdir}/os-mint")" = "debian" ] || record_failure "RUNTIME detection: ID_LIKE contains ubuntu (mint) did not detect the debian family"
     [ -z "$(_detect_out "${_rt_tmpdir}/os-unsupported")" ] || record_failure "RUNTIME detection: unsupported distro did not return an empty family"
 
     rm -rf -- "${_rt_tmpdir}" 2>/dev/null || true
