@@ -51897,13 +51897,20 @@ for it in items:
     #   - entry numbers    : bright cyan
     #   - project titles   : bold
     #   - descriptions     : yellow (one distinct, consistent color)
+    #   - [group]          : bright magenta (Copr group projects: @owner/project)
     #   - [ALREADY ENABLED]: bright green
     # Colors are ONLY enabled when stdout is a TTY and NO_COLOR is unset
     # (https://no-color.org). Piped/redirected output (e.g. WebUI quick-action
     # logs) stays plain, and the colored listing goes to stdout ONLY so ANSI
     # escapes never end up in the log file; the plain non-TTY listing still
     # tees to the log as before.
+    #
+    # PAGER: when the result set is larger than ZNH_COPR_SEARCH_PAGE_THRESHOLD
+    # (default 25), the colored interactive listing is paged through `less -R`
+    # (ANSI-color aware; leave with q) instead of flooding the terminal.
+    # Set ZNH_COPR_SEARCH_PAGE_THRESHOLD=0 to disable paging.
     local _cs_cnum="" _cs_ctitle="" _cs_cdesc="" _cs_cok="" _cs_creset=""
+    local _cs_cgrp="" _cs_cerr=""
     local _cs_colors=0
     if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
         _cs_colors=1
@@ -51911,43 +51918,88 @@ for it in items:
         _cs_ctitle=$'\033[1m'
         _cs_cdesc=$'\033[33m'
         _cs_cok=$'\033[92m'
+        _cs_cgrp=$'\033[95m'
+        _cs_cerr=$'\033[91m'
         _cs_creset=$'\033[0m'
+    fi
+
+    # Per-entry markers: [group] for Copr group projects (@owner/project) and
+    # [ALREADY ENABLED] for repos already configured. Nested helper — sees
+    # the enclosing function's locals (bash dynamic scoping).
+    __znh_copr_entry_markers() {
+        local _midx="$1" _m=""
+        case "${_cs_names[${_midx}]}" in
+            @*) _m="  ${_cs_cgrp}[group]${_cs_creset}" ;;
+        esac
+        if [ "${_cs_enabled_flags[${_midx}]}" -eq 1 ]; then
+            _m="${_m}  ${_cs_cok}[ALREADY ENABLED]${_cs_creset}"
+        fi
+        printf '%s' "${_m}"
+    }
+
+    # Pager decision: only for large INTERACTIVE colored listings (stdin TTY
+    # so the selection prompt follows the pager; non-interactive listing-only
+    # runs and plain/redirected output print directly).
+    local _cs_page_threshold=25
+    if [[ "${ZNH_COPR_SEARCH_PAGE_THRESHOLD:-25}" =~ ^[0-9]+$ ]]; then
+        _cs_page_threshold="${ZNH_COPR_SEARCH_PAGE_THRESHOLD:-25}"
+    fi
+    local _cs_use_pager=0 _cs_listing_tmp="" _cs_markers=""
+    if [ "${_cs_colors}" -eq 1 ] \
+       && [ "${_cs_page_threshold}" -gt 0 ] \
+       && [ "${_cs_n}" -gt "${_cs_page_threshold}" ] \
+       && [ -t 0 ] \
+       && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null \
+       && command -v less >/dev/null 2>&1; then
+        _cs_listing_tmp="$(mktemp /tmp/znh-copr-listing.XXXXXX 2>/dev/null || echo "")"
+        if [ -n "${_cs_listing_tmp}" ]; then
+            _cs_use_pager=1
+        fi
     fi
 
     echo "" | tee -a "${LOG_FILE}"
     echo "Copr projects matching '${_cs_query}' (${_cs_n} found):" | tee -a "${LOG_FILE}"
     for _cs_i in "${!_cs_names[@]}"; do
-        if [ "${_cs_colors}" -eq 1 ]; then
+        _cs_markers="$(__znh_copr_entry_markers "${_cs_i}")"
+        if [ "${_cs_use_pager}" -eq 1 ]; then
+            # Buffered colored listing for the pager below (never logged).
+            printf '\n%s%3d%s) %s%s%s%s\n' \
+                "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
+                "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}" "${_cs_markers}" \
+                >>"${_cs_listing_tmp}"
+        elif [ "${_cs_colors}" -eq 1 ]; then
             # Colored interactive listing: stdout only (no log tee; ANSI
             # escapes must never be written into LOG_FILE).
             echo ""
-            if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
-                printf '%s%3d%s) %s%s%s  %s[ALREADY ENABLED]%s\n' \
-                    "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
-                    "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}" \
-                    "${_cs_cok}" "${_cs_creset}"
-            else
-                printf '%s%3d%s) %s%s%s\n' \
-                    "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
-                    "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}"
-            fi
-            if [ -n "${_cs_descs[${_cs_i}]}" ]; then
-                printf '    %s%s%s\n' "${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"
-            fi
+            printf '%s%3d%s) %s%s%s%s\n' \
+                "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
+                "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}" "${_cs_markers}"
         else
             # Plain listing (non-TTY): tee to the log as before.
             echo "" | tee -a "${LOG_FILE}"
-            if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
-                printf '  %3d) %s  [ALREADY ENABLED]\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
+            printf '  %3d) %s%s\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" "${_cs_markers}" | tee -a "${LOG_FILE}"
+        fi
+        if [ -n "${_cs_descs[${_cs_i}]}" ]; then
+            if [ "${_cs_use_pager}" -eq 1 ]; then
+                printf '    %s%s%s\n' "${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}" >>"${_cs_listing_tmp}"
+            elif [ "${_cs_colors}" -eq 1 ]; then
+                printf '    %s%s%s\n' "${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"
             else
-                printf '  %3d) %s\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
-            fi
-            if [ -n "${_cs_descs[${_cs_i}]}" ]; then
                 printf '        %s\n' "${_cs_descs[${_cs_i}]}" | tee -a "${LOG_FILE}"
             fi
         fi
     done
     echo "" | tee -a "${LOG_FILE}"
+    if [ "${_cs_use_pager}" -eq 1 ]; then
+        # Page the buffered colored listing through less (-R renders ANSI
+        # colors; -X skips the init/clear-screen sequences). Leave with q;
+        # the listing is never written to LOG_FILE.
+        printf '\n%s[end of listing — press q to continue to the selection]%s\n' \
+            "${_cs_cdesc}" "${_cs_creset}" >>"${_cs_listing_tmp}"
+        less -R -X "${_cs_listing_tmp}"
+        rm -f -- "${_cs_listing_tmp}" 2>/dev/null || true
+        log_info "Copr listing shown via pager (less -R): ${_cs_n} entries > ${_cs_page_threshold} threshold (q returns to the selection prompt)."
+    fi
 
     # Interactive multi-select TUI (opi-style). Non-interactive runs only get
     # the list above plus a how-to hint (selection needs a real terminal).
@@ -51976,6 +52028,9 @@ for it in items:
             for _cs_i in "${!_cs_names[@]}"; do
                 _cs_sel+=("${_cs_i}")
             done
+            # Instant selection feedback for 'all'.
+            echo ""
+            printf '%s→ selected all %d project(s)%s\n' "${_cs_cnum}" "${_cs_n}" "${_cs_creset}"
             ;;
         none)
             log_info "No repositories selected; nothing was changed."
@@ -52023,16 +52078,28 @@ for it in items:
                 if [ "${_cs_seen}" -eq 0 ]; then _cs_sel_d+=("${_cs_i}"); fi
             done
             _cs_sel=("${_cs_sel_d[@]+"${_cs_sel_d[@]}"}")
+            # INSTANT SELECTION FEEDBACK: echo each picked project right
+            # under the Selection prompt (colorized '→ N) title' + markers)
+            # so the user sees exactly what their numbers/ranges resolved
+            # to before the heavier confirmation preview below.
+            echo ""
+            for _cs_i in "${_cs_sel[@]}"; do
+                _cs_markers="$(__znh_copr_entry_markers "${_cs_i}")"
+                printf '%s→ %3d%s) %s%s%s%s\n' \
+                    "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
+                    "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}" "${_cs_markers}"
+            done
             ;;
     esac
 
-    # Confirmation preview (same standardized color scheme + one blank line
-    # between entries for readability; stdout only, never logged).
+    # Confirmation preview (same standardized color scheme + markers + one
+    # blank line between entries for readability; stdout only, never logged).
     echo ""
     echo "The following ${#_cs_sel[@]} Copr repositories will be enabled:"
     for _cs_i in "${_cs_sel[@]}"; do
         echo ""
-        printf '%s - %s%s%s\n' "${_cs_cnum}" "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}"
+        _cs_markers="$(__znh_copr_entry_markers "${_cs_i}")"
+        printf '%s - %s%s%s%s\n' "${_cs_cnum}" "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}" "${_cs_markers}"
         if [ -n "${_cs_descs[${_cs_i}]}" ]; then
             printf '    %s%s%s\n' "${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"
         fi

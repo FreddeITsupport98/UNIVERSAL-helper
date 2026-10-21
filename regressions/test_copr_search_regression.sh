@@ -81,20 +81,40 @@ require_contains "${source_text}" 'desc = " ".join(str(it.get("description") or 
 require_contains "${source_text}" 'sys.stdout.write(full_name + "\t" + first_line + "\n")' "Missing TSV full_name+description output line"
 require_contains "${source_text}" 'mapfile -t _cs_lines <<<"${_cs_tsv}"' "Missing mapfile parse of the Copr result TSV"
 
-# --- 3b) Colorized standardized listing (number/title/description + blank lines) ---
+# --- 3b) Colorized standardized listing (number/title/description + markers + blank lines) ---
 require_contains "${source_text}" 'local _cs_cnum="" _cs_ctitle="" _cs_cdesc="" _cs_cok="" _cs_creset=""' "Missing the copr-search color variable block"
 require_contains "${source_text}" 'if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then' "Missing the TTY + NO_COLOR color gate (https://no-color.org)"
 require_contains "${source_text}" "_cs_cnum=\$'\\033[96m'" "Missing the bright-cyan entry-number color"
 require_contains "${source_text}" "_cs_ctitle=\$'\\033[1m'" "Missing the bold title color"
 require_contains "${source_text}" "_cs_cdesc=\$'\\033[33m'" "Missing the yellow description color (one distinct, consistent color)"
 require_contains "${source_text}" "_cs_cok=\$'\\033[92m'" "Missing the bright-green [ALREADY ENABLED] color"
+require_contains "${source_text}" "_cs_cgrp=\$'\\033[95m'" "Missing the bright-magenta [group] color for @-namespace projects"
+require_contains "${source_text}" "_cs_cerr=\$'\\033[91m'" "Missing the bright-red invalid-selection color"
 require_contains "${source_text}" "_cs_creset=\$'\\033[0m'" "Missing the color reset"
-require_contains "${source_text}" '%s%3d%s) %s%s%s\n' "Missing the colorized number+title printf (entry numbers colored, titles bold)"
-require_contains "${source_text}" '%s%3d%s) %s%s%s  %s[ALREADY ENABLED]%s\n' "Missing the colorized [ALREADY ENABLED] number+title printf"
-require_contains "${source_text}" '"${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"' "Missing the colorized description printf args (yellow + reset)"
-require_contains "${source_text}" '%s - %s%s%s\n' "Missing the colorized confirmation-preview entry printf format"
+
+# --- 3c) Per-entry markers ([group] / [ALREADY ENABLED]) via the helper ---
+require_contains "${source_text}" '__znh_copr_entry_markers() {' "Missing the per-entry marker helper"
+require_contains "${source_text}" '@*) _m="  ${_cs_cgrp}[group]${_cs_creset}" ;;' "Missing the @-prefix [group] marker branch in the helper"
+require_contains "${source_text}" '_m="${_m}  ${_cs_cok}[ALREADY ENABLED]${_cs_creset}"' "Missing the [ALREADY ENABLED] marker in the helper"
+
+# --- 3d) Listing printf formats (colored + plain, with markers) ---
+require_contains "${source_text}" "printf '%s%3d%s) %s%s%s%s\n'" "Missing the colorized number+title+markers printf (entry numbers colored, titles bold)"
+require_contains "${source_text}" "printf '  %3d) %s%s\n'" "Missing the plain number+title+markers printf"
+require_contains "${source_text}" '%s→ %3d%s) %s%s%s%s\n' "Missing the instant selection-feedback printf format (→ N) title + markers)"
+require_contains "${source_text}" '→ selected all %d project(s)' "Missing the all-instant selection feedback line"
+require_contains "${source_text}" '%s - %s%s%s%s\n' "Missing the colorized confirmation-preview entry printf format (with markers)"
 require_contains "${source_text}" '# Colored interactive listing: stdout only (no log tee; ANSI' "Missing the stdout-only rationale (ANSI escapes must never enter LOG_FILE)"
-require_not_contains "${source_text}" '"${_cs_cok}" "${_cs_creset}" | tee -a' "Colored [ALREADY ENABLED] printf must not tee to LOG_FILE (ANSI escapes in log)"
+require_not_contains "${source_text}" '"${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}" | tee -a' "Colored description printf must not tee to LOG_FILE (ANSI escapes in log)"
+require_not_contains "${source_text}" '%s%3d%s) %s%s%s\n' "Old 6-arg colorized number+title printf format still present (superseded by the +markers format)"
+require_not_contains "${source_text}" '%s%3d%s) %s%s%s  %s[ALREADY ENABLED]%s\n' "Old inline [ALREADY ENABLED] printf format still present (superseded by the marker helper)"
+
+# --- 3e) Pager for large interactive listings ---
+require_contains "${source_text}" 'ZNH_COPR_SEARCH_PAGE_THRESHOLD:-25' "Missing the pager threshold default (25)"
+require_contains "${source_text}" 'command -v less >/dev/null 2>&1' "Missing the less availability check for the pager"
+require_contains "${source_text}" 'less -R -X "${_cs_listing_tmp}"' "Missing the less -R pager invocation"
+require_contains "${source_text}" 'press q to continue to the selection' "Missing the pager trailing hint line"
+require_contains "${source_text}" 'Copr listing shown via pager (less -R)' "Missing the pager usage log line"
+require_not_contains "${source_text}" '>>"${_cs_listing_tmp}" | tee -a' "Paged listing buffer must not tee to LOG_FILE (ANSI escapes in log)"
 
 # --- 4) Idempotency: already-enabled detection (local copr list) + skip ---
 require_contains "${source_text}" '"${_cs_dnf}" copr list 2>/dev/null || true' "Missing local copr list probe for already-enabled repos"
