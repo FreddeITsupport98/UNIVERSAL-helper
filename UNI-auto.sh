@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 66 - Enterprise Edition: universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 67 - Enterprise Edition: media-repos module + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -1539,7 +1539,7 @@ if [[ $# -gt 0 ]]; then
             exit 2
             ;;
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
-        --soar|--brew|--pip-package|--pipx|--setup-SF|--uninstall-zypper|\
+        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--uninstall-zypper|\
         --reset-config|--reset-downloads|--reset-state|--stale-module-dirs|--stale-modules|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-bg|--dash-bg-enable|--dash-bg-disable|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
@@ -13115,8 +13115,8 @@ generate_dashboard() {
     fi
 
     # Feature toggles (visual state)
-    local feat_flatpak feat_snap feat_soar feat_brew feat_pipx
-    local feat_flatpak_class feat_snap_class feat_soar_class feat_brew_class feat_pipx_class
+    local feat_flatpak feat_snap feat_soar feat_brew feat_pipx feat_media_repos
+    local feat_flatpak_class feat_snap_class feat_soar_class feat_brew_class feat_pipx_class feat_media_repos_class
 
     feat_flatpak=$([[ "${ENABLE_FLATPAK_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
     feat_snap=$([[ "${ENABLE_SNAP_UPDATES,,}" == "true" ]] && echo "ON" || echo "OFF")
@@ -13176,14 +13176,34 @@ generate_dashboard() {
         feat_pipx_installed=1
     fi
 
+    # Multimedia/codec third-party repositories (RPM Fusion + Terra on the
+    # Fedora family, the full-codec set on the Arch family). Reuses the shared
+    # idempotent probe from --media-repos so this badge always reflects the
+    # REAL installed state (repos configured = installed; codec set present =
+    # healthy). The probe function is defined later in this file; guarded so
+    # older embedded copies degrade gracefully.
+    feat_media_repos_installed=0
+    feat_media_repos_healthy=0
+    if declare -f znh_media_repos_state_probe >/dev/null 2>&1; then
+        znh_media_repos_state_probe
+        if [ "${ZNH_MEDIA_REPOS_INSTALLED:-0}" -eq 1 ] 2>/dev/null; then
+            feat_media_repos_installed=1
+        fi
+        if [ "${ZNH_MEDIA_REPOS_HEALTHY:-0}" -eq 1 ] 2>/dev/null; then
+            feat_media_repos_healthy=1
+        fi
+    fi
+    feat_media_repos=$([[ "${feat_media_repos_installed}" == "1" ]] && echo "READY" || echo "MISSING")
+
     # Service health checks (installed + working = healthy)
     # green = healthy, yellow = installed but service unhealthy, red = missing
-    local feat_flatpak_healthy feat_snap_healthy feat_soar_healthy feat_brew_healthy feat_pipx_healthy
+    local feat_flatpak_healthy feat_snap_healthy feat_soar_healthy feat_brew_healthy feat_pipx_healthy feat_media_repos_healthy
     feat_flatpak_healthy=0
     feat_snap_healthy=0
     feat_soar_healthy=0
     feat_brew_healthy=0
     feat_pipx_healthy=0
+    # feat_media_repos_healthy is set by the probe above (0 by default).
 
     if [ "${feat_flatpak_installed}" -eq 1 ] 2>/dev/null; then
         # Flatpak healthy = flathub remote is configured
@@ -13213,6 +13233,7 @@ generate_dashboard() {
     feat_soar_class=$([[ "${feat_soar_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_soar_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
     feat_brew_class=$([[ "${feat_brew_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_brew_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
     feat_pipx_class=$([[ "${feat_pipx_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
+    feat_media_repos_class=$([[ "${feat_media_repos_healthy}" == "1" ]] && echo "feat-on" || ([[ "${feat_media_repos_installed}" == "1" ]] && echo "feat-warn" || echo "feat-off"))
 
     # Pre-compute installed/missing/warning CSS class for feature badges.
     # IMPORTANT: these MUST be computed here (not as JS ternaries inside the
@@ -13225,6 +13246,7 @@ generate_dashboard() {
     feat_soar_install_class=$([[ "${feat_soar_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_soar_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
     feat_brew_install_class=$([[ "${feat_brew_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_brew_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
     feat_pipx_install_class=$([[ "${feat_pipx_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
+    feat_media_repos_install_class=$([[ "${feat_media_repos_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_media_repos_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
 
     # Determine status color for a quick-glance badge.
     local status_color last_status_lc
@@ -14801,6 +14823,7 @@ generate_dashboard() {
       <h2>⚙️ Features & Config</h2>
       <div class="stat-label" style="text-transform:none;">Active Modules</div>
       <div class="feat-grid">
+        <div class="feat-badge feat-clickable ${feat_media_repos_install_class}" id="feat-media-repos-badge" data-module="media-repos" data-install-cmd="sudo zypper-auto-helper --media-repos" title="Click to set up multimedia/codec repositories (via --media-repos; Fedora & Arch families; idempotent)"><span class="feat-dot ${feat_media_repos_class}" id="feat-media-repos-dot">●</span> Media Repos: <strong id="feat-media-repos-val">${feat_media_repos}</strong></div>
         <div class="feat-badge feat-clickable ${feat_flatpak_install_class}" id="feat-flatpak-badge" data-module="flatpak" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Flatpak (via --setup-SF)"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
         <div class="feat-badge feat-clickable ${feat_snap_install_class}" id="feat-snap-badge" data-module="snap" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Snapd (via --setup-SF)"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
         <div class="feat-badge feat-clickable ${feat_soar_install_class}" id="feat-soar-badge" data-module="soar" data-install-cmd="sudo zypper-auto-helper --soar" title="Click to install/setup Soar (via --soar)"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
@@ -34492,6 +34515,7 @@ generate_dashboard() {
     (function() {
         try {
             var _modQaMap = {
+                'media-repos': 'media-repos',
                 'flatpak': 'setup-SF',
                 'snap':    'setup-SF',
                 'soar':    'soar',
@@ -34499,6 +34523,7 @@ generate_dashboard() {
                 'pipx':    'pipx'
             };
             var _modTitleMap = {
+                'media-repos': 'Install Multimedia & Codec Repos',
                 'flatpak': 'Install Snapd & Flatpak',
                 'snap':    'Install Snapd & Flatpak',
                 'soar':    'Install Soar CLI',
@@ -34506,6 +34531,7 @@ generate_dashboard() {
                 'pipx':    'Install pipx'
             };
             var _modInfoMap = {
+                'media-repos': { name: 'Multimedia & Codec Repos', desc: 'Third-party repositories for multimedia, codecs and Mesa. Fedora family: RPM Fusion free + nonfree (incl. updates), Terra (terra-release + multimedia subrepo when published for the release), the multimedia group and the full-codec ffmpeg swap; the Terra Mesa override is opt-in only. Arch family: the full-codec package set from the official repositories. Idempotent: re-runs detect existing repos and installed codecs and skip them.', use: 'Enable the right media/codec repositories for your distro', cmd: 'sudo zypper-auto-helper --media-repos' },
                 'flatpak': { name: 'Flatpak', desc: 'Universal app packaging system. Lets you install sandboxed desktop apps from Flathub (e.g. Firefox, GIMP, VS Code). Apps auto-update independently from system packages.', use: 'Install desktop apps from flathub.org', cmd: 'flatpak install flathub <app-id>' },
                 'snap':    { name: 'Snapd (Snap Store)', desc: 'Canonical\'s universal package system. Provides sandboxed apps with automatic updates via the Snap Store. Runs as a background service (snapd.service).', use: 'Install apps from snapcraft.io', cmd: 'snap install <package>' },
                 'soar':    { name: 'Soar', desc: 'Static binary package manager. Downloads pre-built CLI tools and apps as single portable binaries — no root needed, no dependencies.', use: 'Install portable CLI tools instantly', cmd: 'soar install <tool>' },
@@ -34565,7 +34591,7 @@ generate_dashboard() {
                                 title: qaTitle,
                                 desc: 'Install/setup ' + mod + ' via the dashboard',
                                 copy_cmd: copyFallback,
-                                danger: (qaAction === 'setup-SF'),
+                                danger: (qaAction === 'setup-SF' || qaAction === 'media-repos'),
                                 interactive: false
                             });
                         } catch (e1) {
@@ -35283,6 +35309,8 @@ generate_dashboard() {
         setText('feat-soar-val', d.feat_soar ? 'ON' : 'OFF');
         setText('feat-brew-val', d.feat_brew ? 'ON' : 'OFF');
         setText('feat-pipx-val', d.feat_pipx ? 'ON' : 'OFF');
+        // Media repos tile shows the probed installed state (READY/MISSING)
+        setText('feat-media-repos-val', d.feat_media_repos_installed ? 'READY' : 'MISSING');
 
         // Module dot color: green=healthy, yellow=installed but unhealthy, red=missing
         var _modInstalled = {
@@ -35290,24 +35318,27 @@ generate_dashboard() {
             snap: !!(d.feat_snap_installed),
             soar: !!(d.feat_soar_installed),
             brew: !!(d.feat_brew_installed),
-            pipx: !!(d.feat_pipx_installed)
+            pipx: !!(d.feat_pipx_installed),
+            'media-repos': !!(d.feat_media_repos_installed)
         };
         var _modHealthy = {
             flatpak: !!(d.feat_flatpak_healthy),
             snap: !!(d.feat_snap_healthy),
             soar: !!(d.feat_soar_healthy),
             brew: !!(d.feat_brew_healthy),
-            pipx: !!(d.feat_pipx_healthy)
+            pipx: !!(d.feat_pipx_healthy),
+            'media-repos': !!(d.feat_media_repos_healthy)
         };
         setClass('feat-flatpak-dot', _modHealthy.flatpak, _modInstalled.flatpak && !_modHealthy.flatpak);
         setClass('feat-snap-dot', _modHealthy.snap, _modInstalled.snap && !_modHealthy.snap);
         setClass('feat-soar-dot', _modHealthy.soar, _modInstalled.soar && !_modHealthy.soar);
         setClass('feat-brew-dot', _modHealthy.brew, _modInstalled.brew && !_modHealthy.brew);
         setClass('feat-pipx-dot', _modHealthy.pipx, _modInstalled.pipx && !_modHealthy.pipx);
+        setClass('feat-media-repos-dot', _modHealthy['media-repos'], _modInstalled['media-repos'] && !_modHealthy['media-repos']);
 
         // Update badge border class based on health state
         try {
-            var _mods = ['flatpak','snap','soar','brew','pipx'];
+            var _mods = ['media-repos','flatpak','snap','soar','brew','pipx'];
             for (var _mi = 0; _mi < _mods.length; _mi++) {
                 var _mb = document.getElementById('feat-' + _mods[_mi] + '-badge');
                 if (_mb) {
@@ -36824,11 +36855,14 @@ JSON_EOF
     json_feat_brew_installed=$([[ "${feat_brew_installed}" == "1" ]] && echo true || echo false)
     json_feat_pipx_installed=$([[ "${feat_pipx_installed}" == "1" ]] && echo true || echo false)
     local json_feat_flatpak_healthy json_feat_snap_healthy json_feat_soar_healthy json_feat_brew_healthy json_feat_pipx_healthy
+    local json_feat_media_repos_installed json_feat_media_repos_healthy
     json_feat_flatpak_healthy=$([[ "${feat_flatpak_healthy}" == "1" ]] && echo true || echo false)
     json_feat_snap_healthy=$([[ "${feat_snap_healthy}" == "1" ]] && echo true || echo false)
     json_feat_soar_healthy=$([[ "${feat_soar_healthy}" == "1" ]] && echo true || echo false)
     json_feat_brew_healthy=$([[ "${feat_brew_healthy}" == "1" ]] && echo true || echo false)
     json_feat_pipx_healthy=$([[ "${feat_pipx_healthy}" == "1" ]] && echo true || echo false)
+    json_feat_media_repos_installed=$([[ "${feat_media_repos_installed}" == "1" ]] && echo true || echo false)
+    json_feat_media_repos_healthy=$([[ "${feat_media_repos_healthy}" == "1" ]] && echo true || echo false)
 
     # Harden status-data generation:
     # - Prefer Python JSON serialization to avoid edge-case escaping drift from
@@ -36863,6 +36897,8 @@ JSON_EOF
             JSON_FEAT_SOAR_HEALTHY="${json_feat_soar_healthy}" \
             JSON_FEAT_BREW_HEALTHY="${json_feat_brew_healthy}" \
             JSON_FEAT_PIPX_HEALTHY="${json_feat_pipx_healthy}" \
+            JSON_FEAT_MEDIA_REPOS_INSTALLED="${json_feat_media_repos_installed}" \
+            JSON_FEAT_MEDIA_REPOS_HEALTHY="${json_feat_media_repos_healthy}" \
             JSON_DL_TIMER="${dl_timer}" \
             JSON_VERIFY_TIMER="${verify_timer}" \
             JSON_NT_TIMER="${nt_timer}" \
@@ -36930,6 +36966,8 @@ data = {
     "feat_soar_healthy": _env_bool("JSON_FEAT_SOAR_HEALTHY", False),
     "feat_brew_healthy": _env_bool("JSON_FEAT_BREW_HEALTHY", False),
     "feat_pipx_healthy": _env_bool("JSON_FEAT_PIPX_HEALTHY", False),
+    "feat_media_repos_installed": _env_bool("JSON_FEAT_MEDIA_REPOS_INSTALLED", False),
+    "feat_media_repos_healthy": _env_bool("JSON_FEAT_MEDIA_REPOS_HEALTHY", False),
     "dl_timer": os.environ.get("JSON_DL_TIMER", ""),
     "verify_timer": os.environ.get("JSON_VERIFY_TIMER", ""),
     "nt_timer": os.environ.get("JSON_NT_TIMER", ""),
@@ -36995,6 +37033,8 @@ PY
   "feat_soar_healthy": ${json_feat_soar_healthy},
   "feat_brew_healthy": ${json_feat_brew_healthy},
   "feat_pipx_healthy": ${json_feat_pipx_healthy},
+  "feat_media_repos_installed": ${json_feat_media_repos_installed},
+  "feat_media_repos_healthy": ${json_feat_media_repos_healthy},
 
   "dl_timer":
   "verify_timer": "$(_json_escape "$verify_timer")",
@@ -49684,6 +49724,11 @@ run_uninstall_helper_only() {
     echo "OCI stable/testing, AppCenter, GNOME Nightly) are intentionally kept"
     echo "because installed Flatpak apps still depend on them. Remove one manually"
     echo "with: flatpak remote-delete <name>  (append --user for per-user remotes)."
+    echo "Multimedia/codec repositories configured by --media-repos (RPM Fusion"
+    echo "free/nonfree, Terra + subrepos, Arch codec packages) are also kept"
+    echo "because installed codecs and apps still depend on them. Remove manually"
+    echo "with: sudo dnf remove rpmfusion-*-release terra-release* (Fedora) or"
+    echo "sudo pacman -R <package> (Arch)."
     echo "" | tee -a "${LOG_FILE}"
     echo "NOTE: Snapper/btrfs/fstrim timers are OS features and are NOT disabled by" | tee -a "${LOG_FILE}"
     echo "default. If you want the uninstaller to also disable those timers (Option 5" | tee -a "${LOG_FILE}"
@@ -50872,6 +50917,446 @@ run_setup_sf_only() {
     return "$rc"
 }
 
+# --- Helper: Multimedia & codec third-party repository setup (CLI) ---
+#
+# Detects the running distribution family from /etc/os-release (ID + ID_LIKE)
+# and enables the correct third-party repositories for multimedia, codecs,
+# Mesa and related packages. Fully idempotent: existing repositories and
+# installed codec packages are probed first and every step is skipped when
+# already done, so re-running is always safe.
+#
+# Implemented families:
+#   - fedora : ID=fedora (or nobara) or ID_LIKE contains fedora.
+#              Order: RPM Fusion free+nonfree (incl. updates) -> Terra
+#              (terra-release, then terra-release-multimedia when published
+#              for the release) -> OPTIONAL Terra Mesa override (explicit
+#              confirmation only; it can conflict with *-freeworld packages
+#              and affect HDR) -> multimedia group -> ffmpeg swap ->
+#              metadata refresh + common codec packages.
+#              Uses dnf5 when that is the default, otherwise dnf.
+#   - arch   : ID=arch or ID_LIKE contains arch. Full-codec packages from the
+#              official Arch repositories (no third-party repository needed).
+#
+# Other families exit cleanly with a message. Extend later by adding a branch
+# in znh_media_repos_detect_family, a probe case in
+# znh_media_repos_state_probe, and a path in run_media_repos_only.
+
+# os-release location override (used by regression/smoke tests to exercise the
+# detection branches with fixture files without touching the live system).
+ZNH_OS_RELEASE_FILE="${ZNH_OS_RELEASE_FILE:-/etc/os-release}"
+
+znh_media_repos_detect_family() {
+    # Prints "fedora", "arch", or "" (unsupported) based on os-release.
+    local _mr_os _mr_id _mr_id_like
+    _mr_os="${ZNH_OS_RELEASE_FILE:-/etc/os-release}"
+    _mr_id=""
+    _mr_id_like=""
+    if [ -r "${_mr_os}" ]; then
+        _mr_id="$(sed -n 's|^ID=||p' "${_mr_os}" 2>/dev/null | head -n1 | tr -d '\"' | tr '[:upper:]' '[:lower:]')"
+        _mr_id_like="$(sed -n 's|^ID_LIKE=||p' "${_mr_os}" 2>/dev/null | head -n1 | tr -d '\"' | tr '[:upper:]' '[:lower:]')"
+    fi
+    case "${_mr_id}" in
+        fedora|nobara)
+            printf '%s\n' "fedora"
+            return 0
+            ;;
+        arch)
+            printf '%s\n' "arch"
+            return 0
+            ;;
+    esac
+    case "${_mr_id_like}" in
+        *fedora*)
+            printf '%s\n' "fedora"
+            return 0
+            ;;
+        *arch*)
+            printf '%s\n' "arch"
+            return 0
+            ;;
+    esac
+    printf '%s\n' ""
+    return 0
+}
+
+znh_media_repos_state_probe() {
+    # Populates the ZNH_MEDIA_* idempotency globals using read-only, local
+    # probes only (rpm -q / .repo files / pacman -Q; no network, no system
+    # changes). Also called by the dashboard badge computation so the WebUI
+    # tile reflects the real installed state.
+    ZNH_MEDIA_REPOS_FAMILY=""
+    ZNH_MEDIA_RPMFUSION_FREE_OK=0
+    ZNH_MEDIA_RPMFUSION_NONFREE_OK=0
+    ZNH_MEDIA_TERRA_OK=0
+    ZNH_MEDIA_TERRA_MM_OK=0
+    ZNH_MEDIA_MESA_OK=0
+    ZNH_MEDIA_FFMPEG_FULL=0
+    ZNH_MEDIA_FFMPEG_FREE=0
+    ZNH_MEDIA_CODECS_OK=0
+    ZNH_MEDIA_REPOS_INSTALLED=0
+    ZNH_MEDIA_REPOS_HEALTHY=0
+
+    ZNH_MEDIA_REPOS_FAMILY="$(znh_media_repos_detect_family)"
+
+    if [ "${ZNH_MEDIA_REPOS_FAMILY}" = "fedora" ]; then
+        if command -v rpm >/dev/null 2>&1; then
+            # Existing .repo files count as configured even when the release
+            # package query is unavailable (checks BEFORE adding anything).
+            if rpm -q rpmfusion-free-release >/dev/null 2>&1 || [ -f /etc/yum.repos.d/rpmfusion-free.repo ]; then
+                ZNH_MEDIA_RPMFUSION_FREE_OK=1
+            fi
+            if rpm -q rpmfusion-nonfree-release >/dev/null 2>&1 || [ -f /etc/yum.repos.d/rpmfusion-nonfree.repo ]; then
+                ZNH_MEDIA_RPMFUSION_NONFREE_OK=1
+            fi
+            if rpm -q terra-release >/dev/null 2>&1 || [ -f /etc/yum.repos.d/terra.repo ]; then
+                ZNH_MEDIA_TERRA_OK=1
+            fi
+            if rpm -q terra-release-multimedia >/dev/null 2>&1; then
+                ZNH_MEDIA_TERRA_MM_OK=1
+            fi
+            if rpm -q terra-release-mesa >/dev/null 2>&1; then
+                ZNH_MEDIA_MESA_OK=1
+            fi
+            if rpm -q ffmpeg >/dev/null 2>&1; then
+                ZNH_MEDIA_FFMPEG_FULL=1
+            fi
+            if rpm -q ffmpeg-free >/dev/null 2>&1; then
+                ZNH_MEDIA_FFMPEG_FREE=1
+            fi
+            if rpm -q gstreamer1-plugins-bad-freeworld >/dev/null 2>&1 \
+               || rpm -q gstreamer1-plugins-ugly >/dev/null 2>&1; then
+                ZNH_MEDIA_CODECS_OK=1
+            fi
+        fi
+        # Installed = the core third-party repos are configured.
+        if [ "${ZNH_MEDIA_RPMFUSION_FREE_OK}" -eq 1 ] && [ "${ZNH_MEDIA_RPMFUSION_NONFREE_OK}" -eq 1 ]; then
+            ZNH_MEDIA_REPOS_INSTALLED=1
+            # Healthy = installed AND the codec set is actually in place
+            # (full ffmpeg or the freeworld GStreamer plugins).
+            if [ "${ZNH_MEDIA_FFMPEG_FULL}" -eq 1 ] || [ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ]; then
+                ZNH_MEDIA_REPOS_HEALTHY=1
+            fi
+        fi
+    elif [ "${ZNH_MEDIA_REPOS_FAMILY}" = "arch" ]; then
+        if command -v pacman >/dev/null 2>&1; then
+            # Arch's official repositories already ship full-codec builds, so
+            # "installed" here means the codec set itself is present.
+            if pacman -Q ffmpeg gstreamer gst-plugins-base gst-plugins-good \
+                      gst-plugins-bad gst-plugins-ugly gst-libav >/dev/null 2>&1; then
+                ZNH_MEDIA_REPOS_INSTALLED=1
+                ZNH_MEDIA_REPOS_HEALTHY=1
+            fi
+        fi
+    fi
+    return 0
+}
+
+__znh_media_repos_run_or_dry() {
+    # Runs a command via execute_guarded, or prints it in dry-run mode.
+    # Args: <description> <cmd...>
+    # Dry-run mode (MEDIA_REPOS_DRY_RUN=1) prints what would run and changes
+    # nothing — safe offline-friendly preview of the whole setup flow.
+    local _mrd_desc="$1"
+    shift
+    if [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+        echo "  [dry-run] ${_mrd_desc}" | tee -a "${LOG_FILE}"
+        echo "  [dry-run] Would run: $*" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+    execute_guarded "${_mrd_desc}" "$@"
+}
+
+run_media_repos_only() {
+    log_info ">>> Multimedia & codec repository setup helper mode..."
+    update_status "Running multimedia/codec repository setup..."
+
+    local rc=0
+    local _mr_family _mr_dnf _mr_fedora_ver
+    local -a _mr_as_root=()
+
+    # Privilege handling: repo/package installs need root; use sudo when
+    # running unprivileged (same pattern as znh_install_package_via_system_pm).
+    # Dry-run mode only prints, so it works without root too.
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        if command -v sudo >/dev/null 2>&1; then
+            _mr_as_root=(sudo)
+        elif [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+            _mr_as_root=(sudo)
+        else
+            log_error "--media-repos needs root privileges to install repositories/packages and sudo is not available. Re-run with sudo."
+            return 1
+        fi
+    fi
+
+    # 1) Distribution detection (Fedora / Arch family; others exit cleanly).
+    _mr_family="$(znh_media_repos_detect_family)"
+
+    echo "" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "  Multimedia & Codec Repositories" | tee -a "${LOG_FILE}"
+    echo "==============================================" | tee -a "${LOG_FILE}"
+    echo "Detected distribution family: ${_mr_family:-none/unsupported}" | tee -a "${LOG_FILE}"
+
+    if [ -z "${_mr_family}" ]; then
+        log_info "No supported distribution family detected via /etc/os-release (looked for the Fedora or Arch family via ID/ID_LIKE)."
+        log_info "The multimedia/codec repository setup currently supports Fedora and Arch; other families are not implemented yet."
+        log_info "Exiting cleanly; nothing was changed."
+        return 0
+    fi
+
+    if [ "${_mr_family}" = "fedora" ]; then
+        # The Fedora path keys every repository URL off the %fedora macro. On
+        # RHEL-like ID_LIKE matches (e.g. rocky: "rhel fedora") that macro does
+        # not exist, so exit cleanly instead of building broken URLs.
+        _mr_fedora_ver="$(rpm -E %fedora 2>/dev/null || true)"
+        if ! [[ "${_mr_fedora_ver}" =~ ^[0-9]+$ ]]; then
+            log_info "Fedora-like family detected, but this system does not expose the %fedora RPM macro (likely RHEL/CentOS/Rocky/Alma)."
+            log_info "The RPM Fusion / Terra media-repository path currently targets Fedora proper. Exiting cleanly; nothing was changed."
+            return 0
+        fi
+        # Use dnf5 when that is the default (Fedora 41+), otherwise dnf.
+        if command -v dnf5 >/dev/null 2>&1; then
+            _mr_dnf="dnf5"
+        elif command -v dnf >/dev/null 2>&1; then
+            _mr_dnf="dnf"
+        else
+            log_error "Neither dnf5 nor dnf found; cannot configure media repositories on this system."
+            return 1
+        fi
+
+        # 2) Idempotency probe + current state report (checks BEFORE any add).
+        znh_media_repos_state_probe
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Current media-repository state (probed before any change):" | tee -a "${LOG_FILE}"
+        echo "  - RPM Fusion free         : $([ "${ZNH_MEDIA_RPMFUSION_FREE_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - RPM Fusion nonfree       : $([ "${ZNH_MEDIA_RPMFUSION_NONFREE_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Terra repository         : $([ "${ZNH_MEDIA_TERRA_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Terra multimedia         : $([ "${ZNH_MEDIA_TERRA_MM_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Terra Mesa override      : $([ "${ZNH_MEDIA_MESA_OK}" -eq 1 ] && echo OK || echo NOT ENABLED)" | tee -a "${LOG_FILE}"
+        echo "  - Full-codec ffmpeg        : $([ "${ZNH_MEDIA_FFMPEG_FULL}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - ffmpeg-free (base build) : $([ "${ZNH_MEDIA_FFMPEG_FREE}" -eq 1 ] && echo OK || echo NOT INSTALLED)" | tee -a "${LOG_FILE}"
+        echo "  - Freeworld GStreamer set  : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+
+        # Fully set up already? Idempotent no-op (Mesa stays opt-in, and the
+        # multimedia subrepo is release-dependent, so neither is required).
+        if [ "${ZNH_MEDIA_RPMFUSION_FREE_OK}" -eq 1 ] \
+           && [ "${ZNH_MEDIA_RPMFUSION_NONFREE_OK}" -eq 1 ] \
+           && [ "${ZNH_MEDIA_TERRA_OK}" -eq 1 ] \
+           && { [ "${ZNH_MEDIA_FFMPEG_FULL}" -eq 1 ] || [ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ]; }; then
+            log_success "Multimedia/codec repositories are already fully set up (RPM Fusion + Terra + codec set present); nothing to do."
+            update_status "SUCCESS: media repositories already set up"
+            return 0
+        fi
+
+        # --- Step 1: RPM Fusion free + nonfree (including updates repos) ---
+        if [ "${ZNH_MEDIA_RPMFUSION_FREE_OK}" -eq 1 ] && [ "${ZNH_MEDIA_RPMFUSION_NONFREE_OK}" -eq 1 ]; then
+            log_success "RPM Fusion free + nonfree repositories already configured (including updates); skipping."
+        elif __znh_check_service_reachable "https://mirrors.rpmfusion.org" "RPM Fusion (mirrors.rpmfusion.org)"; then
+            if __znh_media_repos_run_or_dry "Install RPM Fusion free + nonfree release packages (incl. updates repos)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y \
+                "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${_mr_fedora_ver}.noarch.rpm" \
+                "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${_mr_fedora_ver}.noarch.rpm"; then
+                log_success "RPM Fusion free + nonfree repositories installed."
+            else
+                log_error "Failed to install the RPM Fusion release packages. Check the log and your network, then re-run: sudo zypper-auto-helper --media-repos"
+                rc=1
+            fi
+        else
+            log_warn "RPM Fusion (mirrors.rpmfusion.org) unreachable; skipping its setup. Retry later with: sudo zypper-auto-helper --media-repos"
+            rc=1
+        fi
+
+        # --- Step 2: Terra (terra-release, then terra-multimedia if available) ---
+        if [ "${ZNH_MEDIA_TERRA_OK}" -eq 1 ]; then
+            log_success "Terra repository already configured (terra-release present); skipping."
+        elif __znh_check_service_reachable "https://repos.fyralabs.com" "Terra (repos.fyralabs.com)"; then
+            # NOTE: the Terra URL contains a literal $releasever that DNF must
+            # expand at run time — bash must NOT expand it, hence the
+            # single-quoted --repofrompath argument below.
+            if __znh_media_repos_run_or_dry "Install Terra repository (terra-release)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y --nogpgcheck \
+                --repofrompath 'terra,https://repos.fyralabs.com/terra$releasever' terra-release; then
+                log_success "Terra repository installed (terra-release)."
+            else
+                log_error "Failed to install terra-release. Check the log and your network, then re-run: sudo zypper-auto-helper --media-repos"
+                rc=1
+            fi
+        else
+            log_warn "Terra (repos.fyralabs.com) unreachable; skipping Terra setup. Retry later with: sudo zypper-auto-helper --media-repos"
+            rc=1
+        fi
+
+        if [ "${ZNH_MEDIA_TERRA_MM_OK}" -eq 1 ]; then
+            log_success "Terra multimedia subrepository already enabled (terra-release-multimedia); skipping."
+        elif [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+            echo "  [dry-run] Would probe + enable the Terra multimedia subrepository (terra-release-multimedia; published for Fedora 43+)" | tee -a "${LOG_FILE}"
+        elif "${_mr_dnf}" --quiet repoquery terra-release-multimedia >/dev/null 2>&1; then
+            if __znh_media_repos_run_or_dry "Enable Terra multimedia subrepository (terra-release-multimedia)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y terra-release-multimedia; then
+                log_success "Terra multimedia subrepository enabled."
+            else
+                log_error "Failed to enable terra-release-multimedia."
+                rc=1
+            fi
+        else
+            log_info "terra-release-multimedia is not published for this Fedora release (Fedora 43+ only); skipping."
+        fi
+
+        # --- Step 3 (OPTIONAL): Terra Mesa override — explicit confirmation only. ---
+        # terra-release-mesa replaces Fedora's Mesa with Terra's patched,
+        # codec-complete build. It can conflict with RPM Fusion *-freeworld
+        # packages (e.g. mesa-va-drivers-freeworld) and can affect HDR, so it
+        # is strictly opt-in: interactive 'YES' prompt, or --mesa-override.
+        if [ "${ZNH_MEDIA_MESA_OK}" -eq 1 ]; then
+            log_success "Terra Mesa override already enabled (terra-release-mesa present); skipping."
+        else
+            local _mr_mesa_go=0
+            if [ "${MEDIA_REPOS_MESA_OVERRIDE:-0}" -eq 1 ] 2>/dev/null; then
+                log_warn "Terra Mesa override requested via --mesa-override (conflicts with *-freeworld packages and can affect HDR)."
+                _mr_mesa_go=1
+            elif [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+                echo "  [dry-run] Would prompt: enable the optional Terra Mesa override? (opt-in only; conflicts with *-freeworld, can affect HDR)" | tee -a "${LOG_FILE}"
+            elif [ -t 0 ] && [ "${ZNH_NON_INTERACTIVE:-0}" -ne 1 ] 2>/dev/null; then
+                echo "" | tee -a "${LOG_FILE}"
+                echo "Optional: Terra Mesa override (terra-release-mesa)" | tee -a "${LOG_FILE}"
+                echo "  Replaces Fedora's Mesa with Terra's patched, codec-complete build." | tee -a "${LOG_FILE}"
+                echo "  WARNING: it can conflict with RPM Fusion *-freeworld packages" | tee -a "${LOG_FILE}"
+                echo "  (e.g. mesa-va-drivers-freeworld) and can affect HDR support." | tee -a "${LOG_FILE}"
+                read -r -p "Enable the Terra Mesa override now? Type 'YES' to proceed: " _mr_mesa_confirm || true
+                if [ "${_mr_mesa_confirm}" = "YES" ]; then
+                    _mr_mesa_go=1
+                else
+                    log_info "Skipping the Terra Mesa override (enable it later with: sudo zypper-auto-helper --media-repos --mesa-override)."
+                fi
+            else
+                log_info "Non-interactive mode: the optional Terra Mesa override is skipped (opt-in only; re-run with --mesa-override to enable it)."
+            fi
+            if [ "${_mr_mesa_go}" -eq 1 ]; then
+                if __znh_media_repos_run_or_dry "Enable Terra Mesa override (terra-release-mesa)" \
+                    ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y terra-release-mesa; then
+                    log_success "Terra Mesa override enabled (terra-release-mesa)."
+                    # Terra docs: swap RPM Fusion freeworld VA drivers to
+                    # Terra's, then distro-sync the Mesa package set.
+                    if rpm -q mesa-va-drivers-freeworld >/dev/null 2>&1; then
+                        if ! __znh_media_repos_run_or_dry "Swap mesa-va-drivers-freeworld -> mesa-va-drivers (Terra build)" \
+                            ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" swap -y mesa-va-drivers-freeworld mesa-va-drivers --allowerasing; then
+                            log_warn "mesa-va-drivers swap failed (non-fatal); resolve manually with: sudo ${_mr_dnf} swap mesa-va-drivers-freeworld mesa-va-drivers"
+                        fi
+                    fi
+                    if ! __znh_media_repos_run_or_dry "Sync Mesa package set to Terra's build (distro-sync mesa*)" \
+                        ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" distro-sync -y 'mesa*'; then
+                        log_warn "Mesa distro-sync failed (non-fatal); resolve manually with: sudo ${_mr_dnf} distro-sync 'mesa*'"
+                    fi
+                else
+                    log_error "Failed to enable the Terra Mesa override."
+                    rc=1
+                fi
+            fi
+        fi
+
+        # --- Step 4: multimedia group (freeworld GStreamer plugin set) ---
+        if [ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ]; then
+            log_success "Multimedia codec set already present (freeworld GStreamer plugins detected); skipping the multimedia group."
+        else
+            if __znh_media_repos_run_or_dry "Install the multimedia group (freeworld GStreamer plugin set)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y "@multimedia" \
+                --setopt=install_weak_deps=False --exclude=PackageKit-gstreamer-plugin; then
+                log_success "Multimedia group installed (freeworld GStreamer plugins available)."
+            else
+                log_error "Failed to install the multimedia group. Retry later with: sudo zypper-auto-helper --media-repos"
+                rc=1
+            fi
+        fi
+
+        # --- Step 5: swap ffmpeg-free for the full-codec ffmpeg (if needed) ---
+        if [ "${ZNH_MEDIA_FFMPEG_FULL}" -eq 1 ]; then
+            log_success "Full-codec ffmpeg already installed; skipping the ffmpeg swap."
+        elif [ "${ZNH_MEDIA_FFMPEG_FREE}" -eq 1 ]; then
+            if __znh_media_repos_run_or_dry "Swap ffmpeg-free -> full-codec ffmpeg (RPM Fusion/Terra build)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" swap -y ffmpeg-free ffmpeg --allowerasing; then
+                log_success "Full-codec ffmpeg installed (ffmpeg-free replaced)."
+            else
+                log_error "Failed to swap ffmpeg-free -> ffmpeg. Resolve manually with: sudo ${_mr_dnf} swap ffmpeg-free ffmpeg --allowerasing"
+                rc=1
+            fi
+        else
+            # Neither variant installed (some spins ship neither): install the
+            # full build directly.
+            if __znh_media_repos_run_or_dry "Install full-codec ffmpeg" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y ffmpeg; then
+                log_success "Full-codec ffmpeg installed."
+            else
+                log_error "Failed to install ffmpeg. Retry later with: sudo zypper-auto-helper --media-repos"
+                rc=1
+            fi
+        fi
+
+        # --- Step 6: refresh + common codec packages ---
+        if ! __znh_media_repos_run_or_dry "Refresh repository metadata (makecache)" \
+            ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" makecache -y; then
+            log_warn "Repository metadata refresh failed (non-fatal)."
+        fi
+        if ! __znh_media_repos_run_or_dry "Install RPM Fusion AppStream metadata (GNOME Software/Discover visibility)" \
+            ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y rpmfusion-free-appstream-data rpmfusion-nonfree-appstream-data; then
+            log_warn "RPM Fusion AppStream data install failed (non-fatal)."
+        fi
+        if ! __znh_media_repos_run_or_dry "Install common codec packages (openh264 + GStreamer libav)" \
+            ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y openh264 gstreamer1-plugin-openh264 mozilla-openh264 gstreamer1-plugin-libav; then
+            log_warn "Common codec package install failed (non-fatal)."
+        fi
+
+    elif [ "${_mr_family}" = "arch" ]; then
+        # 2) Idempotency probe + current state report.
+        znh_media_repos_state_probe
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Current media/codec state (probed before any change):" | tee -a "${LOG_FILE}"
+        echo "  - Codec set (ffmpeg + GStreamer plugins) : $([ "${ZNH_MEDIA_REPOS_INSTALLED}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        if [ "${ZNH_MEDIA_REPOS_INSTALLED}" -eq 1 ]; then
+            log_success "Arch multimedia codec set already installed (ffmpeg + GStreamer plugins); nothing to do."
+            update_status "SUCCESS: Arch codec set already installed"
+            return 0
+        fi
+        # Arch's official repositories already ship full-codec builds, so no
+        # third-party repository is needed; --needed keeps this idempotent.
+        if __znh_media_repos_run_or_dry "Install Arch multimedia codec set (from official repositories)" \
+            ${_mr_as_root[@]+"${_mr_as_root[@]}"} pacman -S --noconfirm --needed \
+            gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav ffmpeg; then
+            log_success "Arch multimedia codec set installed."
+        else
+            log_error "Failed to install the Arch codec set. Resolve manually with: sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav ffmpeg"
+            rc=1
+        fi
+    fi
+
+    # Final re-probe so the summary reflects the real post-run state.
+    znh_media_repos_state_probe
+    echo "" | tee -a "${LOG_FILE}"
+    echo "Multimedia repository state after run (family: ${_mr_family}):" | tee -a "${LOG_FILE}"
+    if [ "${_mr_family}" = "fedora" ]; then
+        echo "  - RPM Fusion free/nonfree : $([ "${ZNH_MEDIA_RPMFUSION_FREE_OK}" -eq 1 ] && [ "${ZNH_MEDIA_RPMFUSION_NONFREE_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Terra repository         : $([ "${ZNH_MEDIA_TERRA_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Terra multimedia         : $([ "${ZNH_MEDIA_TERRA_MM_OK}" -eq 1 ] && echo OK || echo 'NOT AVAILABLE/ENABLED')" | tee -a "${LOG_FILE}"
+        echo "  - Terra Mesa override      : $([ "${ZNH_MEDIA_MESA_OK}" -eq 1 ] && echo OK || echo 'NOT ENABLED (opt-in)')" | tee -a "${LOG_FILE}"
+        echo "  - Full-codec ffmpeg        : $([ "${ZNH_MEDIA_FFMPEG_FULL}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+        echo "  - Freeworld GStreamer set  : $([ "${ZNH_MEDIA_CODECS_OK}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+    elif [ "${_mr_family}" = "arch" ]; then
+        echo "  - Codec set (ffmpeg + GStreamer plugins) : $([ "${ZNH_MEDIA_REPOS_INSTALLED}" -eq 1 ] && echo OK || echo MISSING)" | tee -a "${LOG_FILE}"
+    fi
+    echo "" | tee -a "${LOG_FILE}"
+
+    if [ "${rc}" -eq 0 ]; then
+        update_status "SUCCESS: multimedia/codec repository setup completed"
+        log_success "Multimedia & codec repository setup completed successfully."
+    else
+        update_status "COMPLETED WITH WARNINGS: multimedia/codec repository setup encountered some issues"
+        log_error "Multimedia & codec repository setup completed with one or more errors. See ${LOG_FILE} for details."
+    fi
+
+    return "$rc"
+}
+
 # Show help if requested, or when invoked as the installed CLI with no arguments
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
    || ( $# -eq 0 && "$(basename "$0")" == "zypper-auto-helper" ) ]]; then
@@ -50900,6 +51385,13 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --setup-SF              Install/configure Snapd and Flatpak (packages + universal Flatpak remotes:"
     echo "                          Flathub, Flathub Beta, Fedora OCI stable/testing, AppCenter, GNOME Nightly;"
     echo "                          optional Discover removal)"
+    echo "  --media-repos           Detect the running distro (Fedora/Arch family via /etc/os-release) and enable"
+    echo "                          the right third-party repos for multimedia, codecs and Mesa. Fedora: RPM Fusion"
+    echo "                          free/nonfree (+updates), Terra (+multimedia subrepo when published for the"
+    echo "                          release), the multimedia group and the full-codec ffmpeg swap. The Terra Mesa"
+    echo "                          override is opt-in only (--mesa-override; conflicts with *-freeworld, may"
+    echo "                          affect HDR). Arch: full-codec set from official repos. Idempotent; --dry-run"
+    echo "                          prints the commands without changing anything. Other distros exit cleanly."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -51062,6 +51554,44 @@ elif [[ "${1:-}" == "--setup-SF" ]]; then
     trap - ERR
     set +e
     run_setup_sf_only
+    rc=$?
+    set -e
+    exit $rc
+elif [[ "${1:-}" == "--media-repos" || "${1:-}" == "--setup-media-repos" ]]; then
+    log_info "Multimedia/codec repository setup helper-only mode requested"
+    # Optional sub-flags (parsed before dispatch):
+    #   --dry-run        : print what would run, change nothing
+    #   --mesa-override  : force the opt-in Terra Mesa override (no prompt)
+    #   --yes|-y|--non-interactive : non-interactive mode (auto-skip prompts;
+    #                      the Mesa override still requires --mesa-override)
+    shift || true
+    MEDIA_REPOS_DRY_RUN=0
+    MEDIA_REPOS_MESA_OVERRIDE=0
+    _mr_flag=""
+    for _mr_flag in "$@"; do
+        case "${_mr_flag}" in
+            --dry-run)
+                MEDIA_REPOS_DRY_RUN=1
+                ;;
+            --mesa-override)
+                MEDIA_REPOS_MESA_OVERRIDE=1
+                ;;
+            --yes|-y|--non-interactive)
+                ZNH_NON_INTERACTIVE=1
+                ;;
+            *)
+                log_error "Unknown option for --media-repos: ${_mr_flag}"
+                echo "Run 'zypper-auto-helper --help' for usage." >&2
+                exit 1
+                ;;
+        esac
+    done
+    # Like --setup-SF: helper-only mode may intentionally return non-zero
+    # (e.g. an unreachable repo host), so disable set -e and the ERR trap
+    # while running and propagate the exit code directly.
+    trap - ERR
+    set +e
+    run_media_repos_only
     rc=$?
     set -e
     exit $rc
@@ -63489,6 +64019,15 @@ def _quick_action_table() -> dict:
             "phrase": "SETUPSF",
             "explain": "Installs and configures Snapd and Flatpak together: ensures snapd is installed and running, installs flatpak, adds the universal Flatpak remotes (Flathub, Flathub Beta, Fedora OCI stable/testing, AppCenter, GNOME Nightly; system-wide when run as root, --user scope otherwise), optionally installs Snap Store and Bazaar apps, and optionally removes KDE Discover to avoid conflicting update stacks.",
             "warning": "This installs system packages and modifies Flatpak remotes. On openSUSE you may be prompted to add the snappy repository via opi.",
+        },
+        "media-repos": {
+            "title": "Install Multimedia & Codec Repos",
+            "cmd": [HELPER_BIN, "--media-repos"],
+            "timeout_s": 30 * 60,
+            "needs_confirm": True,
+            "phrase": "MEDIAREPOS",
+            "explain": "Detects the running distribution (Fedora or Arch family via /etc/os-release) and enables the right third-party repositories for multimedia and codecs. Fedora: installs RPM Fusion free + nonfree (including their updates repositories), then Terra (terra-release, plus terra-release-multimedia when published for the release), then the multimedia group and the full-codec ffmpeg swap (ffmpeg-free -> ffmpeg). Idempotent: existing repositories and installed codec packages are detected first and every finished step is skipped. The optional Terra Mesa override is NOT enabled by this action (opt-in only; run 'sudo zypper-auto-helper --media-repos --mesa-override' in a terminal if you want it). Unsupported distros exit cleanly with a message.",
+            "warning": "This installs system packages and adds third-party repositories (RPM Fusion, Terra); the first install imports their GPG keys. The Terra Mesa override (which can conflict with *-freeworld packages and affect HDR) is not included.",
         },
         "soar": {
             "title": "Install Soar CLI",
