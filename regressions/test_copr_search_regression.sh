@@ -116,6 +116,33 @@ require_contains "${source_text}" 'press q to continue to the selection' "Missin
 require_contains "${source_text}" 'Copr listing shown via pager (less -R)' "Missing the pager usage log line"
 require_not_contains "${source_text}" '>>"${_cs_listing_tmp}" | tee -a' "Paged listing buffer must not tee to LOG_FILE (ANSI escapes in log)"
 
+# --- 3f) Search filters: --user / --group-only / --exclude-fork / --sort ---
+require_contains "${source_text}" '--user)' "Missing the --user filter flag branch"
+require_contains "${source_text}" '_cs_filter_user="$1"' "Missing the --user filter value assignment"
+require_contains "${source_text}" '--group-only)' "Missing the --group-only filter flag branch"
+require_contains "${source_text}" '--exclude-fork)' "Missing the --exclude-fork filter flag branch"
+require_contains "${source_text}" '"${_cs_ukey}/"*|"@${_cs_ukey}/"*) : ;;' "Missing the --user owner match (owner/project + @owner/group namespaces)"
+require_contains "${source_text}" '"fork of"*) _cs_keep=0 ;;' "Missing the exclude-fork drop branch (description starts with 'Fork of')"
+require_contains "${source_text}" 'Filters applied: ${_cs_n} of ${_cs_total} projects shown' "Missing the filters-applied log line"
+require_contains "${source_text}" '— ${_cs_n} of ${_cs_total} shown' "Missing the shown-of-total header note"
+require_contains "${source_text}" "LC_ALL=C sort -t\$'\\t' -k1,1f" "Missing the --sort name TSV sort invocation"
+require_contains "${source_text}" '--sort date is not available' "Missing the honest --sort date rejection (no date field in the search API)"
+
+# --- 3g) Enable history log + [recent] marker ---
+require_contains "${source_text}" '_cs_history_file="/var/lib/zypper-auto/copr-history.tsv"' "Missing the enable history file path"
+require_contains "${source_text}" 'ZNH_COPR_RECENT_DAYS:-30' "Missing the ZNH_COPR_RECENT_DAYS default (30)"
+require_contains "${source_text}" "_cs_crecent=\$'\\033[94m'" "Missing the bright-blue [recent] color"
+require_contains "${source_text}" '[recent]${_cs_creset}' "Missing the [recent] marker render in the marker helper"
+require_contains "${source_text}" "printf '%s\\t%s\\tenabled\\n'" "Missing the history line write after a successful enable"
+require_contains "${source_text}" '| ${_cs_as_root[@]+"${_cs_as_root[@]}"} tee -a "${_cs_history_file}"' "Missing the unprivileged history write via sudo tee"
+require_contains "${source_text}" '--history|--copr-history)' "Missing the --history flag branch"
+require_contains "${source_text}" 'tail -n 50 "${_cs_history_file}"' "Missing the history listing tail (last 50)"
+require_contains "${source_text}" 'done | tac' "Missing the newest-first history listing (tac)"
+
+# --- 11b) Uninstaller note about the enable history ---
+require_contains "${source_text}" 'The enable history stays at /var/lib/zypper-auto/copr-history.tsv' "Missing the uninstaller note about the kept enable history"
+require_contains "${source_text}" '--copr-search --history) and remove each entry with the command above.' "Missing the uninstaller history-review hint"
+
 # --- 4) Idempotency: already-enabled detection (local copr list) + skip ---
 require_contains "${source_text}" '"${_cs_dnf}" copr list 2>/dev/null || true' "Missing local copr list probe for already-enabled repos"
 require_contains "${source_text}" '[ALREADY ENABLED]' "Missing [ALREADY ENABLED] marker in the listing"

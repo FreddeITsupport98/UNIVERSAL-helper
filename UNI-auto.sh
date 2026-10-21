@@ -49861,6 +49861,10 @@ run_uninstall_helper_only() {
     echo "deb-multimedia-keyring (Debian), or sudo pacman -R <package> (Arch)."
     echo "Copr repositories enabled via --copr-search / dnf copr-search are kept"
     echo "too; remove one with: sudo dnf copr remove <owner>/<project>."
+    echo "The enable history stays at /var/lib/zypper-auto/copr-history.tsv"
+    echo "(repos this helper enabled + when). To remove ONLY the repos this"
+    echo "helper enabled, review that file (or run: zypper-auto-helper"
+    echo "--copr-search --history) and remove each entry with the command above."
     echo "" | tee -a "${LOG_FILE}"
     echo "NOTE: Snapper/btrfs/fstrim timers are OS features and are NOT disabled by" | tee -a "${LOG_FILE}"
     echo "default. If you want the uninstaller to also disable those timers (Option 5" | tee -a "${LOG_FILE}"
@@ -51761,18 +51765,111 @@ run_media_repos_only() {
 # optional package install afterwards. Also reachable as `dnf copr-search
 # <query>` through the dnf-with-ps wrapper hook.
 run_copr_search_only() {
-    # Args: the search query words (joined with spaces).
+    # Args: sub-flags (parsed first) followed by the search query words.
+    # Sub-flags:
+    #   --user <owner>    only projects owned by <owner> (owner/project or
+    #                     @owner/... group namespaces; case-insensitive)
+    #   --group-only      only Copr group projects (@owner/project)
+    #   --exclude-fork    drop entries whose description starts with "Fork of"
+    #                     (heuristic; the Copr search API exposes no fork flag,
+    #                     but forked projects describe themselves that way)
+    #   --sort name|relevance
+    #                     name = case-insensitive alphabetical by owner/project;
+    #                     default relevance = the API's own order (the search
+    #                     endpoint returns NO per-project date field, so date
+    #                     sorting is not offered — verified live)
+    #   --history         print the enable history log and exit (no search)
     log_info ">>> Copr search + multi-select enable helper mode..."
     update_status "Running Copr search..."
 
     local rc=0
     local _cs_query _cs_family _cs_dnf _cs_q _cs_json _cs_n _cs_i _cs_tok _cs_lo _cs_hi
     local -a _cs_as_root=()
-    local -a _cs_names=() _cs_descs=() _cs_enabled_flags=() _cs_sel=()
+    local -a _cs_names=() _cs_descs=() _cs_enabled_flags=() _cs_sel=() _cs_query_words=()
 
-    _cs_query="$*"
+    # --- Sub-flag parsing (anything not matching a known flag joins the query) ---
+    local _cs_filter_user="" _cs_filter_group_only=0 _cs_filter_exclude_fork=0
+    local _cs_sort="relevance" _cs_history_only=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --user)
+                shift
+                if [ -z "${1:-}" ]; then
+                    log_error "--user needs an owner name. Usage: --copr-search --user <owner> <query>"
+                    return 1
+                fi
+                _cs_filter_user="$1"
+                ;;
+            --group-only)
+                _cs_filter_group_only=1
+                ;;
+            --exclude-fork)
+                _cs_filter_exclude_fork=1
+                ;;
+            --sort)
+                shift
+                case "${1:-}" in
+                    name|relevance)
+                        _cs_sort="$1"
+                        ;;
+                    date)
+                        log_error "--sort date is not available: the Copr project/search API returns no per-project date field (verified live). Use --sort name or --sort relevance."
+                        return 1
+                        ;;
+                    *)
+                        log_error "Invalid --sort value '${1:-}' (allowed: name, relevance)."
+                        return 1
+                        ;;
+                esac
+                ;;
+            --history|--copr-history)
+                _cs_history_only=1
+                ;;
+            --*)
+                log_error "Unknown option for --copr-search: $1"
+                log_error "Usage: zypper-auto-helper --copr-search [--user <owner>] [--group-only] [--exclude-fork] [--sort name|relevance] [--history] <query>"
+                return 1
+                ;;
+            *)
+                _cs_query_words+=("$1")
+                ;;
+        esac
+        shift
+    done
+    _cs_query="${_cs_query_words[*]}"
+
+    # --- Enable history log (root-writable, world-readable) ---
+    # One line per repo THIS helper enabled: ISO-date<TAB>full_name<TAB>enabled.
+    # Powers the [recent] marker in the listing (repos enabled within the
+    # last ZNH_COPR_RECENT_DAYS days, default 30) and the --history listing.
+    local _cs_history_file="/var/lib/zypper-auto/copr-history.tsv"
+    local _cs_recent_days=30
+    if [[ "${ZNH_COPR_RECENT_DAYS:-30}" =~ ^[0-9]+$ ]]; then
+        _cs_recent_days="${ZNH_COPR_RECENT_DAYS:-30}"
+    fi
+
+    if [ "${_cs_history_only}" -eq 1 ]; then
+        # Print the enable history (newest first, last 50) and exit.
+        echo ""
+        echo "Copr enable history (repos enabled by this helper, newest first):"
+        if [ ! -r "${_cs_history_file}" ]; then
+            echo "  (no history yet — enable repos with: dnf copr-search <query>)"
+            echo "  Log file: ${_cs_history_file} (not present yet)"
+            return 0
+        fi
+        local _cs_hcount _cs_hdate _cs_hname _cs_haction
+        _cs_hcount="$(grep -c '' "${_cs_history_file}" 2>/dev/null || echo 0)"
+        echo "  Log: ${_cs_history_file} (${_cs_hcount} entries; showing the newest 50)"
+        echo ""
+        tail -n 50 "${_cs_history_file}" | while IFS=$'\t' read -r _cs_hdate _cs_hname _cs_haction; do
+            [ -n "${_cs_hname}" ] || continue
+            printf '  %s  %s\n' "${_cs_hdate}" "${_cs_hname}"
+        done | tac
+        return 0
+    fi
+
     if [ -z "${_cs_query}" ]; then
-        log_error "No search query given. Usage: zypper-auto-helper --copr-search <query>"
+        log_error "No search query given. Usage: zypper-auto-helper --copr-search [--user <owner>] [--group-only] [--exclude-fork] [--sort name|relevance] [--history] <query>"
         return 1
     fi
 
@@ -51873,12 +51970,61 @@ for it in items:
         update_status "SUCCESS: no Copr projects matched the query"
         return 0
     fi
+
+    # Optional --sort name: case-insensitive alphabetical by owner/project.
+    # (relevance — the API's own order — is the default; the search endpoint
+    # returns no per-project date field, so date sorting is not offered.)
+    if [ "${_cs_sort}" = "name" ]; then
+        _cs_tsv="$(printf '%s\n' "${_cs_tsv}" | LC_ALL=C sort -t$'\t' -k1,1f)"
+    fi
     mapfile -t _cs_lines <<<"${_cs_tsv}"
     for _cs_line in "${_cs_lines[@]}"; do
         _cs_names+=("${_cs_line%%$'\t'*}")
         _cs_descs+=("${_cs_line#*$'\t'}")
     done
     _cs_n="${#_cs_names[@]}"
+
+    # Optional filters (--user / --group-only / --exclude-fork): narrow the
+    # result set BEFORE the already-enabled probe and the listing.
+    local _cs_total="${_cs_n}"
+    if [ -n "${_cs_filter_user}" ] || [ "${_cs_filter_group_only}" -eq 1 ] || [ "${_cs_filter_exclude_fork}" -eq 1 ]; then
+        local -a _cs_fn=() _cs_fd=()
+        local _cs_keep _cs_ukey
+        _cs_ukey="${_cs_filter_user,,}"
+        for _cs_i in "${!_cs_names[@]}"; do
+            _cs_keep=1
+            if [ -n "${_cs_ukey}" ]; then
+                case "${_cs_names[${_cs_i}],,}" in
+                    "${_cs_ukey}/"*|"@${_cs_ukey}/"*) : ;;
+                    *) _cs_keep=0 ;;
+                esac
+            fi
+            if [ "${_cs_keep}" -eq 1 ] && [ "${_cs_filter_group_only}" -eq 1 ]; then
+                case "${_cs_names[${_cs_i}]}" in
+                    @*) : ;;
+                    *) _cs_keep=0 ;;
+                esac
+            fi
+            if [ "${_cs_keep}" -eq 1 ] && [ "${_cs_filter_exclude_fork}" -eq 1 ]; then
+                case "${_cs_descs[${_cs_i}],,}" in
+                    "fork of"*) _cs_keep=0 ;;
+                esac
+            fi
+            if [ "${_cs_keep}" -eq 1 ]; then
+                _cs_fn+=("${_cs_names[${_cs_i}]}")
+                _cs_fd+=("${_cs_descs[${_cs_i}]}")
+            fi
+        done
+        _cs_names=("${_cs_fn[@]+"${_cs_fn[@]}"}")
+        _cs_descs=("${_cs_fd[@]+"${_cs_fd[@]}"}")
+        _cs_n="${#_cs_names[@]}"
+        if [ "${_cs_n}" -eq 0 ]; then
+            log_info "No Copr projects left for '${_cs_query}' after the requested filters (--user${_cs_filter_user:+=${_cs_filter_user}}${_cs_filter_group_only:+ --group-only}${_cs_filter_exclude_fork:+ --exclude-fork})."
+            update_status "SUCCESS: no Copr projects matched query + filters"
+            return 0
+        fi
+        log_info "Filters applied: ${_cs_n} of ${_cs_total} projects shown (--user${_cs_filter_user:+=${_cs_filter_user}}${_cs_filter_group_only:+ --group-only}${_cs_filter_exclude_fork:+ --exclude-fork})."
+    fi
 
     # Idempotency: mark projects that are already enabled (local copr list,
     # no network — reads /etc/yum.repos.d/*.repo).
@@ -51890,6 +52036,25 @@ for it in items:
             _cs_enabled_flags[${_cs_i}]=1
         fi
     done
+
+    # [recent] set: repos THIS helper enabled within the recent window
+    # (ZNH_COPR_RECENT_DAYS, default 30) — tagged bright blue in the listing,
+    # the selection feedback, and the confirmation preview.
+    local _cs_recent_set=""
+    if [ -r "${_cs_history_file}" ]; then
+        local _cs_hdate _cs_hname _cs_hsepoch _cs_cutoff
+        _cs_cutoff=$(( $(date -u +%s) - _cs_recent_days * 86400 ))
+        while IFS=$'\t' read -r _cs_hdate _cs_hname _; do
+            [ -n "${_cs_hname}" ] || continue
+            _cs_hsepoch="$(date -u -d "${_cs_hdate}" +%s 2>/dev/null || echo 0)"
+            if [ "${_cs_hsepoch}" -ge "${_cs_cutoff}" ] 2>/dev/null; then
+                case "${_cs_recent_set}" in
+                    *"${_cs_hname}"*) ;;
+                    *) _cs_recent_set+="${_cs_hname}"$'\n' ;;
+                esac
+            fi
+        done <"${_cs_history_file}"
+    fi
 
     # Display: numbered list with TITLE (owner/project) + DESCRIPTION,
     # colorized with a standardized scheme for readability (one blank line
@@ -51910,7 +52075,7 @@ for it in items:
     # (ANSI-color aware; leave with q) instead of flooding the terminal.
     # Set ZNH_COPR_SEARCH_PAGE_THRESHOLD=0 to disable paging.
     local _cs_cnum="" _cs_ctitle="" _cs_cdesc="" _cs_cok="" _cs_creset=""
-    local _cs_cgrp="" _cs_cerr=""
+    local _cs_cgrp="" _cs_cerr="" _cs_crecent=""
     local _cs_colors=0
     if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
         _cs_colors=1
@@ -51920,12 +52085,15 @@ for it in items:
         _cs_cok=$'\033[92m'
         _cs_cgrp=$'\033[95m'
         _cs_cerr=$'\033[91m'
+        _cs_crecent=$'\033[94m'
         _cs_creset=$'\033[0m'
     fi
 
-    # Per-entry markers: [group] for Copr group projects (@owner/project) and
-    # [ALREADY ENABLED] for repos already configured. Nested helper — sees
-    # the enclosing function's locals (bash dynamic scoping).
+    # Per-entry markers: [group] for Copr group projects (@owner/project),
+    # [ALREADY ENABLED] for repos already configured, and [recent] for repos
+    # THIS helper enabled within ZNH_COPR_RECENT_DAYS (default 30) per the
+    # enable history log. Nested helper — sees the enclosing function's
+    # locals (bash dynamic scoping).
     __znh_copr_entry_markers() {
         local _midx="$1" _m=""
         case "${_cs_names[${_midx}]}" in
@@ -51933,6 +52101,13 @@ for it in items:
         esac
         if [ "${_cs_enabled_flags[${_midx}]}" -eq 1 ]; then
             _m="${_m}  ${_cs_cok}[ALREADY ENABLED]${_cs_creset}"
+        fi
+        if [ -n "${_cs_recent_set}" ]; then
+            case "${_cs_recent_set}" in
+                *"${_cs_names[${_midx}]}"*)
+                    _m="${_m}  ${_cs_crecent}[recent]${_cs_creset}"
+                    ;;
+            esac
         fi
         printf '%s' "${_m}"
     }
@@ -51958,7 +52133,14 @@ for it in items:
     fi
 
     echo "" | tee -a "${LOG_FILE}"
-    echo "Copr projects matching '${_cs_query}' (${_cs_n} found):" | tee -a "${LOG_FILE}"
+    local _cs_header_note=""
+    if [ "${_cs_total}" -gt "${_cs_n}" ] 2>/dev/null; then
+        _cs_header_note=" — ${_cs_n} of ${_cs_total} shown"
+    fi
+    if [ "${_cs_sort}" = "name" ]; then
+        _cs_header_note="${_cs_header_note} — sorted by name"
+    fi
+    echo "Copr projects matching '${_cs_query}' (${_cs_n} found${_cs_header_note}):" | tee -a "${LOG_FILE}"
     for _cs_i in "${!_cs_names[@]}"; do
         _cs_markers="$(__znh_copr_entry_markers "${_cs_i}")"
         if [ "${_cs_use_pager}" -eq 1 ]; then
@@ -52126,6 +52308,18 @@ for it in items:
             ${_cs_as_root[@]+"${_cs_as_root[@]}"} "${_cs_dnf}" -y copr enable "${_cs_names[${_cs_i}]}"; then
             log_success "Copr repository ${_cs_names[${_cs_i}]} enabled."
             _cs_enabled=$((_cs_enabled + 1))
+            # Record the enable in the history log (best-effort, root-writable)
+            # so --copr-search can tag it [recent] and --history can list it.
+            if [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null; then
+                mkdir -p /var/lib/zypper-auto 2>/dev/null || true
+                printf '%s\t%s\tenabled\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_cs_names[${_cs_i}]}" \
+                    >>"${_cs_history_file}" 2>/dev/null || true
+                chmod 644 "${_cs_history_file}" 2>/dev/null || true
+            else
+                printf '%s\t%s\tenabled\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_cs_names[${_cs_i}]}" \
+                    | ${_cs_as_root[@]+"${_cs_as_root[@]}"} tee -a "${_cs_history_file}" >/dev/null 2>&1 || true
+                ${_cs_as_root[@]+"${_cs_as_root[@]}"} chmod 644 "${_cs_history_file}" 2>/dev/null || true
+            fi
         else
             log_error "Failed to enable Copr repository ${_cs_names[${_cs_i}]}. Resolve manually with: sudo ${_cs_dnf} copr enable ${_cs_names[${_cs_i}]}"
             _cs_failed=$((_cs_failed + 1))
@@ -52204,6 +52398,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          'dnf/dnf5 copr enable' — opi-style. Already-enabled repos are skipped"
     echo "                          (idempotent), with an optional package install afterwards. Also available as"
     echo "                          'dnf copr-search <query>' via the dnf wrapper hook. Fedora family only."
+    echo "                          Sub-flags: --user <owner> (one owner's projects, incl. @owner groups),"
+    echo "                          --group-only (only @owner/project groups), --exclude-fork (drops"
+    echo "                          'Fork of...' descriptions), --sort name|relevance (default relevance;"
+    echo "                          the search API has no date field), --history (list repos this helper"
+    echo "                          enabled). Repos enabled within ZNH_COPR_RECENT_DAYS (30) get [recent]."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
