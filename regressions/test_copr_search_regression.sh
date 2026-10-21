@@ -81,6 +81,21 @@ require_contains "${source_text}" 'desc = " ".join(str(it.get("description") or 
 require_contains "${source_text}" 'sys.stdout.write(full_name + "\t" + first_line + "\n")' "Missing TSV full_name+description output line"
 require_contains "${source_text}" 'mapfile -t _cs_lines <<<"${_cs_tsv}"' "Missing mapfile parse of the Copr result TSV"
 
+# --- 3b) Colorized standardized listing (number/title/description + blank lines) ---
+require_contains "${source_text}" 'local _cs_cnum="" _cs_ctitle="" _cs_cdesc="" _cs_cok="" _cs_creset=""' "Missing the copr-search color variable block"
+require_contains "${source_text}" 'if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then' "Missing the TTY + NO_COLOR color gate (https://no-color.org)"
+require_contains "${source_text}" "_cs_cnum=\$'\\033[96m'" "Missing the bright-cyan entry-number color"
+require_contains "${source_text}" "_cs_ctitle=\$'\\033[1m'" "Missing the bold title color"
+require_contains "${source_text}" "_cs_cdesc=\$'\\033[33m'" "Missing the yellow description color (one distinct, consistent color)"
+require_contains "${source_text}" "_cs_cok=\$'\\033[92m'" "Missing the bright-green [ALREADY ENABLED] color"
+require_contains "${source_text}" "_cs_creset=\$'\\033[0m'" "Missing the color reset"
+require_contains "${source_text}" '%s%3d%s) %s%s%s\n' "Missing the colorized number+title printf (entry numbers colored, titles bold)"
+require_contains "${source_text}" '%s%3d%s) %s%s%s  %s[ALREADY ENABLED]%s\n' "Missing the colorized [ALREADY ENABLED] number+title printf"
+require_contains "${source_text}" '"${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"' "Missing the colorized description printf args (yellow + reset)"
+require_contains "${source_text}" '%s - %s%s%s\n' "Missing the colorized confirmation-preview entry printf format"
+require_contains "${source_text}" '# Colored interactive listing: stdout only (no log tee; ANSI' "Missing the stdout-only rationale (ANSI escapes must never enter LOG_FILE)"
+require_not_contains "${source_text}" '"${_cs_cok}" "${_cs_creset}" | tee -a' "Colored [ALREADY ENABLED] printf must not tee to LOG_FILE (ANSI escapes in log)"
+
 # --- 4) Idempotency: already-enabled detection (local copr list) + skip ---
 require_contains "${source_text}" '"${_cs_dnf}" copr list 2>/dev/null || true' "Missing local copr list probe for already-enabled repos"
 require_contains "${source_text}" '[ALREADY ENABLED]' "Missing [ALREADY ENABLED] marker in the listing"

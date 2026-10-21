@@ -51891,18 +51891,60 @@ for it in items:
         fi
     done
 
-    # Display: numbered list with TITLE (owner/project) + DESCRIPTION.
+    # Display: numbered list with TITLE (owner/project) + DESCRIPTION,
+    # colorized with a standardized scheme for readability (one blank line
+    # between entries):
+    #   - entry numbers    : bright cyan
+    #   - project titles   : bold
+    #   - descriptions     : yellow (one distinct, consistent color)
+    #   - [ALREADY ENABLED]: bright green
+    # Colors are ONLY enabled when stdout is a TTY and NO_COLOR is unset
+    # (https://no-color.org). Piped/redirected output (e.g. WebUI quick-action
+    # logs) stays plain, and the colored listing goes to stdout ONLY so ANSI
+    # escapes never end up in the log file; the plain non-TTY listing still
+    # tees to the log as before.
+    local _cs_cnum="" _cs_ctitle="" _cs_cdesc="" _cs_cok="" _cs_creset=""
+    local _cs_colors=0
+    if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
+        _cs_colors=1
+        _cs_cnum=$'\033[96m'
+        _cs_ctitle=$'\033[1m'
+        _cs_cdesc=$'\033[33m'
+        _cs_cok=$'\033[92m'
+        _cs_creset=$'\033[0m'
+    fi
+
     echo "" | tee -a "${LOG_FILE}"
     echo "Copr projects matching '${_cs_query}' (${_cs_n} found):" | tee -a "${LOG_FILE}"
-    echo "" | tee -a "${LOG_FILE}"
     for _cs_i in "${!_cs_names[@]}"; do
-        if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
-            printf '  %3d) %s  [ALREADY ENABLED]\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
+        if [ "${_cs_colors}" -eq 1 ]; then
+            # Colored interactive listing: stdout only (no log tee; ANSI
+            # escapes must never be written into LOG_FILE).
+            echo ""
+            if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
+                printf '%s%3d%s) %s%s%s  %s[ALREADY ENABLED]%s\n' \
+                    "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
+                    "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}" \
+                    "${_cs_cok}" "${_cs_creset}"
+            else
+                printf '%s%3d%s) %s%s%s\n' \
+                    "${_cs_cnum}" "$((_cs_i + 1))" "${_cs_creset}" \
+                    "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}"
+            fi
+            if [ -n "${_cs_descs[${_cs_i}]}" ]; then
+                printf '    %s%s%s\n' "${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"
+            fi
         else
-            printf '  %3d) %s\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
-        fi
-        if [ -n "${_cs_descs[${_cs_i}]}" ]; then
-            printf '        %s\n' "${_cs_descs[${_cs_i}]}" | tee -a "${LOG_FILE}"
+            # Plain listing (non-TTY): tee to the log as before.
+            echo "" | tee -a "${LOG_FILE}"
+            if [ "${_cs_enabled_flags[${_cs_i}]}" -eq 1 ]; then
+                printf '  %3d) %s  [ALREADY ENABLED]\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
+            else
+                printf '  %3d) %s\n' "$((_cs_i + 1))" "${_cs_names[${_cs_i}]}" | tee -a "${LOG_FILE}"
+            fi
+            if [ -n "${_cs_descs[${_cs_i}]}" ]; then
+                printf '        %s\n' "${_cs_descs[${_cs_i}]}" | tee -a "${LOG_FILE}"
+            fi
         fi
     done
     echo "" | tee -a "${LOG_FILE}"
@@ -51984,13 +52026,15 @@ for it in items:
             ;;
     esac
 
-    # Confirmation preview.
+    # Confirmation preview (same standardized color scheme + one blank line
+    # between entries for readability; stdout only, never logged).
     echo ""
     echo "The following ${#_cs_sel[@]} Copr repositories will be enabled:"
     for _cs_i in "${_cs_sel[@]}"; do
-        printf '  - %s\n' "${_cs_names[${_cs_i}]}"
+        echo ""
+        printf '%s - %s%s%s\n' "${_cs_cnum}" "${_cs_ctitle}" "${_cs_names[${_cs_i}]}" "${_cs_creset}"
         if [ -n "${_cs_descs[${_cs_i}]}" ]; then
-            printf '      %s\n' "${_cs_descs[${_cs_i}]}"
+            printf '    %s%s%s\n' "${_cs_cdesc}" "${_cs_descs[${_cs_i}]}" "${_cs_creset}"
         fi
     done
     echo ""
