@@ -198,7 +198,7 @@ require_contains "${source_text}" "setText('feat-media-repos-val', d.feat_media_
 require_contains "${source_text}" "'media-repos': !!(d.feat_media_repos_installed)" "Missing JS _modInstalled media-repos entry"
 require_contains "${source_text}" "'media-repos': !!(d.feat_media_repos_healthy)" "Missing JS _modHealthy media-repos entry"
 require_contains "${source_text}" "setClass('feat-media-repos-dot', _modHealthy['media-repos']" "Missing JS dot class update for the media-repos tile"
-require_contains "${source_text}" "var _mods = ['media-repos','flatpak','snap','soar','brew','pipx'];" "Missing media-repos entry in the JS badge class loop"
+require_contains "${source_text}" "var _mods = ['media-repos','arch-repos','flatpak','snap','soar','brew','pipx'];" "Missing media-repos entry in the JS badge class loop (media-repos first; arch-repos added in v70)"
 require_contains "${source_text}" "'media-repos': 'media-repos'," "Missing _modQaMap media-repos quick-action mapping"
 require_contains "${source_text}" '"media-repos": {' "Missing media-repos quick-action allowlist entry"
 require_contains "${source_text}" '"phrase": "MEDIAREPOS"' "Missing MEDIAREPOS confirmation phrase in the quick action"

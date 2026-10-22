@@ -175,7 +175,12 @@ require_contains "${source_text}" "\"downloader-event\": 62," "AI incident impac
 require_contains "${source_text}" "\"id\": \"downloader-network-repo\"," "AI repair-plan catalog missing downloader network/repo action mapping"
 require_contains "${source_text}" "\"incident_kinds\": [\"update-conflict\", \"downloader-solver\"]," "AI repair-plan catalog missing downloader solver conflict mapping"
 
-require_not_contains "${source_text}" "sudo zypper install" "Hardcoded zypper install guidance still present"
+# v68+ note: the media-repos openSUSE Packman fallback legitimately carries a
+# SUSE-scoped zypper hint (sudo zypper install --allow-vendor-change --from
+# packman-essentials ...), so the guard targets PM-AGNOSTIC generic guidance
+# instead: no bare 'sudo zypper install -y' style hint may appear anywhere.
+require_contains "${source_text}" "sudo zypper install --allow-vendor-change --from packman-essentials" "Missing the suse-scoped Packman fallback install guidance (v68 media-repos suse path)"
+require_not_contains "${source_text}" "sudo zypper install -y" "Hardcoded generic zypper install guidance still present"
 require_not_contains "${source_text}" "The background updater could not reach the openSUSE repositories." "Notifier network error message is still openSUSE-only"
 require_not_contains "${source_text}" "Run 'sudo zypper refresh' in a terminal for full details." "Notifier repository recovery hint is still hardcoded to zypper refresh"
 require_not_contains "${source_text}" "No zypper run performed (environment not safe). Exiting." "Notifier empty-preview log path is still zypper-only"

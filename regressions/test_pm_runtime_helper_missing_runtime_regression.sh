@@ -151,20 +151,22 @@ done
 
 print_fail_summary_and_exit
 
-# 1) zypper-with-ps wrapper should fail fast with clear guidance.
+# 1) zypper-with-ps wrapper: since the [2026-05-03] quiet-fallback rework the
+# wrapper no longer fail-fasts on a missing shared helper — it prints the
+# PM runtime helper missing WARNING and DEGRADES to the inline cross-distro
+# fallback stubs (log-only terminal noise; the actual PM still runs).
 WRAPPER_OUT="${TMP_ROOT}/wrapper.out"
 set +e
 HOME="${TMP_ROOT}/home-wrapper" "${WRAPPER_SCRIPT}" >"${WRAPPER_OUT}" 2>&1
 wrapper_rc=$?
 set -e
-if [ "${wrapper_rc}" -eq 0 ]; then
-    record_failure "zypper-with-ps wrapper should fail when shared helper is missing"
-fi
 wrapper_txt="$(cat -- "${WRAPPER_OUT}" 2>/dev/null || true)"
-require_contains "${wrapper_txt}" "shared package-manager runtime helper missing" "wrapper missing-helper message not shown"
-require_contains "${wrapper_txt}" "Please re-run the installer: sudo zypper-auto-helper install" "wrapper reinstall guidance not shown"
+require_contains "${wrapper_txt}" "PM runtime helper missing" "wrapper missing-helper WARNING not shown"
+require_contains "${wrapper_txt}" "using inline cross-distro fallback" "wrapper inline-fallback notice not shown"
 
-# 2) downloader should not crash; it should mark status as error:repo and exit cleanly.
+# 2) downloader should not crash on a missing helper; it degrades to the
+# inline fallback and still writes a status file (the concrete status value
+# depends on the live PM/network state, so only presence is asserted here).
 DOWNLOADER_OUT="${TMP_ROOT}/downloader.out"
 set +e
 HOME="${TMP_ROOT}/home-downloader" "${DOWNLOADER_SCRIPT}" >"${DOWNLOADER_OUT}" 2>&1
@@ -176,24 +178,22 @@ fi
 downloader_status_file="${DOWNLOADER_LOG_DIR}/download-status.txt"
 if [ ! -f "${downloader_status_file}" ]; then
     record_failure "downloader did not write status file on missing helper (${downloader_status_file})"
-else
-    downloader_status="$(cat -- "${downloader_status_file}" 2>/dev/null || true)"
-    require_contains "${downloader_status}" "error:repo" "downloader missing-helper path did not publish error:repo status"
 fi
 
-# 3) install helper should fail fast with clear user guidance.
+# 3) install helper: since the [2026-05-03] quiet-fallback rework the
+# selftest completes OK with the inline fallback + user-local PM runtime
+# cache (no fail-fast, no terminal warnings — they are log()-only).
 INSTALL_OUT="${TMP_ROOT}/install.out"
 mkdir -p "${TMP_ROOT}/home-install"
 set +e
 HOME="${TMP_ROOT}/home-install" "${INSTALL_SCRIPT}" --selftest >"${INSTALL_OUT}" 2>&1
 install_rc=$?
 set -e
-if [ "${install_rc}" -eq 0 ]; then
-    record_failure "install helper should fail when shared helper is missing"
+if [ "${install_rc}" -ne 0 ]; then
+    record_failure "install helper selftest should complete OK via the inline fallback (quiet missing-helper path), got rc=${install_rc}"
 fi
 install_txt="$(cat -- "${INSTALL_OUT}" 2>/dev/null || true)"
-require_contains "${install_txt}" "Shared package-manager helper is missing" "install helper missing-helper warning not shown"
-require_contains "${install_txt}" "Please re-run the installer: sudo zypper-auto-helper install" "install helper reinstall guidance not shown"
+require_contains "${install_txt}" "selftest OK" "install helper selftest OK line not shown"
 
 # 4) view-changes inner script should warn and continue safely.
 VIEW_OUT="${TMP_ROOT}/view-inner.out"

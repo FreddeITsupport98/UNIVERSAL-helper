@@ -52,8 +52,12 @@ require_contains "${source_text}" "is_zypp_lock_output() {" "wrapper lock-output
 require_contains "${source_text}" "wait_for_zypp_lock_clear() {" "wrapper lock wait helper missing"
 require_contains "${source_text}" "LOCK_RETRY_INITIAL_DELAY_SECONDS=0 disables waiting (fail fast)." "wrapper lock wait helper must document zero-delay behavior"
 
-# Manual zypper wrapper flow (dup/dist-upgrade/update)
-require_contains "${source_text}" "if [[ \"\$*\" == *\"dup\"* ]] || [[ \"\$*\" == *\"dist-upgrade\"* ]] || [[ \"\$*\" == *\"update\"* ]] ; then" "wrapper manual update gate missing"
+# Manual zypper wrapper flow (dup/dist-upgrade/update). Since the
+# [2026-07-31] cross-distro rework the hardcoded verb-list gate became the
+# shared per-PM __znh_pm_is_update_cmd helper (dup/dist-upgrade/update on
+# zypper; upgrade/distro-sync on dnf; etc.), so assert the helper call.
+require_contains "${source_text}" "if __znh_pm_is_update_cmd \"\$@\"; then" "wrapper manual update gate missing (cross-distro __znh_pm_is_update_cmd gate)"
+require_contains "${source_text}" "__znh_pm_is_update_cmd() {" "wrapper manual update gate helper definition missing"
 require_contains "${source_text}" "if ! wait_for_zypp_lock_clear \"\$max_attempts\" \"\$base_delay\"; then" "wrapper must wait for lock before running zypper"
 require_contains "${source_text}" "run_attempt_max=2" "wrapper must allow one execution retry on lock race"
 require_contains "${source_text}" "if is_zypp_lock_output \"\$ZYPPER_OUT_FILE\"; then" "wrapper must parse lock text from zypper output"

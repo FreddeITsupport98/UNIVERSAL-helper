@@ -258,10 +258,21 @@ require_contains \
     'znh_downloader_classify_download_failure "prefetch download" "${ZYP_RET}" "${DL_ERR_FILE}"' \
     "Cross-distro flow does not route the failure through znh_downloader_classify_download_failure"
 
-# Distro-upgrade prefetch must also use the classifier on rc!=0.
+# Distro-upgrade prefetch (Fedora) failure path: since the v62 false-positive
+# fix it deliberately does NOT route through znh_downloader_classify_download_failure
+# (that would clobber the successful primary-prefetch status with error:solver:1).
+# Instead it classifies inline via the shared znh_pm_* helpers + the solver grep,
+# emits a structured error:distro-upgrade:${du_rc} event with the error_kind,
+# and RESTORES the saved primary download status.
 require_contains \
-    'znh_downloader_classify_download_failure "distro-upgrade prefetch (Fedora ${version_id:-?} -> ${target})" "${du_rc}" "${du_err}"' \
-    "Distro-upgrade prefetch failure path does not route through znh_downloader_classify_download_failure"
+    'local du_stage_label="distro-upgrade prefetch (Fedora ${version_id:-?} -> ${target})"' \
+    "Distro-upgrade prefetch failure path is missing its stage label"
+require_contains \
+    'znh_downloader_emit_event "error" "error" "error:distro-upgrade:${du_rc}"' \
+    "Distro-upgrade prefetch failure path does not emit the structured error:distro-upgrade event"
+require_contains \
+    'write_status "${saved_dl_status}"' \
+    "Distro-upgrade prefetch failure path does not restore the saved primary download status"
 
 # Negative: the legacy blanket 'error:solver:$ZYP_RET' write must no longer
 # appear in the cross-distro success/failure code path. (The classifier is now

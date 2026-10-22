@@ -82,7 +82,7 @@ self_update_changelog_block="$(
 require_contains "${source_text}" "def _github_latest_release_candidate(*, policy: str = \"release\", timeout_s: int = 10) -> tuple[dict, dict]:" "backend missing policy-aware latest release candidate helper"
 require_contains "${source_text}" "def _read_remote_script_bytes(ref: str, timeout_s: int = 15) -> tuple[bytes, str]:" "backend missing remote script bytes helper"
 require_contains "${source_text}" "def _script_layer_sha256s(text: str) -> dict:" "backend missing layered SHA256 helper"
-require_contains "${source_text}" "def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool) -> tuple[str, str, list[str], str, str]:" "backend missing recommendation helper"
+require_contains "${source_text}" "def _recommend_post_action(local_layers: dict, remote_layers: dict, *, has_remote: bool, diff_summary: dict | None = None) -> tuple[str, str, list[str], str, str]:" "backend missing recommendation helper (current signature incl. the diff_summary kwarg)"
 require_contains "${source_text}" "def _detect_install_origin(*, install_source: str, active_channel: str, active_ref: str, stable_tag: str, rolling_sha: str) -> dict:" "backend missing install-origin detection helper"
 require_contains "${source_text}" "def _recommend_channel_switch(*, configured_channel: str, active_channel: str, install_origin: dict, channel_switch: bool, is_externally_managed: bool) -> tuple[str, str, str, str]:" "backend missing channel-switch recommendation helper"
 

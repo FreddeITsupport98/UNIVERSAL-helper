@@ -154,6 +154,15 @@ else:
     else:
         die("runtime stale guard: missing cache should be False")
 
+    # Hermetic old/fresh-cache cases: stub the DB mtime to a controlled value.
+    # The live package DB can be older than a 2h-old fixture cache on a quiet
+    # machine (no recent installs), which made the old-cache case depend on
+    # unrelated host activity. _cache_stale_after_install looks up
+    # _pm_db_mtime in its exec globals at CALL time, so rebinding it here
+    # makes both cases deterministic while the live-DB probe above still
+    # exercises the real _pm_db_mtime path.
+    ns["_pm_db_mtime"] = lambda: time.time() - 3600
+
     fd, cache = tempfile.mkstemp(suffix=".txt")
     os.close(fd)
     try:

@@ -57,7 +57,7 @@ require_contains "${source_text}" "LOG_FOLDER_OPENER)" "Missing missing-key desc
 
 require_contains "${source_text}" "desktop lock reminder notifications are shown while a package-manager lock is active" "Missing LOCK_REMINDER_ENABLED description text"
 require_contains "${source_text}" "identical \\\"No updates found\\\" notifications can repeat while the system remains up to date" "Missing NO_UPDATES_REMINDER_REPEAT_ENABLED description text"
-require_contains "${source_text}" "identical \\\"Updates ready\\\" notifications can repeat while the same update set remains pending" "Missing UPDATES_READY_REMINDER_REPEAT_ENABLED description text"
+require_contains "${source_text}" "default false since the popup is persistent and KDE stacks re-shows as duplicates" "Missing UPDATES_READY_REMINDER_REPEAT_ENABLED description text (v69 wording)"
 require_contains "${source_text}" "optional preferred folder opener command (e.g. dolphin/nautilus) used before xdg-open fallback in debug/log views" "Missing LOG_FOLDER_OPENER description text"
 
 if [ "${#FAILURES[@]}" -gt 0 ]; then

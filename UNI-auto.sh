@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 69 - Enterprise Edition: notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 70 - Enterprise Edition: arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -1539,7 +1539,7 @@ if [[ $# -gt 0 ]]; then
             exit 2
             ;;
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
-        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--copr-search|--uninstall-zypper|\
+        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--copr-search|--uninstall-zypper|--arch-repos|--setup-arch-repos|\
         --reset-config|--reset-downloads|--reset-state|--stale-module-dirs|--stale-modules|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-bg|--dash-bg-enable|--dash-bg-disable|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
@@ -13162,6 +13162,12 @@ generate_dashboard() {
     # Each module checks: command -v (root PATH), sudo -u user sh -lc (user login shell),
     # then well-known filesystem paths as final fallback.
     local feat_flatpak_installed feat_snap_installed feat_soar_installed feat_brew_installed feat_pipx_installed
+    # NOTE: the media-repos + arch-repos installed/healthy/supported vars are
+    # declared local HERE (before their assignments below). A bare `local x`
+    # re-declaration AFTER an assignment wipes the value (bash semantics),
+    # which previously made the media-repos badge value unbound under set -u
+    # and aborted the whole dashboard generation (pre-existing v67 bug).
+    local feat_media_repos_installed feat_media_repos_healthy feat_arch_repos_supported feat_arch_repos_installed feat_arch_repos_healthy
     feat_flatpak_installed=0
     if command -v flatpak >/dev/null 2>&1; then
         feat_flatpak_installed=1
@@ -13229,15 +13235,48 @@ generate_dashboard() {
     fi
     feat_media_repos=$([[ "${feat_media_repos_installed}" == "1" ]] && echo "READY" || echo "MISSING")
 
+    # Arch unofficial repositories (--arch-repos; Arch family only). Reuses the
+    # read-only probe from the --arch-repos module so this badge reflects the
+    # real state (any catalog repo enabled = installed; an 'unreachable' last
+    # health entry = unhealthy). The probe function is defined later in this
+    # file; guarded so older embedded copies degrade gracefully.
+    feat_arch_repos_supported=0
+    feat_arch_repos_installed=0
+    feat_arch_repos_healthy=0
+    if declare -f znh_arch_repos_state_probe >/dev/null 2>&1; then
+        znh_arch_repos_state_probe
+        if [ "${ZNH_ARCH_REPOS_SUPPORTED:-0}" -eq 1 ] 2>/dev/null; then feat_arch_repos_supported=1; fi
+        if [ "${ZNH_ARCH_REPOS_INSTALLED:-0}" -eq 1 ] 2>/dev/null; then feat_arch_repos_installed=1; fi
+        if [ "${ZNH_ARCH_REPOS_HEALTHY:-0}" -eq 1 ] 2>/dev/null; then feat_arch_repos_healthy=1; fi
+    fi
+    # Display value: N/A (not Arch) / NONE (none enabled) / READY / ATTN (a
+    # repo failed the last health check — run the health failsafe).
+    if [ "${feat_arch_repos_supported}" -eq 1 ] 2>/dev/null; then
+        if [ "${feat_arch_repos_installed}" -eq 1 ] 2>/dev/null; then
+            if [ "${feat_arch_repos_healthy}" -eq 1 ] 2>/dev/null; then
+                feat_arch_repos="READY"
+            else
+                feat_arch_repos="ATTN"
+            fi
+        else
+            feat_arch_repos="NONE"
+        fi
+    else
+        feat_arch_repos="N/A"
+    fi
+
     # Service health checks (installed + working = healthy)
     # green = healthy, yellow = installed but service unhealthy, red = missing
-    local feat_flatpak_healthy feat_snap_healthy feat_soar_healthy feat_brew_healthy feat_pipx_healthy feat_media_repos_healthy
+    local feat_flatpak_healthy feat_snap_healthy feat_soar_healthy feat_brew_healthy feat_pipx_healthy
     feat_flatpak_healthy=0
     feat_snap_healthy=0
     feat_soar_healthy=0
     feat_brew_healthy=0
     feat_pipx_healthy=0
-    # feat_media_repos_healthy is set by the probe above (0 by default).
+    # NOTE: feat_media_repos_healthy / feat_arch_repos_healthy are NOT
+    # re-declared here — they were declared local (with their probe
+    # assignments) earlier; a bare `local x` here would wipe those values
+    # and abort under set -u (the pre-existing v67 bug this fixes).
 
     if [ "${feat_flatpak_installed}" -eq 1 ] 2>/dev/null; then
         # Flatpak healthy = flathub remote is configured
@@ -13281,6 +13320,28 @@ generate_dashboard() {
     feat_brew_install_class=$([[ "${feat_brew_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_brew_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
     feat_pipx_install_class=$([[ "${feat_pipx_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_pipx_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
     feat_media_repos_install_class=$([[ "${feat_media_repos_healthy}" == "1" ]] && echo "feat-installed" || ([[ "${feat_media_repos_installed}" == "1" ]] && echo "feat-warning" || echo "feat-missing"))
+
+    # Arch repos badge classes (N/A on non-Arch families renders red/missing;
+    # the title explains it is Arch-only, so nothing looks broken) + drawer
+    # visibility (the WebUI manager card is hidden entirely on non-Arch).
+    feat_arch_repos_class="feat-off"
+    feat_arch_repos_install_class="feat-missing"
+    if [ "${feat_arch_repos_supported}" -eq 1 ] 2>/dev/null; then
+        if [ "${feat_arch_repos_healthy}" -eq 1 ] 2>/dev/null; then
+            feat_arch_repos_class="feat-on"
+            feat_arch_repos_install_class="feat-installed"
+        elif [ "${feat_arch_repos_installed}" -eq 1 ] 2>/dev/null; then
+            feat_arch_repos_class="feat-warn"
+            feat_arch_repos_install_class="feat-warning"
+        else
+            feat_arch_repos_class="feat-off"
+            feat_arch_repos_install_class="feat-missing"
+        fi
+    fi
+    arch_repos_drawer_style="display:none;"
+    if [ "${feat_arch_repos_supported}" -eq 1 ] 2>/dev/null; then
+        arch_repos_drawer_style=""
+    fi
 
     # Determine status color for a quick-glance badge.
     local status_color last_status_lc
@@ -14858,12 +14919,48 @@ generate_dashboard() {
       <div class="stat-label" style="text-transform:none;">Active Modules</div>
       <div class="feat-grid">
         <div class="feat-badge feat-clickable ${feat_media_repos_install_class}" id="feat-media-repos-badge" data-module="media-repos" data-install-cmd="sudo zypper-auto-helper --media-repos" title="Click to set up multimedia/codec repositories (via --media-repos; Fedora & Arch families; idempotent)"><span class="feat-dot ${feat_media_repos_class}" id="feat-media-repos-dot">●</span> Media Repos: <strong id="feat-media-repos-val">${feat_media_repos}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_arch_repos_install_class}" id="feat-arch-repos-badge" data-module="arch-repos" data-install-cmd="sudo zypper-auto-helper --arch-repos list" title="Unofficial Arch user repositories (via --arch-repos; Arch family only; safety-gated: HTTPS-only, explicit confirmations, pacman -Sy validation + rollback, auto-disable failsafe). Click for the catalog + status listing."><span class="feat-dot ${feat_arch_repos_class}" id="feat-arch-repos-dot">●</span> Arch Repos: <strong id="feat-arch-repos-val">${feat_arch_repos}</strong></div>
         <div class="feat-badge feat-clickable ${feat_flatpak_install_class}" id="feat-flatpak-badge" data-module="flatpak" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Flatpak (via --setup-SF)"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
         <div class="feat-badge feat-clickable ${feat_snap_install_class}" id="feat-snap-badge" data-module="snap" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Snapd (via --setup-SF)"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
         <div class="feat-badge feat-clickable ${feat_soar_install_class}" id="feat-soar-badge" data-module="soar" data-install-cmd="sudo zypper-auto-helper --soar" title="Click to install/setup Soar (via --soar)"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
         <div class="feat-badge feat-clickable ${feat_brew_install_class}" id="feat-brew-badge" data-module="brew" data-install-cmd="sudo zypper-auto-helper --brew" title="Click to install/setup Homebrew (via --brew)"><span class="feat-dot ${feat_brew_class}" id="feat-brew-dot">●</span> Brew: <strong id="feat-brew-val">${feat_brew}</strong></div>
         <div class="feat-badge feat-clickable ${feat_pipx_install_class}" id="feat-pipx-badge" data-module="pipx" data-install-cmd="sudo zypper-auto-helper --pipx" title="Click to install/setup pipx (via --pipx)"><span class="feat-dot ${feat_pipx_class}" id="feat-pipx-dot">●</span> Pipx: <strong id="feat-pipx-val">${feat_pipx}</strong></div>
       </div>
+
+      <!-- Arch unofficial repositories manager (Arch family only; --arch-repos). -->
+      <!-- Hidden entirely on non-Arch systems via arch_repos_drawer_style. -->
+      <details id="arch-repos-drawer" style="margin-top: 16px;${arch_repos_drawer_style}">
+        <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Arch Unofficial Repositories (Arch only — safety-gated)</summary>
+        <div style="margin-top: 12px; color: var(--muted); font-size: 0.9rem;">
+          Enable/disable the unofficial Arch user repositories from the WebUI with the same hard failchecks as the CLI
+          (HTTPS-only server URLs, duplicate guard in /etc/pacman.conf, ALHP CPU-level check, the Arch Wiki warning
+          printed verbatim before any change, explicit confirmation phrases, and a post-add pacman -Sy validation with
+          rollback). Keys are NEVER auto-imported — enabling a signed repository requires a phrase that states you
+          verified its Key-ID yourself. 'Auto-disable faulty' is the failsafe: it removes repositories that fail to
+          connect so a broken repo never blocks system updates.
+        </div>
+        <div style="margin-top: 10px; display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="pill" type="button" id="arch-repos-refresh-btn" title="Reload the repository list from the localhost API">Refresh list</button>
+          <button class="cmd-btn" type="button" data-qa="arch-repos-health" data-qa-copy="sudo zypper-auto-helper --arch-repos health" title="Run the pacman -Sy based health check of the enabled unofficial repos (read-only)">
+            <span class="cmd-label">Check repos health</span>
+            <span class="cmd-desc">pacman -Sy based • read-only</span>
+            <div class="cmd-copy-feedback">Running…</div>
+          </button>
+          <button class="cmd-btn" type="button" data-qa="arch-repos-auto-heal" data-qa-copy="sudo zypper-auto-helper --arch-repos health --auto-disable --yes" data-qa-danger="1" title="Health check + automatically disable (remove) repositories that fail to connect (failsafe; confirmation required)">
+            <span class="cmd-label">Auto-disable faulty</span>
+            <span class="cmd-desc">Failsafe • removes unreachable repos</span>
+            <div class="cmd-copy-feedback">Running…</div>
+          </button>
+          <button class="cmd-btn" type="button" data-qa="arch-repos-disable-all" data-qa-copy="sudo zypper-auto-helper --arch-repos disable-all --yes" data-qa-danger="1" title="Disable every catalog-listed unofficial repository that is currently enabled (confirmation required)">
+            <span class="cmd-label">Disable all enabled</span>
+            <span class="cmd-desc">Removes every enabled repo section</span>
+            <div class="cmd-copy-feedback">Running…</div>
+          </button>
+        </div>
+        <div id="arch-repos-warning" style="margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); color: var(--text); font-size: 0.86rem; font-weight: 850; display:none;"></div>
+        <div id="arch-repos-list" style="margin-top: 10px; max-height: 340px; overflow-y: auto; display:grid; gap: 8px; color: var(--muted); font-size: 0.88rem; font-weight: 800;">(loading the repository list…)</div>
+        <div style="margin-top:6px; font-size:0.78rem; color: rgba(148,163,184,0.88); font-weight: 800;">Catalog + warning text from the Arch Wiki page; enable/disable jobs run via the localhost API (127.0.0.1:8766) with confirmation phrases.</div>
+      </details>
 
       <div style="margin-top: 14px;">
         <span class="stat-label" style="text-transform:none;">Self-Update Channel</span>
@@ -34644,6 +34741,7 @@ generate_dashboard() {
         try {
             var _modQaMap = {
                 'media-repos': 'media-repos',
+                'arch-repos': 'arch-repos-status',
                 'flatpak': 'setup-SF',
                 'snap':    'setup-SF',
                 'soar':    'soar',
@@ -34652,6 +34750,7 @@ generate_dashboard() {
             };
             var _modTitleMap = {
                 'media-repos': 'Install Multimedia & Codec Repos',
+                'arch-repos': 'Arch Repos: catalog + status',
                 'flatpak': 'Install Snapd & Flatpak',
                 'snap':    'Install Snapd & Flatpak',
                 'soar':    'Install Soar CLI',
@@ -34664,7 +34763,8 @@ generate_dashboard() {
                 'snap':    { name: 'Snapd (Snap Store)', desc: 'Canonical\'s universal package system. Provides sandboxed apps with automatic updates via the Snap Store. Runs as a background service (snapd.service).', use: 'Install apps from snapcraft.io', cmd: 'snap install <package>' },
                 'soar':    { name: 'Soar', desc: 'Static binary package manager. Downloads pre-built CLI tools and apps as single portable binaries — no root needed, no dependencies.', use: 'Install portable CLI tools instantly', cmd: 'soar install <tool>' },
                 'brew':    { name: 'Homebrew (Linuxbrew)', desc: 'The missing package manager for Linux. Installs CLI tools, libraries, and apps into ~/.linuxbrew without root. Great for developer tools not in your distro repos.', use: 'Install dev tools (e.g. node, gh, ripgrep)', cmd: 'brew install <formula>' },
-                'pipx':    { name: 'pipx', desc: 'Install and run Python CLI applications in isolated virtual environments. Each tool gets its own venv so dependencies never conflict with system Python packages.', use: 'Install Python CLI tools safely (e.g. yt-dlp, black, httpie)', cmd: 'pipx install <package>' }
+                'pipx':    { name: 'pipx', desc: 'Install and run Python CLI applications in isolated virtual environments. Each tool gets its own venv so dependencies never conflict with system Python packages.', use: 'Install Python CLI tools safely (e.g. yt-dlp, black, httpie)', cmd: 'pipx install <package>' },
+                'arch-repos': { name: 'Arch Unofficial Repositories', desc: 'Safety-gated manager for the unofficial Arch user repositories (catalog + warning text from the Arch Wiki page). Hard failchecks: HTTPS-only server URLs, duplicate guard in /etc/pacman.conf, ALHP CPU-level check, the Arch Wiki warning printed verbatim before any change, explicit confirmations (keys are NEVER auto-imported), one repo per run, and a post-add pacman -Sy validation with rollback. The health failsafe can auto-disable repositories that fail to connect.', use: 'Enable/disable unofficial Arch repositories with hard failchecks', cmd: 'sudo zypper-auto-helper --arch-repos list' }
             };
             var badges = document.querySelectorAll('.feat-badge.feat-clickable[data-install-cmd]') || [];
             Array.prototype.slice.call(badges).forEach(function(b) {
@@ -34735,6 +34835,157 @@ generate_dashboard() {
             });
         } catch (eFeatClick) {}
     })();
+
+    // ---- Arch unofficial repositories drawer (Arch family only; --arch-repos) ----
+    // Renders the catalog + per-repo enable/disable buttons from the API's
+    // /api/arch-repos/list endpoint (which runs the arch-repos list --json
+    // helper command). Per-repo
+    // buttons open the STANDARD Quick Action confirm flow (phrases
+    // ARCHREPOENABLE / ARCHREPODISABLE) so every CLI failcheck (HTTPS-only,
+    // duplicate guard, ALHP CPU level, the wiki warning verbatim, explicit
+    // confirmations, pacman -Sy validation + rollback) still applies when
+    // triggered from the WebUI. NOTE: string concatenation only — the dashboard
+    // heredoc is unquoted, so JS template literals would be expanded by bash.
+    var _znhArchReposData = null;
+    function _znhArchReposEscapeHtml(s) {
+        return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function _znhArchReposRender() {
+        var listEl = document.getElementById('arch-repos-list');
+        var warnEl = document.getElementById('arch-repos-warning');
+        if (!listEl) return;
+        var d = _znhArchReposData || {};
+        if (warnEl) {
+            var wt = String(d.warning_text || '').trim();
+            if (wt) {
+                warnEl.textContent = '\u26A0 ' + wt;
+                try { warnEl.style.display = ''; } catch (eW0) {}
+            }
+        }
+        if (!d || !d.supported) {
+            listEl.textContent = '(not supported on this system — Arch family only)';
+            return;
+        }
+        var rows = (d.repos && d.repos.length) ? d.repos : [];
+        var cpuLevel = parseInt(String(d.cpu_level || '0'), 10) || 0;
+        var html = [];
+        html.push('<div style="color:var(--muted); font-size:0.82rem;">' + rows.length + ' catalog repositories (Arch Wiki signed + unsigned lists) • CPU level: x86-64-v' + cpuLevel + ' (ALHP gate)</div>');
+        rows.forEach(function(r) {
+            var name = String(r.name || '');
+            var signed = !!(r.signed);
+            var enabled = !!(r.enabled);
+            var url = String(r.url || '');
+            var key = String(r.key || '');
+            var health = String(r.health || 'unknown');
+            var alhpLevel = String(r.alhp_level || '');
+            var clsDot = signed ? 'feat-on' : 'feat-off';
+            var sigLabel = signed ? 'signed' : 'unsigned';
+            var stateHtml = '';
+            if (enabled) {
+                if (health === 'unreachable') {
+                    stateHtml = ' <span style="color: rgba(239,68,68,0.9); font-weight:900;">[ENABLED — unreachable]</span>';
+                } else {
+                    stateHtml = ' <span style="color: var(--accent); font-weight:900;">[ENABLED' + (alhpLevel ? (' ' + alhpLevel) : '') + ']</span>';
+                }
+            }
+            var btn = '';
+            if (enabled) {
+                btn = '<button class="pill" type="button" data-ar-disable="' + _znhArchReposEscapeHtml(name) + '" title="Remove this repository section from /etc/pacman.conf (confirmation required)">Disable</button>';
+            } else if (name.toUpperCase() === 'ALHP') {
+                btn = '<button class="pill" type="button" data-ar-enable="' + _znhArchReposEscapeHtml(name) + '" title="Enable the ALHP optimised repositories for the detected CPU level (confirmation + CPU level check required)">Enable</button>';
+            } else if (url) {
+                btn = '<button class="pill" type="button" data-ar-enable="' + _znhArchReposEscapeHtml(name) + '" title="Add this repository to /etc/pacman.conf (confirmation required; keys are never auto-imported)">Enable</button>';
+            } else {
+                btn = '<button class="pill" type="button" data-ar-copy="' + _znhArchReposEscapeHtml(name) + '" title="No stored Server URL for this repository — copy the CLI command and pass the URL you verified on the wiki page">Copy CLI</button>';
+            }
+            var keyHtml = key ? (' • key: <code style="font-size:0.76rem;">' + _znhArchReposEscapeHtml(key) + '</code>') : '';
+            var urlHtml = (name.toUpperCase() === 'ALHP') ? ' • mirrorlist: /etc/pacman.d/alhp-mirrorlist' : (url ? (' • ' + _znhArchReposEscapeHtml(url)) : ' • (pass the Server URL from the wiki)');
+            html.push('<div class="feat-badge" style="align-items:center; gap:8px; flex-wrap:wrap;">'
+                + '<span class="feat-dot ' + clsDot + '">\u25CF</span>'
+                + ' <strong>' + _znhArchReposEscapeHtml(name) + '</strong>'
+                + ' <span style="color:var(--muted);">(' + sigLabel + ')</span>'
+                + stateHtml
+                + '<span style="color:var(--muted); font-size:0.78rem;">' + keyHtml + urlHtml + '</span>'
+                + btn
+                + '</div>');
+        });
+        listEl.innerHTML = html.join('');
+        // Wire the per-repo buttons (JS-rendered, so the static [data-qa]
+        // wiring does not cover them).
+        try {
+            var enBtns = listEl.querySelectorAll('[data-ar-enable]');
+            Array.prototype.slice.call(enBtns).forEach(function(b) {
+                b.addEventListener('click', function(ev) {
+                    try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (eR0) {}
+                    var n = String(b.getAttribute('data-ar-enable') || '').trim();
+                    if (!n) return;
+                    if (typeof quickActionOpen === 'function') {
+                        quickActionOpen({
+                            action: 'arch-repos-enable:' + n,
+                            title: 'Enable ' + n,
+                            desc: 'Add the [' + n + '] repository section (safety-gated; confirmation phrase required)',
+                            copy_cmd: 'sudo zypper-auto-helper --arch-repos enable ' + n,
+                            danger: true,
+                            interactive: false
+                        });
+                    } else {
+                        copyCmd('sudo zypper-auto-helper --arch-repos enable ' + n, b);
+                    }
+                });
+            });
+            var disBtns = listEl.querySelectorAll('[data-ar-disable]');
+            Array.prototype.slice.call(disBtns).forEach(function(b) {
+                b.addEventListener('click', function(ev) {
+                    try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (eR1) {}
+                    var n = String(b.getAttribute('data-ar-disable') || '').trim();
+                    if (!n) return;
+                    if (typeof quickActionOpen === 'function') {
+                        quickActionOpen({
+                            action: 'arch-repos-disable:' + n,
+                            title: 'Disable ' + n,
+                            desc: 'Remove the [' + n + '] repository section from /etc/pacman.conf (confirmation required)',
+                            copy_cmd: 'sudo zypper-auto-helper --arch-repos disable ' + n,
+                            danger: true,
+                            interactive: false
+                        });
+                    } else {
+                        copyCmd('sudo zypper-auto-helper --arch-repos disable ' + n, b);
+                    }
+                });
+            });
+            var cpBtns = listEl.querySelectorAll('[data-ar-copy]');
+            Array.prototype.slice.call(cpBtns).forEach(function(b) {
+                b.addEventListener('click', function() {
+                    var n = String(b.getAttribute('data-ar-copy') || '').trim();
+                    copyCmd('sudo zypper-auto-helper --arch-repos enable ' + n + ' https://server-url-from-the-wiki', b);
+                });
+            });
+        } catch (eARWire) {}
+    }
+    function _znhArchReposFetch() {
+        var listEl = document.getElementById('arch-repos-list');
+        if (!listEl) return;
+        if (typeof _api !== 'function') return;
+        _api('/api/arch-repos/list').then(function(r) {
+            _znhArchReposData = r || {};
+            _znhArchReposRender();
+        }).catch(function(err) {
+            var msg = (err && err.message) ? err.message : 'API not reachable';
+            listEl.textContent = '(failed to load the repository list: ' + msg + ' — start the API with: sudo zypper-auto-helper --dash-api-on)';
+        });
+    }
+    try {
+        var _arRefreshBtn = document.getElementById('arch-repos-refresh-btn');
+        if (_arRefreshBtn) _arRefreshBtn.addEventListener('click', function() { _znhArchReposFetch(); });
+    } catch (eARB) {}
+    // Initial load + re-fetch on every dashboard data cycle so the list
+    // refreshes after enable/disable/health jobs without a manual reload.
+    try { _znhArchReposFetch(); } catch (eAR0) {}
+    try {
+        window.addEventListener('znh-data-updated', function() {
+            try { _znhArchReposFetch(); } catch (eAR1) {}
+        });
+    } catch (eAR2) {}
 
     // Wire self-update UI (channel toggle + changelog fetch).
     _wireSelfUpdateUI();
@@ -35439,6 +35690,13 @@ generate_dashboard() {
         setText('feat-pipx-val', d.feat_pipx ? 'ON' : 'OFF');
         // Media repos tile shows the probed installed state (READY/MISSING)
         setText('feat-media-repos-val', d.feat_media_repos_installed ? 'READY' : 'MISSING');
+        // Arch repos tile (Arch family only): N/A / NONE / READY / ATTN
+        try {
+            var _arSup = !!(d.feat_arch_repos_supported);
+            var _arIns = !!(d.feat_arch_repos_installed);
+            var _arHea = !!(d.feat_arch_repos_healthy);
+            setText('feat-arch-repos-val', _arSup ? (_arIns ? (_arHea ? 'READY' : 'ATTN') : 'NONE') : 'N/A');
+        } catch (eARv) {}
 
         // Module dot color: green=healthy, yellow=installed but unhealthy, red=missing
         var _modInstalled = {
@@ -35447,7 +35705,8 @@ generate_dashboard() {
             soar: !!(d.feat_soar_installed),
             brew: !!(d.feat_brew_installed),
             pipx: !!(d.feat_pipx_installed),
-            'media-repos': !!(d.feat_media_repos_installed)
+            'media-repos': !!(d.feat_media_repos_installed),
+            'arch-repos': !!(d.feat_arch_repos_installed)
         };
         var _modHealthy = {
             flatpak: !!(d.feat_flatpak_healthy),
@@ -35455,7 +35714,8 @@ generate_dashboard() {
             soar: !!(d.feat_soar_healthy),
             brew: !!(d.feat_brew_healthy),
             pipx: !!(d.feat_pipx_healthy),
-            'media-repos': !!(d.feat_media_repos_healthy)
+            'media-repos': !!(d.feat_media_repos_healthy),
+            'arch-repos': !!(d.feat_arch_repos_healthy)
         };
         setClass('feat-flatpak-dot', _modHealthy.flatpak, _modInstalled.flatpak && !_modHealthy.flatpak);
         setClass('feat-snap-dot', _modHealthy.snap, _modInstalled.snap && !_modHealthy.snap);
@@ -35463,10 +35723,11 @@ generate_dashboard() {
         setClass('feat-brew-dot', _modHealthy.brew, _modInstalled.brew && !_modHealthy.brew);
         setClass('feat-pipx-dot', _modHealthy.pipx, _modInstalled.pipx && !_modHealthy.pipx);
         setClass('feat-media-repos-dot', _modHealthy['media-repos'], _modInstalled['media-repos'] && !_modHealthy['media-repos']);
+        setClass('feat-arch-repos-dot', _modHealthy['arch-repos'], _modInstalled['arch-repos'] && !_modHealthy['arch-repos']);
 
         // Update badge border class based on health state
         try {
-            var _mods = ['media-repos','flatpak','snap','soar','brew','pipx'];
+            var _mods = ['media-repos','arch-repos','flatpak','snap','soar','brew','pipx'];
             for (var _mi = 0; _mi < _mods.length; _mi++) {
                 var _mb = document.getElementById('feat-' + _mods[_mi] + '-badge');
                 if (_mb) {
@@ -36991,6 +37252,10 @@ JSON_EOF
     json_feat_pipx_healthy=$([[ "${feat_pipx_healthy}" == "1" ]] && echo true || echo false)
     json_feat_media_repos_installed=$([[ "${feat_media_repos_installed}" == "1" ]] && echo true || echo false)
     json_feat_media_repos_healthy=$([[ "${feat_media_repos_healthy}" == "1" ]] && echo true || echo false)
+    local json_feat_arch_repos_supported json_feat_arch_repos_installed json_feat_arch_repos_healthy
+    json_feat_arch_repos_supported=$([[ "${feat_arch_repos_supported}" == "1" ]] && echo true || echo false)
+    json_feat_arch_repos_installed=$([[ "${feat_arch_repos_installed}" == "1" ]] && echo true || echo false)
+    json_feat_arch_repos_healthy=$([[ "${feat_arch_repos_healthy}" == "1" ]] && echo true || echo false)
 
     # Harden status-data generation:
     # - Prefer Python JSON serialization to avoid edge-case escaping drift from
@@ -37027,6 +37292,9 @@ JSON_EOF
             JSON_FEAT_PIPX_HEALTHY="${json_feat_pipx_healthy}" \
             JSON_FEAT_MEDIA_REPOS_INSTALLED="${json_feat_media_repos_installed}" \
             JSON_FEAT_MEDIA_REPOS_HEALTHY="${json_feat_media_repos_healthy}" \
+            JSON_FEAT_ARCH_REPOS_SUPPORTED="${json_feat_arch_repos_supported}" \
+            JSON_FEAT_ARCH_REPOS_INSTALLED="${json_feat_arch_repos_installed}" \
+            JSON_FEAT_ARCH_REPOS_HEALTHY="${json_feat_arch_repos_healthy}" \
             JSON_DL_TIMER="${dl_timer}" \
             JSON_VERIFY_TIMER="${verify_timer}" \
             JSON_NT_TIMER="${nt_timer}" \
@@ -37096,6 +37364,9 @@ data = {
     "feat_pipx_healthy": _env_bool("JSON_FEAT_PIPX_HEALTHY", False),
     "feat_media_repos_installed": _env_bool("JSON_FEAT_MEDIA_REPOS_INSTALLED", False),
     "feat_media_repos_healthy": _env_bool("JSON_FEAT_MEDIA_REPOS_HEALTHY", False),
+    "feat_arch_repos_supported": _env_bool("JSON_FEAT_ARCH_REPOS_SUPPORTED", False),
+    "feat_arch_repos_installed": _env_bool("JSON_FEAT_ARCH_REPOS_INSTALLED", False),
+    "feat_arch_repos_healthy": _env_bool("JSON_FEAT_ARCH_REPOS_HEALTHY", False),
     "dl_timer": os.environ.get("JSON_DL_TIMER", ""),
     "verify_timer": os.environ.get("JSON_VERIFY_TIMER", ""),
     "nt_timer": os.environ.get("JSON_NT_TIMER", ""),
@@ -37163,6 +37434,9 @@ PY
   "feat_pipx_healthy": ${json_feat_pipx_healthy},
   "feat_media_repos_installed": ${json_feat_media_repos_installed},
   "feat_media_repos_healthy": ${json_feat_media_repos_healthy},
+  "feat_arch_repos_supported": ${json_feat_arch_repos_supported},
+  "feat_arch_repos_installed": ${json_feat_arch_repos_installed},
+  "feat_arch_repos_healthy": ${json_feat_arch_repos_healthy},
 
   "dl_timer":
   "verify_timer": "$(_json_escape "$verify_timer")",
@@ -49861,6 +50135,10 @@ run_uninstall_helper_only() {
     echo "deb-multimedia-keyring (Debian), or sudo pacman -R <package> (Arch)."
     echo "Copr repositories enabled via --copr-search / dnf copr-search are kept"
     echo "too; remove one with: sudo dnf copr remove <owner>/<project>."
+    echo "Unofficial Arch repositories enabled via --arch-repos are kept as well"
+    echo "(installed packages still depend on them); remove one with:"
+    echo "sudo zypper-auto-helper --arch-repos disable <repo> (or 'disable-all')."
+    echo "The enable/disable state log stays at /var/lib/zypper-auto/arch-repos-state.tsv."
     echo "The enable history stays at /var/lib/zypper-auto/copr-history.tsv"
     echo "(repos this helper enabled + when). To remove ONLY the repos this"
     echo "helper enabled, review that file (or run: zypper-auto-helper"
@@ -52355,6 +52633,1244 @@ for it in items:
     return "${rc}"
 }
 
+# --- Helper: Arch unofficial user repositories with hard safety checks (CLI) ---
+#
+# `zypper-auto-helper --arch-repos <subcommand>` manages UNOFFICIAL Arch user
+# repositories (catalog + text from the Arch Wiki page
+# https://wiki.archlinux.org/title/Unofficial_user_repositories and
+# https://aur.chaotic.cx/). EVERY repository is treated as UNTRUSTED by
+# default and nothing is enabled without explicit confirmation.
+#
+# FAILCHECKS (each one aborts BEFORE /etc/pacman.conf is touched):
+#   FC1  Arch-family gate: /etc/os-release must report ID=arch or an
+#        ID_LIKE containing arch (shared family detector). Other families
+#        exit cleanly with a message; nothing is changed.
+#   FC2  HTTPS-only: a repository whose Server URL is not https:// is refused
+#        (never enable anything over plain HTTP). Built-in demo: the wiki
+#        lists 'ada' with an http:// server, so 'enable ada' is refused by
+#        this check unless the user supplies an https mirror URL themselves.
+#   FC3  Duplicate guard: the [section] must not already exist anywhere in
+#        /etc/pacman.conf (managed block or user-added) before it is added.
+#   FC4  ALHP microarchitecture: for the ALHP optimised-rebuild repositories
+#        the requested x86-64-v2/v3/v4 level is checked against the CPU's
+#        /proc/cpuinfo feature flags (psABI level sets); a level the CPU
+#        does not support is refused (unsupported binaries can make the
+#        system unbootable).
+#   FC5  The Arch Wiki warning is printed VERBATIM before any change (the
+#        exact text lives in ZNH_ARCH_REPOS_WIKI_WARNING below).
+#   FC6  Explicit confirmation, no silent defaults: interactive runs must type
+#        ACCEPT (wiki warning + full responsibility) and then KEYVERIFIED
+#        (signed: you verified the Key-ID and will import/sign it yourself) or
+#        UNSIGNOK (unsigned: re-confirm SigLevel = PackageOptional).
+#        Non-interactive runs need the equivalent flags (--assume-yes plus
+#        --key-verified / --unsigned-accepted); anything less aborts.
+#   FC7  No key is EVER auto-imported or auto-signed. Key handling is entirely
+#        the user's responsibility (verify the Key-ID from the wiki page,
+#        then import + locally sign it yourself).
+#   FC8  One repository per run: 'enable' accepts exactly ONE repository
+#        name, so every repository gets its own confirmation round.
+#   FC9  Post-add validation: after writing, pacman -Sy runs under a timeout
+#        (ZNH_ARCH_REPOS_SYNC_TIMEOUT, default 90s); when the repository is
+#        unreachable or errors, the write is ROLLED BACK from the pre-write
+#        backup and the run aborts.
+#   FC10 Every action is logged to the helper log AND to the state TSV at
+#        /var/lib/zypper-auto/arch-repos-state.tsv (plus the health TSV at
+#        /var/lib/zypper-auto/arch-repos-health.tsv for health runs).
+#
+# Subcommands:
+#   list [repo]         catalog + current enablement + last health (local,
+#                       read-only; --json emits machine-readable JSON for the
+#                       WebUI/API)
+#   status              list + live database reachability of enabled repos
+#   enable <repo> [url] the safety-gated enable flow (failchecks FC1-FC10)
+#   disable <repo>      remove one repository section (confirm-gated)
+#   disable-all         remove every catalog-listed repo currently enabled
+#   health              pacman -Sy-based health check; --auto-disable removes
+#                       faulty repositories (the WebUI failsafe: auto-disable
+#                       of repos that fail to connect)
+#   history             print the enable/disable/auto-disable state log
+# Flags: --dry-run (print exactly what would be written; no prompts, no
+#   changes), --json (list), --level v2|v3|v4 (ALHP level request),
+#   --yes/--assume-yes, --key-verified, --unsigned-accepted, --auto-disable,
+#   --history.
+
+# --- Override hooks for regression/smoke tests (never set in production) ---
+# ZNH_ARCH_PACMAN_CONF: pacman.conf to read/write (default /etc/pacman.conf)
+# ZNH_ARCH_CPUINFO_FILE: cpuinfo to read (default /proc/cpuinfo)
+# ZNH_ARCH_STATE_DIR: state/health TSV dir (default /var/lib/zypper-auto)
+# ZNH_ARCH_PACMAN_BIN: pacman binary (default pacman)
+# ZNH_ARCH_SUDO_MODE: "never" disables sudo prefixing (fixture files)
+# ZNH_ARCH_ALHP_MIRRORLIST: ALHP mirrorlist path (default /etc/pacman.d/alhp-mirrorlist)
+ZNH_ARCH_REPOS_PACMAN_CONF="${ZNH_ARCH_PACMAN_CONF:-/etc/pacman.conf}"
+ZNH_ARCH_REPOS_CPUINFO_FILE="${ZNH_ARCH_CPUINFO_FILE:-/proc/cpuinfo}"
+ZNH_ARCH_REPOS_STATE_DIR="${ZNH_ARCH_STATE_DIR:-/var/lib/zypper-auto}"
+ZNH_ARCH_REPOS_PACMAN_BIN="${ZNH_ARCH_PACMAN_BIN:-pacman}"
+ZNH_ARCH_REPOS_SYNC_TIMEOUT="${ZNH_ARCH_SYNC_TIMEOUT:-90}"
+ZNH_ARCH_REPOS_WIKI_URL="https://wiki.archlinux.org/title/Unofficial_user_repositories"
+# Exact warning text quoted verbatim from the Arch Wiki page (FC5 prints this
+# before ANY change):
+ZNH_ARCH_REPOS_WIKI_WARNING="The official Arch Linux developers and the Package Maintainers do not perform tests of any sort to verify the contents of unofficial user repositories. It is your decision whether to trust their maintainers, and you take full responsibility for any consequences of using any unofficial repository."
+
+# Catalog: name|class|server-url|key|note — class is "signed" or "unsigned".
+# Names/classes follow the wiki's signed/unsigned lists; URLs and Key-IDs are
+# stored ONLY where they were verified from the wiki page itself (otherwise
+# the URL stays empty and enable requires the user to supply it after
+# checking the wiki — FC2 then enforces https). SigLevel written per class:
+# signed -> PackageRequired (user imports/signs the key themselves, FC7);
+# unsigned -> PackageOptional (forced + re-confirmed, per the module spec).
+# NOTE: rows are single-quoted so the pacman $arch/$repo URL variables stay
+# LITERAL (double quotes would expand them to empty at assignment time).
+# shellcheck disable=SC2016  # $arch/$repo here are pacman's own template
+# variables, deliberately unexpanded until znh_arch_repos_expand_url()
+ZNH_ARCH_REPO_SPECS=(
+    'ada|signed|http://www.orthanc.site:8080/assets/arch_ada_repo|0xED55AF75B0330A2A3BAA9986B6120CD888A0DFD2|Ada and SPARK packages. The wiki lists a plain-HTTP server, so the HTTPS failcheck refuses this catalog URL; supply an https mirror yourself'
+    'alerque|signed|https://arch.alerque.com/$arch|63CC496475267693|Typesetting, publishing and font development tools (SILE, CaSILE, Fontship, fonts, Lua rocks, Python modules)'
+    'ALHP|signed||alhp-keyring (AUR)|Optimised rebuilds of core, extra and multilib for x86-64-v2, v3 or v4 (special: three repo sections + alhp-mirrorlist; CPU level failcheck enforced; alhp-mirrorlist and alhp-keyring must be installed by you from the AUR first)'
+    'andontie-aur|signed|https://aur.andontie.net/$arch|72BF227DD76AE5BF|Popular AUR packages plus additional ones from the upstream website'
+    'arcanisrepo|signed|https://repo.arcanis.me/$repo/$arch|0xBD2AC8C5E989490C|AUR packages incl. VCS, mostly development and scientific tools, updated daily'
+    'arch4edu|signed|https://mirrors.tuna.tsinghua.edu.cn/arch4edu/$arch|7931B6D628C8D3BA|Community repo for software used by college students (Arch + Arch Linux ARM)'
+    'archlinuxcn|signed|https://repo.archlinuxcn.org/$arch|archlinuxcn-keyring|Packages by the Chinese Arch Linux community, all signed. Install archlinuxcn-keyring FIRST, before any other package'
+    'archzfs|signed|https://github.com/archzfs/archzfs/releases/download/experimental|3A9917BF0DED5C13F69AC68FABEC0A1208037BE9|ZFS on Arch (experimental channel; a second mirror server is added automatically)'
+    'artafinde|signed|https://pkgbuild.com/~artafinde/repo|in the archlinux keyring|Personal repository with AUR and custom packages'
+    'avr|signed|https://bouchaud.org/packages/$repo/$arch|157B08346330029C|Kubernetes-related AUR builds plus additional personal packages'
+    'bioarchlinux|signed|https://repo.bioarchlinux.org/$arch|B1F96021DB62254D|Biological software repository incl. R CRAN binary packages'
+    'blackeagle-pre-community|signed|https://repo.herecura.eu/$repo/$arch|in the archlinux keyring|Testing of packages maintained by a Package Maintainer before they move to extra'
+    'build.kilabit.info|signed|https://build.kilabit.info/aur|4A5360B500C9C4F0|AUR builds by shulhan'
+    'chaotic-aur|signed|https://geo-mirror.chaotic.cx/$repo/$arch|FBA220DFC880C036|Auto-built AUR packages, updated hourly, several mirrors worldwide, x86_64 only (see also aur.chaotic.cx)'
+    'coderkun-aur|signed|https://arch.suruatoel.xyz/$repo/$arch/|39E27199A6EE374|AUR packages with random software, package deltas, database signing'
+    'desolve|signed||see the wiki page|Binary R cran collection (the wiki marks it deprecated; use bioarchlinux)'
+    'devkitpro|signed||see the wiki page|Homebrew/devkitPro toolchain packages'
+    'enhancedX11|signed||see the wiki page|Xorg server with additional patches'
+    'grawlinson|signed||see the wiki page|Personal repository by a Package Maintainer'
+    'herecura|signed||see the wiki page|Personal repository (herecura.eu)'
+    'ivasilev|signed||see the wiki page|Personal repository by ivasilev'
+    'kawaii|signed||see the wiki page|Personal repository by kawaii'
+    'lahwaacz|signed||see the wiki page|Personal repository by lahwaacz'
+    'linux-lts66|signed||see the wiki page|Long-term-support kernel (6.6 series)'
+    'linux-nitrous|signed||see the wiki page|Optimized kernel (nitrous)'
+    'linux-surface|signed||see the wiki page|Kernel and patches for Microsoft Surface devices'
+    'liquorix|signed||see the wiki page|Liquorix kernel (Zen-based, Debian-style tuning)'
+    'manuelschneid3r_Arch|signed||see the wiki page|Personal repository by manuelschneid3r (spicetify and related)'
+    'miffe|signed||see the wiki page|Personal repository by miffe'
+    'mxmeinold|signed||see the wiki page|Personal repository by mxmeinold'
+    'ogc|signed||see the wiki page|Personal repository (oglinux)'
+    'orhun|signed||see the wiki page|Personal repository by orhun'
+    'oscloud|signed||see the wiki page|Personal repository (oscloud)'
+    'ownstuff|signed||see the wiki page|Large AUR-built collection (ownstuff)'
+    'ownstuff-testing|signed||see the wiki page|Testing branch of ownstuff'
+    'post-factum|signed||see the wiki page|Post-factum kernel builds'
+    'pro-audio-legacy|signed||see the wiki page|Legacy pro-audio packages'
+    'proaudio|signed||see the wiki page|Professional audio packages (proaudio)'
+    'QOwnNotes|signed||see the wiki page|QOwnNotes desktop note-taking app'
+    'quarry|signed||see the wiki page|Quarry (mud client) related packages'
+    'repo.mksscryertower.quest|signed||see the wiki page|Personal repository hosted at repo.mksscryertower.quest'
+    'rne|signed||see the wiki page|Personal repository (rne)'
+    'seblu|signed||see the wiki page|Personal repository by seblu'
+    'seiichiro|signed||see the wiki page|Personal repository by seiichiro'
+    'sergej-repo|signed||see the wiki page|Personal repository by sergej'
+    'SonicDE|signed||see the wiki page|Personal repository by SonicDE'
+    'sublime-text|signed||see the wiki page|Sublime Text editor packages'
+    'supermario|signed||see the wiki page|Personal repository (supermario)'
+    'taur|signed||see the wiki page|Turbo ARCH User Repository tooling and builds'
+    'trinity|signed||see the wiki page|Trinity Desktop Environment (R14) packages'
+    'XLibre|signed||see the wiki page|XLibre X server (Xorg fork) packages'
+    'alucryd|unsigned||see the wiki page|Personal repository by alucryd (unsigned per the wiki list)'
+    'arch-mact2|unsigned||see the wiki page|Mac T2 (Apple Silicon Intel) kernel support (unsigned per the wiki list)'
+    'archlinuxgr|unsigned||see the wiki page|Greek Arch community repository (unsigned per the wiki list)'
+    'archlinux-phalcon|unsigned||see the wiki page|Phalcon PHP framework packages (unsigned per the wiki list)'
+    'archlinux-php|unsigned||see the wiki page|PHP extension packages (unsigned per the wiki list)'
+    'aur-packages|unsigned||see the wiki page|AUR binary repository (unsigned per the wiki list)'
+    'dx37essentials|unsigned||see the wiki page|Essentials collection by dx37 (unsigned per the wiki list)'
+    'ffy00|unsigned||see the wiki page|Python-related packages by ffy00 (unsigned per the wiki list)'
+    'heftig|unsigned||see the wiki page|heftig kernel builds (unsigned per the wiki list)'
+    'kicad-nightly|unsigned||see the wiki page|KiCad nightly builds (unsigned per the wiki list)'
+    'mesa-git|unsigned||see the wiki page|Git builds of the Mesa graphics stack (unsigned per the wiki list)'
+    'principia|unsigned||see the wiki page|Principia game packages (unsigned per the wiki list)'
+    'rayr|unsigned||see the wiki page|Personal repository by rayr (unsigned per the wiki list)'
+    'selinux|unsigned||see the wiki page|SELinux userland packages (unsigned per the wiki list)'
+    'stx4|unsigned||see the wiki page|Personal repository by stx (unsigned per the wiki list)'
+    'stx4-any|unsigned||see the wiki page|Architecture-independent branch of stx4 (unsigned per the wiki list)'
+    'stx4-x86_64|unsigned||see the wiki page|x86_64 branch of stx4 (unsigned per the wiki list)'
+    'vdr4arch|unsigned||see the wiki page|VDR (video disc recorder) packages (unsigned per the wiki list)'
+)
+
+_ZNH_AR_AS_ROOT=()
+znh_arch_repos_need_root() {
+    # Usage: znh_arch_repos_need_root <what-needs-root>
+    # Populates _ZNH_AR_AS_ROOT ("" when already root, "sudo" when needed).
+    # Returns 1 with a clean error when root is required and unavailable.
+    # Fixture mode (ZNH_ARCH_SUDO_MODE=never) never prefixes sudo.
+    _ZNH_AR_AS_ROOT=()
+    if [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null; then return 0; fi
+    if [ "${ZNH_ARCH_SUDO_MODE:-auto}" = "never" ]; then return 0; fi
+    if command -v sudo >/dev/null 2>&1; then
+        _ZNH_AR_AS_ROOT=(sudo)
+        return 0
+    fi
+    log_error "Root privileges are required to ${1} and sudo is not available. Re-run with sudo."
+    return 1
+}
+
+znh_arch_repos_catalog_lookup() {
+    # Prints the matching catalog spec line (name|class|url|key|note) for a
+    # case-insensitive repo-name query; prints nothing when not found.
+    local _arcl_query="${1,,}" _arcl_spec _arcl_name
+    for _arcl_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+        _arcl_name="$(printf '%s' "${_arcl_spec}" | cut -d'|' -f1)"
+        if [ "${_arcl_query}" = "${_arcl_name,,}" ]; then
+            printf '%s\n' "${_arcl_spec}"
+            return 0
+        fi
+    done
+    return 0
+}
+
+znh_arch_repos_section_exists() {
+    # Returns 0 when a [section] line exists in the pacman.conf (FC3).
+    local _are_section="$1" _are_esc
+    local _are_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
+    [ -r "${_are_conf}" ] || return 1
+    _are_esc="${_are_section//./\\.}"
+    grep -Eq "^[[:space:]]*\[${_are_esc}\][[:space:]]*$" "${_are_conf}" 2>/dev/null
+}
+
+znh_arch_repos_alhp_level() {
+    # Prints the currently enabled ALHP level (v2|v3|v4) or "" when none.
+    local _ara_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}" _ara_lvl
+    [ -r "${_ara_conf}" ] || { printf ''; return 0; }
+    _ara_lvl="$(grep -Eo '^\[core-x86-64-v[234]\]' "${_ara_conf}" 2>/dev/null | head -n1 | sed -E 's/.*-(v[234])\]/\1/' || true)"
+    printf '%s' "${_ara_lvl}"
+}
+
+znh_arch_repos_cpu_level() {
+    # Prints the x86-64 microarchitecture level (1..4; 0 = unreadable) from
+    # cpuinfo feature flags, following the x86-64 psABI level sets used by
+    # compilers, glibc-hwcaps and ALHP:
+    #   v2: cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3
+    #   v3: avx avx2 bmi1 bmi2 f16c fma abm movbe xsave
+    #   v4: avx512f avx512bw avx512cd avx512dq avx512vl
+    local _arc_flags _arc_lvl=1 _arc_set _arc_f
+    _arc_flags="$(sed -n 's/^flags[[:space:]]*:[[:space:]]*//p' "${ZNH_ARCH_REPOS_CPUINFO_FILE}" 2>/dev/null | head -n1 || true)"
+    [ -n "${_arc_flags}" ] || { printf '0\n'; return 0; }
+    for _arc_set in "cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3" "avx avx2 bmi1 bmi2 f16c fma abm movbe xsave" "avx512f avx512bw avx512cd avx512dq avx512vl"; do
+        # shellcheck disable=SC2086  # intentional word splitting of the flag set
+        for _arc_f in ${_arc_set}; do
+            case " ${_arc_flags} " in
+                *" ${_arc_f} "*) ;;
+                *) printf '%s\n' "${_arc_lvl}"; return 0 ;;
+            esac
+        done
+        _arc_lvl=$((_arc_lvl + 1))
+    done
+    printf '4\n'
+    return 0
+}
+
+znh_arch_repos_state_log() {
+    # Args: <repo> <action> [detail] — appends ISO-date<TAB>repo<TAB>action to
+    # the state TSV (FC10). Root-writable, world-readable; sudo-aware.
+    local _arst_repo="$1" _arst_action="$2" _arst_detail="${3:-}"
+    local _arst_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-state.tsv"
+    mkdir -p "${ZNH_ARCH_REPOS_STATE_DIR}" 2>/dev/null || true
+    if [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null \
+       || [ "${ZNH_ARCH_SUDO_MODE:-auto}" = "never" ]; then
+        printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_arst_repo}" "${_arst_action}" "${_arst_detail}" \
+            >>"${_arst_file}" 2>/dev/null || true
+        chmod 644 "${_arst_file}" 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1; then
+        printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_arst_repo}" "${_arst_action}" "${_arst_detail}" \
+            | sudo tee -a "${_arst_file}" >/dev/null 2>&1 || true
+        sudo chmod 644 "${_arst_file}" 2>/dev/null || true
+    fi
+    log_info "[arch-repos] state: ${_arst_repo} ${_arst_action}${_arst_detail:+ (${_arst_detail})}"
+}
+
+znh_arch_repos_health_log() {
+    # Args: <repo> <state> [detail] (state: ok|unreachable) — same TSV pattern
+    # for the health file so later runs/badges can read the last state.
+    local _arhl_repo="$1" _arhl_state="$2" _arhl_detail="${3:-}"
+    local _arhl_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-health.tsv"
+    mkdir -p "${ZNH_ARCH_REPOS_STATE_DIR}" 2>/dev/null || true
+    if [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null \
+       || [ "${ZNH_ARCH_SUDO_MODE:-auto}" = "never" ]; then
+        printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_arhl_repo}" "${_arhl_state}" "${_arhl_detail}" \
+            >>"${_arhl_file}" 2>/dev/null || true
+        chmod 644 "${_arhl_file}" 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1; then
+        printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_arhl_repo}" "${_arhl_state}" "${_arhl_detail}" \
+            | sudo tee -a "${_arhl_file}" >/dev/null 2>&1 || true
+        sudo chmod 644 "${_arhl_file}" 2>/dev/null || true
+    fi
+}
+
+znh_arch_repos_health_state() {
+    # Prints the LAST recorded health state (ok|unreachable|unknown) per repo.
+    local _arh_repo="$1" _arh_state
+    local _arh_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-health.tsv"
+    [ -r "${_arh_file}" ] || { printf 'unknown'; return 0; }
+    _arh_state="$(tac "${_arh_file}" 2>/dev/null | awk -F'\t' -v r="${_arh_repo}" '$2 == r {print $3; exit}' 2>/dev/null || true)"
+    case "${_arh_state}" in
+        ok|unreachable) printf '%s' "${_arh_state}" ;;
+        *) printf 'unknown' ;;
+    esac
+    return 0
+}
+
+znh_arch_repos_expand_url() {
+    # Args: <url-template> <repo-name> — expands pacman's $repo/$arch vars.
+    local _aru_url="$1" _aru_repo="$2" _aru_arch
+    _aru_arch="$(uname -m 2>/dev/null || echo x86_64)"
+    _aru_url="${_aru_url//\$repo/${_aru_repo}}"
+    _aru_url="${_aru_url//\$arch/${_aru_arch}}"
+    printf '%s' "${_aru_url}"
+}
+
+znh_arch_repos_check_db_reachable() {
+    # Args: <url-template> <repo-name> [timeout] — probes the repo database
+    # file (ranged GET, HEAD fallback). Returns 0 when reachable.
+    local _ard_url="$1" _ard_repo="$2" _ard_t="${3:-20}"
+    local _ard_base _ard_db _ard_code
+    _ard_base="$(znh_arch_repos_expand_url "${_ard_url}" "${_ard_repo}")"
+    _ard_base="${_ard_base%/}"
+    _ard_db="${_ard_base}/${_ard_repo}.db"
+    if ! command -v curl >/dev/null 2>&1; then
+        log_warn "[arch-repos] curl not available; skipping the reachability probe for ${_ard_repo}."
+        return 0
+    fi
+    log_info "[arch-repos] Checking ${_ard_repo} database reachability (${_ard_db})..."
+    _ard_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "${_ard_t}" --connect-timeout 5 -r 0-1023 "${_ard_db}" 2>/dev/null || echo 000)"
+    case "${_ard_code}" in
+        200|206)
+            log_success "[arch-repos] ${_ard_repo} database reachable (HTTP ${_ard_code})."
+            return 0
+            ;;
+    esac
+    _ard_code="$(curl -sI -o /dev/null -w '%{http_code}' --max-time "${_ard_t}" --connect-timeout 5 "${_ard_db}" 2>/dev/null || echo 000)"
+    case "${_ard_code}" in
+        2*|3*)
+            log_success "[arch-repos] ${_ard_repo} database reachable (HTTP ${_ard_code} via HEAD)."
+            return 0
+            ;;
+    esac
+    log_error "[arch-repos] ${_ard_repo} database NOT reachable (HTTP ${_ard_code:-000}): ${_ard_db}"
+    return 1
+}
+
+znh_arch_repos_state_probe() {
+    # Populates the ZNH_ARCH_REPOS_* globals using read-only LOCAL probes only
+    # (catalog sections in the pacman.conf + the last health TSV entry; no
+    # network). Used by the dashboard badge computation so the WebUI tile
+    # reflects the real state (same idea as znh_media_repos_state_probe).
+    ZNH_ARCH_REPOS_SUPPORTED=0
+    ZNH_ARCH_REPOS_INSTALLED=0
+    ZNH_ARCH_REPOS_HEALTHY=0
+    if [ "$(znh_media_repos_detect_family)" = "arch" ]; then
+        ZNH_ARCH_REPOS_SUPPORTED=1
+    fi
+    if [ "${ZNH_ARCH_REPOS_SUPPORTED}" -eq 1 ] && [ -r "${ZNH_ARCH_REPOS_PACMAN_CONF}" ]; then
+        local _arsp_spec _arsp_name _arsp_lvl
+        for _arsp_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            _arsp_name="$(printf '%s' "${_arsp_spec}" | cut -d'|' -f1)"
+            if [ "${_arsp_name}" = "ALHP" ]; then
+                [ -n "$(znh_arch_repos_alhp_level)" ] && ZNH_ARCH_REPOS_INSTALLED=1
+            elif znh_arch_repos_section_exists "${_arsp_name}"; then
+                ZNH_ARCH_REPOS_INSTALLED=1
+            fi
+        done
+    fi
+    if [ "${ZNH_ARCH_REPOS_INSTALLED}" -eq 1 ]; then
+        # Healthy unless an ENABLED catalog repo's last health entry is
+        # 'unreachable' (no health data yet counts as healthy).
+        ZNH_ARCH_REPOS_HEALTHY=1
+        local _arsp2_spec _arsp2_name _arsp2_enabled _arsp2_state
+        for _arsp2_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            _arsp2_name="$(printf '%s' "${_arsp2_spec}" | cut -d'|' -f1)"
+            _arsp2_enabled=0
+            if [ "${_arsp2_name}" = "ALHP" ]; then
+                [ -n "$(znh_arch_repos_alhp_level)" ] && _arsp2_enabled=1
+            elif znh_arch_repos_section_exists "${_arsp2_name}"; then
+                _arsp2_enabled=1
+            fi
+            if [ "${_arsp2_enabled}" -eq 1 ]; then
+                _arsp2_state="$(znh_arch_repos_health_state "${_arsp2_name}")"
+                if [ "${_arsp2_state}" = "unreachable" ]; then
+                    ZNH_ARCH_REPOS_HEALTHY=0
+                fi
+            fi
+        done
+    fi
+    return 0
+}
+
+znh_arch_repos_list_json() {
+    # Prints a one-line JSON object with the catalog + current enablement +
+    # last health state (local, read-only; used by the WebUI/API). python3
+    # is required for safe JSON serialization.
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 is required for --arch-repos list --json."
+        return 1
+    fi
+    local _arj_spec _arj_name _arj_class _arj_url _arj_key _arj_note
+    local _arj_enabled _arj_health _arj_level _arj_family _arj_cpu _arj_supported
+    _arj_family="$(znh_media_repos_detect_family)"
+    _arj_cpu="$(znh_arch_repos_cpu_level)"
+    if [ "${_arj_family}" = "arch" ]; then _arj_supported=true; else _arj_supported=false; fi
+    {
+        printf 'S\tsupported\t%s\n' "${_arj_supported}"
+        printf 'S\tfamily\t%s\n' "${_arj_family}"
+        printf 'S\tcpu_level\t%s\n' "${_arj_cpu}"
+        printf 'S\twiki_url\t%s\n' "${ZNH_ARCH_REPOS_WIKI_URL}"
+        printf 'S\twarning_text\t%s\n' "${ZNH_ARCH_REPOS_WIKI_WARNING}"
+        for _arj_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            IFS='|' read -r _arj_name _arj_class _arj_url _arj_key _arj_note <<<"${_arj_spec}"
+            _arj_enabled=0
+            _arj_health="unknown"
+            _arj_level=""
+            if [ "${_arj_name}" = "ALHP" ]; then
+                _arj_level="$(znh_arch_repos_alhp_level)"
+                [ -n "${_arj_level}" ] && _arj_enabled=1
+            elif znh_arch_repos_section_exists "${_arj_name}"; then
+                _arj_enabled=1
+            fi
+            if [ "${_arj_enabled}" -eq 1 ]; then
+                _arj_health="$(znh_arch_repos_health_state "${_arj_name}")"
+            fi
+            if [ "${_arj_class}" = "signed" ]; then _arj_class=true; else _arj_class=false; fi
+            printf 'R\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n' \
+                "${_arj_name}" "${_arj_class}" "${_arj_url}" "${_arj_key}" "${_arj_note}" \
+                "${_arj_enabled}" "${_arj_health}" "${_arj_level}"
+        done
+    } | python3 -c '
+import json, sys
+
+meta = {}
+rows = []
+for ln in sys.stdin.read().splitlines():
+    if not ln:
+        continue
+    parts = ln.split("\t")
+    if len(parts) < 3:
+        continue
+    if parts[0] == "S":
+        meta[parts[1]] = parts[2]
+        continue
+    if parts[0] == "R" and len(parts) >= 9:
+        rows.append({
+            "name": parts[1],
+            "signed": parts[2] == "true",
+            "url": parts[3],
+            "key": parts[4],
+            "note": parts[5],
+            "enabled": parts[6] == "1",
+            "health": parts[7],
+            "alhp_level": parts[8],
+        })
+try:
+    cpu_level = int(str(meta.get("cpu_level", "0") or "0"))
+except Exception:
+    cpu_level = 0
+out = {
+    "supported": meta.get("supported") == "true",
+    "family": meta.get("family", ""),
+    "cpu_level": cpu_level,
+    "wiki_url": meta.get("wiki_url", ""),
+    "warning_text": meta.get("warning_text", ""),
+    "repos": rows,
+}
+sys.stdout.write(json.dumps(out) + "\n")
+'
+    return $?
+}
+
+znh_arch_repos_remove_section() {
+    # Args: <section-name> [managed_only]
+    # Removes a repository section from the pacman.conf. Managed blocks written
+    # by this helper are removed whole (block markers); a plain user-added
+    # [section] is removed with its following key lines up to the next section
+    # header. python3 required (atomic rewrite with a proper section parser).
+    # Exit codes: 0 = changed, 3 = nothing matched, 1 = error.
+    local _arrem_section="$1" _arrem_managed="${2:-0}"
+    local _arrem_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
+    [ -f "${_arrem_conf}" ] || return 1
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 is required to remove a repository section from ${_arrem_conf}."
+        return 1
+    fi
+    znh_arch_repos_need_root "edit ${_arrem_conf}" || return 1
+    ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} python3 - "${_arrem_conf}" "${_arrem_section}" "${_arrem_managed}" <<'PYAR' || return $?
+import os
+import re
+import sys
+
+path, section, managed = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+except Exception as e:
+    sys.stderr.write(f"read failed: {e}\n")
+    raise SystemExit(1)
+
+out = []
+i = 0
+n = len(lines)
+changed = False
+begin_re = re.compile(r"^\s*# >>> zypper-auto-helper arch-repos")
+end_re = re.compile(r"^\s*# <<< zypper-auto-helper arch-repos")
+# The caller may pass a bracketed section name such as [core-x86-64-v3]
+# (the ALHP removal path). re.escape would escape those brackets and the
+# regex could then never match the [section] header line — so normalize to
+# the inner section name first and compare the exact bracketed line.
+if section.startswith("[") and section.endswith("]"):
+    section = section[1:-1]
+sec_line = "[" + section + "]"
+
+while i < n:
+    line = lines[i]
+    if line.strip() == sec_line:
+        # Plain section: drop the header + following non-section lines
+        # (keys up to the next [ section header).
+        i += 1
+        while i < n and not lines[i].lstrip().startswith("["):
+            i += 1
+        changed = True
+        continue
+    if managed and begin_re.match(line):
+        i += 1
+        while i < n and not end_re.match(lines[i]):
+            i += 1
+        if i < n:
+            i += 1
+        changed = True
+        continue
+    out.append(line)
+    i += 1
+
+if not changed:
+    raise SystemExit(3)
+
+tmp = f"{path}.tmp.{os.getpid()}"
+with open(tmp, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out).rstrip("\n") + "\n")
+os.replace(tmp, path)
+raise SystemExit(0)
+PYAR
+}
+
+znh_arch_repos_append_block() {
+    # Args: <block-body> — backs up the pacman.conf (FC9 rollback source) and
+    # appends one managed block containing the body. sudo-aware; fixture mode
+    # (ZNH_ARCH_SUDO_MODE=never) writes directly.
+    local _arab_body="$1" _arab_stamp
+    local _arab_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
+    [ -f "${_arab_conf}" ] || { log_error "${_arab_conf} not found."; return 1; }
+    znh_arch_repos_need_root "edit ${_arab_conf}" || return 1
+    _arab_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
+    if ! ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_arab_conf}" "${_arab_conf}.znh-backup-${_arab_stamp}" 2>/dev/null; then
+        log_error "Failed to back up ${_arab_conf}; refusing to write (fail-safe)."
+        return 1
+    fi
+    log_info "[arch-repos] Backup written: ${_arab_conf}.znh-backup-${_arab_stamp}"
+    {
+        printf '\n'
+        printf '# >>> zypper-auto-helper arch-repos (managed; edit via "zypper-auto-helper --arch-repos disable <name>") >>>\n'
+        # NOTE: %b so the body's \n escapes become REAL newlines — the stanza
+        # must be written as separate [section]/SigLevel/Server lines, or the
+        # section-exists regexes (and pacman itself) could never match it.
+        printf '%b\n' "${_arab_body}"
+        printf '# <<< zypper-auto-helper arch-repos <<<\n'
+    } | ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} tee -a "${_arab_conf}" >/dev/null || return 1
+    return 0
+}
+
+run_arch_repos_only() {
+    log_info ">>> Arch unofficial repository manager (safety-gated)..."
+    update_status "Running Arch unofficial repository manager..."
+
+    local rc=0
+    local _ar_cmd="" _ar_repo="" _ar_url_arg="" _ar_level_arg=""
+    local _ar_dry=0 _ar_json=0 _ar_yes=0 _ar_key_verified=0 _ar_unsigned_ok=0 _ar_auto_disable=0 _ar_history=0
+    local -a _ar_extra=()
+    local _ar_arg
+
+    # --- Subcommand + flag parsing (first positional without a subcommand
+    # keyword falls back to 'list <repo>' so bare '--arch-repos' is safe) ---
+    while [ "$#" -gt 0 ]; do
+        _ar_arg="$1"
+        case "${_ar_arg}" in
+            list|status|enable|disable|disable-all|health|history)
+                if [ -z "${_ar_cmd}" ]; then _ar_cmd="${_ar_arg}"; else _ar_extra+=("${_ar_arg}"); fi
+                ;;
+            --history|--arch-repos-history)
+                _ar_history=1
+                ;;
+            --dry-run)
+                _ar_dry=1
+                ;;
+            --json)
+                _ar_json=1
+                ;;
+            --yes|-y|--assume-yes|--non-interactive)
+                _ar_yes=1
+                ;;
+            --key-verified)
+                _ar_key_verified=1
+                ;;
+            --unsigned-accepted)
+                _ar_unsigned_ok=1
+                ;;
+            --auto-disable)
+                _ar_auto_disable=1
+                ;;
+            --level)
+                shift
+                case "${1:-}" in
+                    v2|v3|v4) _ar_level_arg="$1" ;;
+                    *) log_error "--level needs v2, v3 or v4 (ALHP microarchitecture level)."; return 1 ;;
+                esac
+                ;;
+            --level=*)
+                _ar_level_arg="${_ar_arg#--level=}"
+                case "${_ar_level_arg}" in v2|v3|v4) ;; *) log_error "--level needs v2, v3 or v4."; return 1 ;; esac
+                ;;
+            --*)
+                log_error "Unknown option for --arch-repos: ${_ar_arg}"
+                log_error "Usage: zypper-auto-helper --arch-repos [list|status|enable <repo> [url]|disable <repo>|disable-all|health [--auto-disable]|history] [--dry-run] [--json]"
+                return 1
+                ;;
+            *)
+                [ -n "${_ar_cmd}" ] || _ar_cmd="list"
+                if [ -z "${_ar_repo}" ]; then
+                    _ar_repo="${_ar_arg}"
+                elif [ -z "${_ar_url_arg}" ] && [[ "${_ar_arg}" == *://* ]]; then
+                    _ar_url_arg="${_ar_arg}"
+                else
+                    _ar_extra+=("${_ar_arg}")
+                fi
+                ;;
+        esac
+        shift
+    done
+    [ -n "${_ar_cmd}" ] || _ar_cmd="list"
+    [ "${_ar_cmd}" = "history" ] && _ar_history=1
+
+    # --- FC1: Arch-family gate (ID=arch or ID_LIKE contains arch) ---
+    local _ar_family
+    _ar_family="$(znh_media_repos_detect_family)"
+    if [ "${_ar_family}" != "arch" ]; then
+        log_info "Unofficial Arch repositories are an Arch-family ecosystem (detected family: ${_ar_family:-none/unsupported} via /etc/os-release ID/ID_LIKE)."
+        if [ "${_ar_json}" -eq 1 ] && [ "${_ar_cmd}" = "list" ]; then
+            # Machine-readable clean exit for the WebUI/API on other distros.
+            printf '{"supported": false, "family": "%s", "cpu_level": 0, "wiki_url": "%s", "warning_text": "%s", "repos": []}\n' \
+                "${_ar_family}" "${ZNH_ARCH_REPOS_WIKI_URL}" "${ZNH_ARCH_REPOS_WIKI_WARNING}"
+        else
+            # Console-visible clean exit (log_info alone is log-file only).
+            echo "" | tee -a "${LOG_FILE}"
+            echo "Unofficial Arch repositories are an Arch-family ecosystem (detected family: ${_ar_family:-none/unsupported} via /etc/os-release ID/ID_LIKE)." | tee -a "${LOG_FILE}"
+            echo "--arch-repos targets Arch-family systems only. Exiting cleanly; nothing was changed." | tee -a "${LOG_FILE}"
+        fi
+        return 0
+    fi
+
+    # ======================= history =======================
+    if [ "${_ar_history}" -eq 1 ]; then
+        local _arh_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-state.tsv"
+        echo ""
+        echo "Arch unofficial repository history (newest first):"
+        if [ ! -r "${_arh_file}" ]; then
+            echo "  (no history yet — enable a repository with: sudo zypper-auto-helper --arch-repos enable <repo>)"
+            echo "  Log file: ${_arh_file} (not present yet)"
+            return 0
+        fi
+        tail -n 50 "${_arh_file}" | while IFS=$'\t' read -r _arh_date _arh_repo _arh_action _arh_detail; do
+            [ -n "${_arh_repo}" ] || continue
+            printf '  %s  %-24s %-13s %s\n' "${_arh_date}" "${_arh_repo}" "${_arh_action}" "${_arh_detail}"
+        done | tac
+        return 0
+    fi
+
+    # ======================= list / status =======================
+    if [ "${_ar_cmd}" = "list" ] || [ "${_ar_cmd}" = "status" ]; then
+        if [ "${_ar_json}" -eq 1 ]; then
+            znh_arch_repos_list_json
+            return $?
+        fi
+        local _arl_ctitle="" _arl_cok="" _arl_cwarn="" _arl_cerr="" _arl_creset=""
+        if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
+            _arl_ctitle=$'\033[1m'
+            _arl_cok=$'\033[92m'
+            _arl_cwarn=$'\033[33m'
+            _arl_cerr=$'\033[91m'
+            _arl_creset=$'\033[0m'
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Arch unofficial user repositories (catalog + text: the Arch Wiki page)" | tee -a "${LOG_FILE}"
+        echo "  Wiki: ${ZNH_ARCH_REPOS_WIKI_URL}" | tee -a "${LOG_FILE}"
+        echo "  ${_arl_cwarn}WARNING: ${ZNH_ARCH_REPOS_WIKI_WARNING}${_arl_creset}" | tee -a "${LOG_FILE}"
+        echo "  CPU microarchitecture level: x86-64-v$(znh_arch_repos_cpu_level) (gates the ALHP optimised repositories)" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        local _arl_spec _arl_name _arl_class _arl_url _arl_key _arl_note
+        local _arl_enabled _arl_level _arl_state _arl_shown=0
+        for _arl_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            IFS='|' read -r _arl_name _arl_class _arl_url _arl_key _arl_note <<<"${_arl_spec}"
+            # Optional single-repo filter for 'list <repo>'.
+            if [ -n "${_ar_repo}" ] && [ "${_ar_repo,,}" != "${_arl_name,,}" ]; then
+                continue
+            fi
+            _arl_enabled=0
+            _arl_state=""
+            _arl_level=""
+            if [ "${_arl_name}" = "ALHP" ]; then
+                _arl_level="$(znh_arch_repos_alhp_level)"
+                [ -n "${_arl_level}" ] && _arl_enabled=1
+            elif znh_arch_repos_section_exists "${_arl_name}"; then
+                _arl_enabled=1
+            fi
+            if [ "${_arl_enabled}" -eq 1 ]; then
+                _arl_state="$(znh_arch_repos_health_state "${_arl_name}")"
+            fi
+            _arl_shown=$((_arl_shown + 1))
+            if [ "${_arl_class}" = "signed" ]; then
+                printf '  %s[%s]%s %s' "${_arl_cok}" "${_arl_class}" "${_arl_creset}" "${_arl_ctitle}${_arl_name}${_arl_creset}"
+            else
+                printf '  %s[%s]%s %s' "${_arl_cerr}" "${_arl_class}" "${_arl_creset}" "${_arl_ctitle}${_arl_name}${_arl_creset}"
+            fi
+            if [ "${_arl_enabled}" -eq 1 ]; then
+                if [ "${_arl_state}" = "unreachable" ]; then
+                    printf '  %s[ENABLED — last health: UNREACHABLE]%s' "${_arl_cerr}" "${_arl_creset}"
+                else
+                    printf '  %s[ENABLED%s]%s' "${_arl_cok}" "${_arl_level:+ (${_arl_level})}" "${_arl_creset}"
+                fi
+            fi
+            echo ""
+            printf '     Key: %s' "${_arl_key:-—}"
+            if [ "${_arl_name}" = "ALHP" ]; then
+                printf '  Server: /etc/pacman.d/alhp-mirrorlist (core/extra/multilib for the requested level)'
+            elif [ -n "${_arl_url}" ]; then
+                printf '  Server: %s' "${_arl_url}"
+            else
+                printf '  Server: (not stored — pass the URL you verified from the wiki)'
+            fi
+            echo ""
+            if [ "${_ar_cmd}" = "status" ] && [ "${_arl_enabled}" -eq 1 ] && [ -n "${_arl_url}" ] && [ "${_arl_name}" != "ALHP" ]; then
+                if znh_arch_repos_check_db_reachable "${_arl_url}" "${_arl_name}"; then
+                    printf '     %sReachability: OK (repo database reachable)%s\n' "${_arl_cok}" "${_arl_creset}"
+                else
+                    printf '     %sReachability: UNREACHABLE (repo database not reachable)%s\n' "${_arl_cerr}" "${_arl_creset}"
+                fi
+            fi
+            echo ""
+        done
+        echo "  Repositories shown: ${_arl_shown} of ${#ZNH_ARCH_REPO_SPECS[@]} (wiki signed + unsigned lists)." | tee -a "${LOG_FILE}"
+        echo "  Enable ONE repository (confirm-gated): sudo zypper-auto-helper --arch-repos enable <repo> [https://server-url]" | tee -a "${LOG_FILE}"
+        echo "  Health + failsafe: sudo zypper-auto-helper --arch-repos health [--auto-disable]" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+
+    # ======================= enable =======================
+    if [ "${_ar_cmd}" = "enable" ]; then
+        # FC8: exactly one repository per run.
+        if [ -z "${_ar_repo}" ]; then
+            log_error "No repository name given. Usage: zypper-auto-helper --arch-repos enable <repo> [https://server-url]"
+            return 1
+        fi
+        if [ "${#_ar_extra[@]}" -gt 0 ]; then
+            log_error "FAILCHECK (one repository per run): refusing to enable more than one repository in a single run (${_ar_repo} + ${_ar_extra[*]})."
+            log_error "Run '--arch-repos enable <repo>' again for the next repository so each one gets its own confirmation round."
+            return 1
+        fi
+        local _ar_spec _ar_name _ar_class _ar_url _ar_key _ar_note
+        _ar_spec="$(znh_arch_repos_catalog_lookup "${_ar_repo}")"
+        if [ -z "${_ar_spec}" ]; then
+            log_error "'${_ar_repo}' is not in the catalog (the signed/unsigned lists from the Arch Wiki page)."
+            log_error "Browse the wiki for the exact repository name and Server URL: ${ZNH_ARCH_REPOS_WIKI_URL}"
+            return 1
+        fi
+        IFS='|' read -r _ar_name _ar_class _ar_url _ar_key _ar_note <<<"${_ar_spec}"
+        log_info "[arch-repos] enable requested for ${_ar_name} (class: ${_ar_class})"
+
+        local _ar_section="${_ar_name}" _ar_body="" _ar_display=""
+        if [ "${_ar_name}" = "ALHP" ]; then
+            # --- ALHP special path (optimised core/extra/multilib rebuilds) ---
+            local _ar_ml="${ZNH_ARCH_ALHP_MIRRORLIST:-/etc/pacman.d/alhp-mirrorlist}"
+            if [ ! -r "${_ar_ml}" ]; then
+                log_error "FAILCHECK (no auto-install): the ALHP mirrorlist ${_ar_ml} is missing."
+                log_error "Install 'alhp-mirrorlist' and 'alhp-keyring' from the AUR YOURSELF (with your AUR helper), then re-run this command. This helper never installs or imports them for you."
+                return 1
+            fi
+            # FC4: microarchitecture level check before anything is written.
+            local _ar_cpu _ar_lvl _ar_want
+            _ar_cpu="$(znh_arch_repos_cpu_level)"
+            if [ -n "${_ar_level_arg}" ]; then
+                _ar_lvl="${_ar_level_arg}"
+            elif [ "${_ar_cpu}" -ge 2 ] 2>/dev/null; then
+                _ar_lvl="v${_ar_cpu}"
+            else
+                _ar_lvl=""
+            fi
+            if [ -z "${_ar_lvl}" ]; then
+                log_error "FAILCHECK (ALHP): could not detect the CPU microarchitecture level (got x86-64-v${_ar_cpu}). Pass --level v2, v3 or v4 explicitly."
+                return 1
+            fi
+            _ar_want="${_ar_lvl#v}"
+            if ! [ "${_ar_cpu}" -ge "${_ar_want}" ] 2>/dev/null; then
+                log_error "FAILCHECK (ALHP CPU level): this CPU supports x86-64-v${_ar_cpu} (per ${ZNH_ARCH_REPOS_CPUINFO_FILE}) but x86-64-${_ar_lvl} was requested; refusing."
+                log_error "Unsupported optimised binaries can make the system unbootable (Arch Wiki ALHP warning). Choose a level your CPU supports."
+                return 1
+            fi
+            # FC3 for ALHP: any already-enabled ALHP section is a duplicate.
+            local _ar_alhp_cur
+            _ar_alhp_cur="$(znh_arch_repos_alhp_level)"
+            if [ -n "${_ar_alhp_cur}" ]; then
+                log_error "FAILCHECK (duplicate): ALHP repositories are already enabled (level ${_ar_alhp_cur}) in ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                log_error "Disable them first: zypper-auto-helper --arch-repos disable ALHP"
+                return 1
+            fi
+            _ar_body="[core-x86-64-${_ar_lvl}]"
+            _ar_body="${_ar_body}\nInclude = ${_ar_ml}"
+            _ar_body="${_ar_body}\n[extra-x86-64-${_ar_lvl}]"
+            _ar_body="${_ar_body}\nInclude = ${_ar_ml}"
+            _ar_body="${_ar_body}\n[multilib-x86-64-${_ar_lvl}]"
+            _ar_body="${_ar_body}\nInclude = ${_ar_ml}"
+            _ar_display="ALHP (core/extra/multilib for x86-64-${_ar_lvl}, via ${_ar_ml})"
+        else
+            # --- Generic repository path ---
+            if [ -n "${_ar_url_arg}" ]; then
+                _ar_url="${_ar_url_arg}"
+                log_info "[arch-repos] using the user-supplied Server URL for ${_ar_name}: ${_ar_url}"
+            fi
+            if [ -z "${_ar_url}" ]; then
+                log_error "No catalog Server URL is stored for '${_ar_name}' (it is on the wiki's ${_ar_class} list, but this helper only stores URLs it verified from the wiki page itself)."
+                log_error "Pass the Server URL you verified on the wiki page: zypper-auto-helper --arch-repos enable ${_ar_name} https://server/url"
+                log_error "Wiki: ${ZNH_ARCH_REPOS_WIKI_URL}"
+                return 1
+            fi
+            # FC2: HTTPS-only, always.
+            case "${_ar_url}" in
+                https://*) : ;;
+                *)
+                    log_error "FAILCHECK (HTTPS-only): refusing to enable '${_ar_name}' — the Server URL is not HTTPS: ${_ar_url}"
+                    log_error "Repositories are never enabled over plain HTTP. Find an https:// mirror on the wiki page and re-run with it."
+                    return 1
+                    ;;
+            esac
+            # FC3: duplicate guard across the WHOLE pacman.conf.
+            if znh_arch_repos_section_exists "${_ar_section}"; then
+                log_error "FAILCHECK (duplicate): [${_ar_section}] already exists in ${ZNH_ARCH_REPOS_PACMAN_CONF}; refusing to add it again."
+                log_error "Disable it first if you want to re-configure it: zypper-auto-helper --arch-repos disable ${_ar_name}"
+                return 1
+            fi
+            local _ar_siglevel="PackageRequired"
+            if [ "${_ar_class}" = "unsigned" ]; then
+                # Unsigned: SigLevel is FORCED to PackageOptional (spec) and
+                # re-confirmed below (FC6).
+                _ar_siglevel="PackageOptional"
+            fi
+            _ar_body="[${_ar_section}]\nSigLevel = ${_ar_siglevel}\nServer = ${_ar_url}"
+            if [ "${_ar_name}" = "archzfs" ]; then
+                _ar_body="${_ar_body}\nServer = https://mirrors.uni-plovdiv.net/archzfs/experimental"
+            fi
+            _ar_display="[${_ar_section}] with SigLevel = ${_ar_siglevel} and Server = ${_ar_url}"
+        fi
+
+        # FC5: the Arch Wiki warning, verbatim, before ANY change.
+        echo "" | tee -a "${LOG_FILE}"
+        echo "WARNING (verbatim from ${ZNH_ARCH_REPOS_WIKI_URL}):" | tee -a "${LOG_FILE}"
+        echo "  ${ZNH_ARCH_REPOS_WIKI_WARNING}" | tee -a "${LOG_FILE}"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Repository : ${_ar_name} (${_ar_class})" | tee -a "${LOG_FILE}"
+        echo "Key        : ${_ar_key:-—} (this helper NEVER imports or signs it — that is your responsibility)" | tee -a "${LOG_FILE}"
+        echo "Would write: ${_ar_display}" | tee -a "${LOG_FILE}"
+        if [ "${_ar_class}" = "unsigned" ]; then
+            echo "This repository is UNSIGNED: SigLevel is forced to PackageOptional, so package signatures are NOT checked." | tee -a "${LOG_FILE}"
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+
+        # FC6: explicit confirmation; no silent defaults. Dry-run needs no
+        # confirmation (it writes nothing) but still prints everything above.
+        local _ar_interactive=1
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then
+            _ar_interactive=0
+        fi
+        if [ "${_ar_dry}" -ne 1 ]; then
+            if [ "${_ar_interactive}" -eq 1 ]; then
+                local _ar_c1=""
+                read -r -p "Type ACCEPT to accept the warning above and take full responsibility: " _ar_c1 || true
+                echo ""
+                if [ "${_ar_c1}" != "ACCEPT" ]; then
+                    log_error "Not confirmed (expected ACCEPT); aborting. Nothing was changed."
+                    return 1
+                fi
+                if [ "${_ar_class}" = "signed" ]; then
+                    local _ar_c2=""
+                    echo "This repository is SIGNED (${_ar_key:-key on the wiki page}). This helper will NOT import or sign its key." | tee -a "${LOG_FILE}"
+                    read -r -p "Type KEYVERIFIED to confirm you verified the Key-ID yourself and will import/sign it locally: " _ar_c2 || true
+                    echo ""
+                    if [ "${_ar_c2}" != "KEYVERIFIED" ]; then
+                        log_error "Not confirmed (expected KEYVERIFIED); aborting. Nothing was changed."
+                        return 1
+                    fi
+                else
+                    local _ar_c3=""
+                    echo "This repository is UNSIGNED; enabling forces SigLevel = PackageOptional (signatures NOT checked)." | tee -a "${LOG_FILE}"
+                    read -r -p "Type UNSIGNOK to re-confirm you accept SigLevel = PackageOptional for it: " _ar_c3 || true
+                    echo ""
+                    if [ "${_ar_c3}" != "UNSIGNOK" ]; then
+                        log_error "Not confirmed (expected UNSIGNOK); aborting. Nothing was changed."
+                        return 1
+                    fi
+                fi
+            else
+                # Non-interactive (WebUI job, script, piped stdin): flags only.
+                if [ "${_ar_yes}" -ne 1 ]; then
+                    log_error "FAILCHECK (no silent defaults): non-interactive enable requires --assume-yes (or --yes)."
+                    return 1
+                fi
+                if [ "${_ar_class}" = "signed" ] && [ "${_ar_key_verified}" -ne 1 ]; then
+                    log_error "FAILCHECK (key confirmation): non-interactive enable of a SIGNED repository requires --key-verified (you verified the Key-ID yourself and will import/sign it locally; this helper never imports keys)."
+                    return 1
+                fi
+                if [ "${_ar_class}" = "unsigned" ] && [ "${_ar_unsigned_ok}" -ne 1 ]; then
+                    log_error "FAILCHECK (unsigned re-confirm): non-interactive enable of an UNSIGNED repository requires --unsigned-accepted (SigLevel is forced to PackageOptional)."
+                    return 1
+                fi
+                log_info "[arch-repos] non-interactive enable confirmed via flags (--assume-yes --key-verified/--unsigned-accepted)."
+            fi
+        fi
+
+        if [ "${_ar_dry}" -eq 1 ]; then
+            echo "" | tee -a "${LOG_FILE}"
+            echo "[dry-run] Would back up ${ZNH_ARCH_REPOS_PACMAN_CONF} to ${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-<timestamp>" | tee -a "${LOG_FILE}"
+            echo "[dry-run] Would append this managed block to ${ZNH_ARCH_REPOS_PACMAN_CONF}:" | tee -a "${LOG_FILE}"
+            printf '%b\n' "${_ar_body}" | sed 's/^/    /' | tee -a "${LOG_FILE}"
+            echo "[dry-run] Would then run: timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy --noconfirm" | tee -a "${LOG_FILE}"
+            echo "[dry-run] Would roll the block back if the repository is unreachable or returns an error." | tee -a "${LOG_FILE}"
+            log_info "Dry-run mode: nothing was changed."
+            update_status "DRY-RUN: arch-repos enable ${_ar_name} (no changes made)"
+            return 0
+        fi
+
+        # Write the managed block (backup + append).
+        znh_arch_repos_need_root "edit ${ZNH_ARCH_REPOS_PACMAN_CONF}" || return 1
+        if ! znh_arch_repos_append_block "${_ar_body}"; then
+            log_error "Failed to write the ${_ar_name} section to ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+            return 1
+        fi
+        log_success "[arch-repos] ${_ar_name} section written to ${ZNH_ARCH_REPOS_PACMAN_CONF} (managed block)."
+
+        # FC9: post-add validation with pacman -Sy under a timeout; rollback on
+        # any error mentioning the repository or a general sync failure.
+        local _ar_sync_out="" _ar_sync_rc=0 _ar_sec_esc
+        _ar_sec_esc="${_ar_section//./\\.}"
+        if command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
+            log_info "[arch-repos] Validating with ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
+            _ar_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+            _ar_sync_rc=0
+            if printf '%s' "${_ar_sync_out}" | grep -Eiq "failed to synchroni[sz]e"; then
+                _ar_sync_rc=1
+            fi
+            if [ "${_ar_sync_rc}" -eq 0 ] && printf '%s' "${_ar_sync_out}" | grep -Eiq "(error|fail).*${_ar_sec_esc}|${_ar_sec_esc}.*(error|fail)"; then
+                _ar_sync_rc=1
+            fi
+        else
+            log_warn "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; skipping the pacman -Sy validation (fixture/test mode)."
+        fi
+        if [ "${_ar_sync_rc}" -ne 0 ]; then
+            echo "" | tee -a "${LOG_FILE}"
+            echo "${_ar_sync_out}" | tail -n 20 | tee -a "${LOG_FILE}"
+            log_error "FAILCHECK (post-add validation): ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy failed after adding ${_ar_name}; rolling the change back."
+            log_error "If you have not imported the repository key yet (signed repos), do that FIRST, then re-run this command."
+            # Rollback: restore the newest pre-write backup (glob + -nt; no ls).
+            local _ar_backup _ar_cand
+            _ar_backup=""
+            for _ar_cand in "${ZNH_ARCH_REPOS_PACMAN_CONF}".znh-backup-*; do
+                [ -e "${_ar_cand}" ] || continue
+                if [ -z "${_ar_backup}" ] || [ "${_ar_cand}" -nt "${_ar_backup}" ]; then
+                    _ar_backup="${_ar_cand}"
+                fi
+            done
+            if [ -n "${_ar_backup}" ]; then
+                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_ar_backup}" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null; then
+                    log_info "[arch-repos] Rolled back: ${ZNH_ARCH_REPOS_PACMAN_CONF} restored from ${_ar_backup}."
+                else
+                    log_error "[arch-repos] Rollback FAILED — restore manually from ${_ar_backup}."
+                fi
+            else
+                log_error "[arch-repos] No pre-write backup found for rollback."
+            fi
+            znh_arch_repos_state_log "${_ar_name}" "rolled-back" "post-add pacman -Sy validation failed"
+            update_status "FAILED: arch-repos enable ${_ar_name} rolled back (validation failed)"
+            return 1
+        fi
+        log_success "[arch-repos] ${_ar_name} validated via pacman -Sy (repository reachable and no errors)."
+        znh_arch_repos_state_log "${_ar_name}" "enabled" "${_ar_class}"
+        update_status "SUCCESS: Arch repo ${_ar_name} enabled (validated)"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Repository ${_ar_name} is enabled and validated. Packages from it are NOT verified by Arch developers — you are responsible for them." | tee -a "${LOG_FILE}"
+        return 0
+    fi
+
+    # ======================= disable / disable-all =======================
+    if [ "${_ar_cmd}" = "disable" ] || [ "${_ar_cmd}" = "disable-all" ]; then
+        local -a _ar_targets=()
+        if [ "${_ar_cmd}" = "disable" ]; then
+            if [ -z "${_ar_repo}" ]; then
+                log_error "No repository name given. Usage: zypper-auto-helper --arch-repos disable <repo>"
+                return 1
+            fi
+            local _ar_name_d
+            _ar_name_d="$(znh_arch_repos_catalog_lookup "${_ar_repo}" | cut -d'|' -f1)"
+            if [ -z "${_ar_name_d}" ]; then
+                log_error "'${_ar_repo}' is not in the catalog. Removal targets catalog-listed repositories only."
+                return 1
+            fi
+            _ar_targets=("${_ar_name_d}")
+        else
+            # disable-all: every catalog repo currently enabled (incl. ALHP).
+            local _arda_spec _arda_name _arda_enabled
+            for _arda_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+                _arda_name="$(printf '%s' "${_arda_spec}" | cut -d'|' -f1)"
+                _arda_enabled=0
+                if [ "${_arda_name}" = "ALHP" ]; then
+                    [ -n "$(znh_arch_repos_alhp_level)" ] && _arda_enabled=1
+                elif znh_arch_repos_section_exists "${_arda_name}"; then
+                    _arda_enabled=1
+                fi
+                [ "${_arda_enabled}" -eq 1 ] && _ar_targets+=("${_arda_name}")
+            done
+        fi
+        if [ "${#_ar_targets[@]}" -eq 0 ]; then
+            log_info "No catalog-listed unofficial Arch repositories are currently enabled; nothing to disable."
+            return 0
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        echo "The following repositories will be REMOVED from ${ZNH_ARCH_REPOS_PACMAN_CONF}:" | tee -a "${LOG_FILE}"
+        local _ardt
+        for _ardt in "${_ar_targets[@]}"; do
+            echo "  - ${_ardt}" | tee -a "${LOG_FILE}"
+            # Preview the exact section being removed (honesty first).
+            if [ "${_ardt}" = "ALHP" ]; then
+                grep -E '^\[(core|extra|multilib)-x86-64-v[234]\]' "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null | sed 's/^/      /' | tee -a "${LOG_FILE}" || true
+            else
+                grep -E "^[[:space:]]*\[${_ardt//./\\.}\][[:space:]]*$" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null | sed 's/^/      /' | tee -a "${LOG_FILE}" || true
+            fi
+        done
+        echo "Installed packages from these repositories are NOT removed (pacman keeps them; remove them yourself if wanted)." | tee -a "${LOG_FILE}"
+        if [ "${_ar_dry}" -eq 1 ]; then
+            echo "[dry-run] Would back up ${ZNH_ARCH_REPOS_PACMAN_CONF} and remove the section(s) above." | tee -a "${LOG_FILE}"
+            log_info "Dry-run mode: nothing was changed."
+            return 0
+        fi
+        local _ar_interactive_d=1
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then _ar_interactive_d=0; fi
+        if [ "${_ar_interactive_d}" -eq 1 ]; then
+            local _ar_dc=""
+            read -r -p "Proceed with the removal? [y/N]: " _ar_dc || true
+            echo ""
+            if [[ "${_ar_dc}" != [Yy]* ]]; then
+                log_info "Aborted by user; nothing was changed."
+                return 0
+            fi
+        else
+            if [ "${_ar_yes}" -ne 1 ]; then
+                log_error "FAILCHECK (no silent defaults): non-interactive disable requires --yes."
+                return 1
+            fi
+            log_info "[arch-repos] non-interactive disable confirmed via --yes."
+        fi
+        znh_arch_repos_need_root "edit ${ZNH_ARCH_REPOS_PACMAN_CONF}" || return 1
+        # Backup once for the whole run.
+        local _ardb_stamp
+        _ardb_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
+        if ! ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_PACMAN_CONF}" "${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-${_ardb_stamp}" 2>/dev/null; then
+            log_error "Failed to back up ${ZNH_ARCH_REPOS_PACMAN_CONF}; refusing to remove anything."
+            return 1
+        fi
+        log_info "[arch-repos] Backup written: ${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-${_ardb_stamp}"
+        local _ardn _ardn_rc=0
+        for _ardn in "${_ar_targets[@]}"; do
+            # ALHP: remove the three level sections; others: managed block then
+            # any standalone section (idempotent double pass).
+            if [ "${_ardn}" = "ALHP" ]; then
+                # Capture the level ONCE: after the core section is removed the
+                # alhp_level probe (which greps the core section) finds nothing,
+                # so re-detecting per iteration would look for the wrong level.
+                local _ardl _ardl_lvl
+                _ardl_lvl="$(znh_arch_repos_alhp_level)"
+                [ -n "${_ardl_lvl}" ] || _ardl_lvl="v2"
+                for _ardl in core extra multilib; do
+                    znh_arch_repos_remove_section "${_ardl}-x86-64-${_ardl_lvl}" >/dev/null 2>&1 || true
+                done
+                if grep -Eq '^\[(core|extra|multilib)-x86-64-v[234]\]' "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null; then
+                    log_error "[arch-repos] failed to remove some ALHP sections from ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                    _ardn_rc=1
+                else
+                    znh_arch_repos_state_log "ALHP" "disabled" "level ${_ardl_lvl} sections removed"
+                    log_success "[arch-repos] ALHP sections removed."
+                fi
+            else
+                znh_arch_repos_remove_section "${_ardn}" 1 >/dev/null 2>&1 || true
+                znh_arch_repos_remove_section "${_ardn}" 0 >/dev/null 2>&1 || true
+                if znh_arch_repos_section_exists "${_ardn}"; then
+                    log_error "[arch-repos] failed to remove [${_ardn}] from ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                    _ardn_rc=1
+                else
+                    znh_arch_repos_state_log "${_ardn}" "disabled" "section removed"
+                    log_success "[arch-repos] [${_ardn}] removed from ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                fi
+            fi
+        done
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Disabled ${#_ar_targets[@]} repositor$( [ "${#_ar_targets[@]}" -eq 1 ] && printf 'y' || printf 'ies') from ${ZNH_ARCH_REPOS_PACMAN_CONF} (installed packages are NOT removed)." | tee -a "${LOG_FILE}"
+        if [ "${_ardn_rc}" -eq 0 ]; then
+            update_status "SUCCESS: Arch repos disabled (${#_ar_targets[@]})"
+        else
+            update_status "COMPLETED WITH WARNINGS: some Arch repo sections failed to remove"
+            rc=1
+        fi
+        return "${rc}"
+    fi
+
+    # ======================= health (+ --auto-disable failsafe) =======================
+    if [ "${_ar_cmd}" = "health" ]; then
+        local -a _arh_targets=()
+        local _arh_spec _arh_name _arh_enabled
+        for _arh_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            _arh_name="$(printf '%s' "${_arh_spec}" | cut -d'|' -f1)"
+            _arh_enabled=0
+            if [ "${_arh_name}" = "ALHP" ]; then
+                [ -n "$(znh_arch_repos_alhp_level)" ] && _arh_enabled=1
+            elif znh_arch_repos_section_exists "${_arh_name}"; then
+                _arh_enabled=1
+            fi
+            [ "${_arh_enabled}" -eq 1 ] && _arh_targets+=("${_arh_name}")
+        done
+        if [ "${#_arh_targets[@]}" -eq 0 ]; then
+            echo "No catalog-listed unofficial Arch repositories are enabled; nothing to check." | tee -a "${LOG_FILE}"
+            return 0
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Health check for ${#_arh_targets[@]} enabled unofficial repos (pacman -Sy based, timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..." | tee -a "${LOG_FILE}"
+        # Run one pacman -Sy pass for the authoritative per-repo signals.
+        local _arh_sync_out="" _arh_sync_ok=0
+        if command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
+            if znh_arch_repos_need_root "run ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy for the health check"; then
+                _arh_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+                _arh_sync_ok=1
+            fi
+        else
+            log_warn "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; falling back to URL probes only (fixture/test mode)."
+        fi
+        local -a _arh_faulty=()
+        local _arh_name2 _arh_spec2 _arh_url2 _arh_state2 _arh_sec2_esc
+        local _arh_ctitle="" _arh_cok="" _arh_cerr="" _arh_creset=""
+        if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
+            _arh_ctitle=$'\033[1m'
+            _arh_cok=$'\033[92m'
+            _arh_cerr=$'\033[91m'
+            _arh_creset=$'\033[0m'
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        for _arh_name2 in "${_arh_targets[@]}"; do
+            _arh_state2="ok"
+            if [ "${_arh_name2}" = "ALHP" ]; then
+                # ALHP: mirrorlist-based; the sync output is the signal.
+                if [ "${_arh_sync_ok}" -eq 1 ] && printf '%s' "${_arh_sync_out}" | grep -Eiq "(error|fail).*alhp|alhp.*(error|fail)|failed to synchroni[sz]e"; then
+                    _arh_state2="unreachable"
+                fi
+            else
+                _arh_sec2_esc="${_arh_name2//./\\.}"
+                if [ "${_arh_sync_ok}" -eq 1 ]; then
+                    if printf '%s' "${_arh_sync_out}" | grep -Eiq "failed to synchroni[sz]e" \
+                       || printf '%s' "${_arh_sync_out}" | grep -Eiq "(error|fail).*${_arh_sec2_esc}|${_arh_sec2_esc}.*(error|fail)"; then
+                        _arh_state2="unreachable"
+                    fi
+                else
+                    # No pacman: fall back to the catalog URL probe.
+                    _arh_url2="$(znh_arch_repos_catalog_lookup "${_arh_name2}" | cut -d'|' -f3)"
+                    if [ -n "${_arh_url2}" ]; then
+                        znh_arch_repos_check_db_reachable "${_arh_url2}" "${_arh_name2}" || _arh_state2="unreachable"
+                    fi
+                fi
+            fi
+            znh_arch_repos_health_log "${_arh_name2}" "${_arh_state2}" "health run"
+            if [ "${_arh_state2}" = "ok" ]; then
+                printf '  %s%-24s OK%s\n' "${_arh_cok}" "${_arh_name2}" "${_arh_creset}" | tee -a "${LOG_FILE}"
+            else
+                printf '  %s%-24s UNREACHABLE / FAULTY%s\n' "${_arh_cerr}" "${_arh_name2}" "${_arh_creset}" | tee -a "${LOG_FILE}"
+                _arh_faulty+=("${_arh_name2}")
+            fi
+        done
+        echo "" | tee -a "${LOG_FILE}"
+        if [ "${#_arh_faulty[@]}" -eq 0 ]; then
+            log_success "[arch-repos] All enabled unofficial repositories are healthy."
+            echo "All ${#_arh_targets[@]} enabled unofficial repositor$( [ "${#_arh_targets[@]}" -eq 1 ] && printf 'y' || printf 'ies') are healthy." | tee -a "${LOG_FILE}"
+            update_status "SUCCESS: Arch repos health check OK (${#_arh_targets[@]})"
+            return 0
+        fi
+        log_error "[arch-repos] ${#_arh_faulty[@]} enabled repos failed the health check: ${_arh_faulty[*]}"
+        if [ "${_ar_auto_disable}" -ne 1 ]; then
+            log_error "[arch-repos] Report-only mode. Run with --auto-disable to remove faulty repositories automatically, or disable one with: zypper-auto-helper --arch-repos disable <repo>"
+            update_status "WARNING: ${#_arh_faulty[@]} Arch repos faulty (health check)"
+            return 1
+        fi
+        # --auto-disable failsafe: remove the faulty repositories so a broken
+        # repo never blocks system updates (the WebUI 'Auto-disable faulty').
+        if [ "${_ar_dry}" -eq 1 ]; then
+            echo "[dry-run] Would auto-disable (remove) the faulty repositories: ${_arh_faulty[*]}" | tee -a "${LOG_FILE}"
+            log_info "Dry-run mode: nothing was changed."
+            return 0
+        fi
+        local _ar_interactive_h=1
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then _ar_interactive_h=0; fi
+        if [ "${_ar_interactive_h}" -eq 1 ]; then
+            local _ar_hc=""
+            read -r -p "Auto-disable (remove) the faulty repositories listed above? [y/N]: " _ar_hc || true
+            echo ""
+            if [[ "${_ar_hc}" != [Yy]* ]]; then
+                log_info "Aborted by user; faulty repositories were left enabled (report-only)."
+                return 1
+            fi
+        else
+            if [ "${_ar_yes}" -ne 1 ]; then
+                log_error "FAILCHECK (no silent defaults): non-interactive --auto-disable requires --yes."
+                return 1
+            fi
+        fi
+        znh_arch_repos_need_root "auto-disable faulty repositories" || return 1
+        local _arfb _arfb_ok=0
+        for _arfb in "${_arh_faulty[@]}"; do
+            if [ "${_arfb}" = "ALHP" ]; then
+                # Same capture-once pattern as the disable path (see above).
+                local _arfl _arfl_lvl
+                _arfl_lvl="$(znh_arch_repos_alhp_level)"
+                [ -n "${_arfl_lvl}" ] || _arfl_lvl="v2"
+                for _arfl in core extra multilib; do
+                    znh_arch_repos_remove_section "${_arfl}-x86-64-${_arfl_lvl}" >/dev/null 2>&1 || true
+                done
+            else
+                znh_arch_repos_remove_section "${_arfb}" 1 >/dev/null 2>&1 || true
+                znh_arch_repos_remove_section "${_arfb}" 0 >/dev/null 2>&1 || true
+            fi
+            if znh_arch_repos_section_exists "${_arfb}"; then
+                log_error "[arch-repos] auto-disable FAILED for ${_arfb} (section still present)."
+            else
+                znh_arch_repos_state_log "${_arfb}" "auto-disabled" "failed the health check"
+                log_success "[arch-repos] ${_arfb} auto-disabled (removed from ${ZNH_ARCH_REPOS_PACMAN_CONF})."
+                _arfb_ok=$((_arfb_ok + 1))
+            fi
+        done
+        update_status "SUCCESS: auto-disabled ${_arfb_ok} faulty Arch repo(s)"
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Auto-disabled (removed) ${_arfb_ok} faulty repositor$( [ "${_arfb_ok}" -eq 1 ] && printf 'y' || printf 'ies') from ${ZNH_ARCH_REPOS_PACMAN_CONF}." | tee -a "${LOG_FILE}"
+        echo "Re-enable later (with full confirmations) via: zypper-auto-helper --arch-repos enable <repo>" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+
+    log_error "Unknown --arch-repos subcommand: ${_ar_cmd}"
+    log_error "Usage: zypper-auto-helper --arch-repos [list|status|enable <repo> [url]|disable <repo>|disable-all|health [--auto-disable]|history]"
+    return 1
+}
+
 # Show help if requested, or when invoked as the installed CLI with no arguments
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
    || ( $# -eq 0 && "$(basename "$0")" == "zypper-auto-helper" ) ]]; then
@@ -52403,6 +53919,17 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          'Fork of...' descriptions), --sort name|relevance (default relevance;"
     echo "                          the search API has no date field), --history (list repos this helper"
     echo "                          enabled). Repos enabled within ZNH_COPR_RECENT_DAYS (30) get [recent]."
+    echo "  --arch-repos [list|status|enable <repo> [url]|disable <repo>|disable-all|health|history]"
+    echo "                          Manage UNOFFICIAL Arch user repositories (Arch family only) with"
+    echo "                          hard safety checks. Every repo is untrusted by default: HTTPS-only"
+    echo "                          server URLs, duplicate guard in /etc/pacman.conf, ALHP CPU level"
+    echo "                          check, the Arch Wiki warning printed verbatim before any change,"
+    echo "                          explicit ACCEPT + KEYVERIFIED (signed; you import/sign the key"
+    echo "                          yourself — keys are NEVER auto-imported) or UNSIGNOK (unsigned;"
+    echo "                          SigLevel forced to PackageOptional) confirmations, one repo per"
+    echo "                          run, a post-add pacman -Sy validation with rollback, and full state"
+    echo "                          logging. 'health --auto-disable' removes faulty repos (the WebUI"
+    echo "                          failsafe); --dry-run prints what would be written."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -52620,6 +54147,18 @@ elif [[ "${1:-}" == "--copr-search" ]]; then
     trap - ERR
     set +e
     run_copr_search_only "$@"
+    rc=$?
+    set -e
+    exit $rc
+elif [[ "${1:-}" == "--arch-repos" || "${1:-}" == "--setup-arch-repos" ]]; then
+    log_info "Arch unofficial repository manager (safety-gated) helper-only mode requested"
+    shift || true
+    # Like --copr-search: helper-only mode may intentionally return non-zero
+    # (e.g. a refused failcheck), so disable set -e and the ERR trap while
+    # running and propagate the exit code directly.
+    trap - ERR
+    set +e
+    run_arch_repos_only "$@"
     rc=$?
     set -e
     exit $rc
@@ -64985,13 +66524,183 @@ def _launch_quick_action_shared(
     }
 
 
+_ARCH_REPOS_CACHE = None
+_ARCH_REPOS_CACHE_TS = 0.0
+
+
+def _arch_repos_listing_cached() -> dict:
+    """Cache the `--arch-repos list --json` output for a short period.
+
+    The listing is produced by the helper CLI itself (read-only local probes:
+    /etc/pacman.conf sections + the last health TSV; no network), so the API
+    and the CLI always agree on the catalog + current state.
+    """
+    global _ARCH_REPOS_CACHE, _ARCH_REPOS_CACHE_TS
+    now = time.time()
+    if _ARCH_REPOS_CACHE is not None and (now - _ARCH_REPOS_CACHE_TS) < 60:
+        return _ARCH_REPOS_CACHE
+    data: dict = {}
+    try:
+        rc, out = _run_cmd([HELPER_BIN, "--arch-repos", "list", "--json"], timeout_s=25, log=None)
+        if rc == 0 and out:
+            for ln in (out or "").splitlines():
+                s = ln.strip()
+                if s.startswith("{"):
+                    try:
+                        cand = json.loads(s)
+                        if isinstance(cand, dict):
+                            data = cand
+                            break
+                    except Exception:
+                        continue
+    except Exception:
+        data = {}
+    _ARCH_REPOS_CACHE = data
+    _ARCH_REPOS_CACHE_TS = now
+    return _ARCH_REPOS_CACHE
+
+
+def _arch_repos_quick_actions() -> dict:
+    """Build the arch-repos quick-action entries from the helper's catalog listing.
+
+    IMPORTANT: everything is derived from the helper's own catalog output —
+    the browser can never inject arbitrary commands, URLs or repo names.
+    Per-repo enable entries carry needs_confirm + the ARCHREPOENABLE phrase,
+    and their explain/warning text carries the Key-ID and the verbatim Arch
+    Wiki warning, so the WebUI confirmation covers exactly what the CLI
+    would confirm interactively (ACCEPT + KEYVERIFIED / UNSIGNOK).
+    """
+    out: dict = {}
+    data = _arch_repos_listing_cached() or {}
+    if not bool(data.get("supported", False)):
+        # Not an Arch-family system: no arch-repos quick actions at all (the
+        # helper CLI gates itself to the Arch family and exits cleanly
+        # everywhere else).
+        return out
+    warn = str(data.get("warning_text", "") or "")
+    cpu_level = 0
+    try:
+        cpu_level = int(data.get("cpu_level", 0) or 0)
+    except Exception:
+        cpu_level = 0
+
+    # Read-only catalog + enablement listing (no confirmation needed).
+    out["arch-repos-status"] = {
+        "title": "Arch Repos: Catalog + Status",
+        "cmd": [HELPER_BIN, "--arch-repos", "list"],
+        "timeout_s": 60,
+        "needs_confirm": False,
+        "phrase": "",
+        "explain": "Lists the unofficial Arch user repository catalog (the signed/unsigned lists from the Arch Wiki page) with each repository's class (signed/unsigned), Key-ID, stored Server URL and current enablement. Read-only; changes nothing.",
+    }
+
+    # Read-only pacman -Sy based health check.
+    out["arch-repos-health"] = {
+        "title": "Arch Repos: Health Check",
+        "cmd": [HELPER_BIN, "--arch-repos", "health"],
+        "timeout_s": 15 * 60,
+        "needs_confirm": False,
+        "phrase": "",
+        "explain": "Runs the timeout-bounded pacman -Sy based health check of every enabled unofficial repository and records the result in the health log. Read-only report; run 'Auto-disable faulty' to remove repositories that fail to connect.",
+    }
+
+    # Failsafe: health check + auto-disable of faulty repositories.
+    out["arch-repos-auto-heal"] = {
+        "title": "Arch Repos: Auto-disable faulty",
+        "cmd": [HELPER_BIN, "--arch-repos", "health", "--auto-disable", "--yes"],
+        "timeout_s": 20 * 60,
+        "needs_confirm": True,
+        "phrase": "ARCHREPOHEAL",
+        "explain": "Runs the pacman -Sy based health check and automatically REMOVES every enabled unofficial repository that fails to connect or errors (pre-change backup of /etc/pacman.conf + a state-log entry per removal), so a broken repository never blocks system updates. Removed repositories can be re-enabled later with the full enable confirmations.",
+        "warning": warn or "Repositories are removed from /etc/pacman.conf when they fail the health check. Installed packages are NOT removed. A backup is written before any change.",
+    }
+
+    # Disable every currently enabled catalog repository.
+    out["arch-repos-disable-all"] = {
+        "title": "Arch Repos: Disable all enabled",
+        "cmd": [HELPER_BIN, "--arch-repos", "disable-all", "--yes"],
+        "timeout_s": 10 * 60,
+        "needs_confirm": True,
+        "phrase": "ARCHREPOSOFF",
+        "explain": "Removes every catalog-listed unofficial repository section that is currently enabled in /etc/pacman.conf (including the ALHP sections), with a pre-change backup. Installed packages are NOT removed.",
+        "warning": warn or "Every enabled unofficial repository section is removed from /etc/pacman.conf. A backup is written first.",
+    }
+
+    for r in (data.get("repos") or []):
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name", "") or "").strip()
+        if not name:
+            continue
+        signed = bool(r.get("signed", False))
+        enabled = bool(r.get("enabled", False))
+        url = str(r.get("url", "") or "").strip()
+        key = str(r.get("key", "") or "").strip()
+        note = str(r.get("note", "") or "").strip()
+        is_alhp = name.upper() == "ALHP"
+
+        if enabled:
+            out[f"arch-repos-disable:{name}"] = {
+                "title": f"Arch Repo: disable {name}",
+                "cmd": [HELPER_BIN, "--arch-repos", "disable", name, "--yes"],
+                "timeout_s": 5 * 60,
+                "needs_confirm": True,
+                "phrase": "ARCHREPODISABLE",
+                "explain": f"Removes the [{name}] section from /etc/pacman.conf (managed block or plain section; a pre-change backup is written). Installed packages from it are NOT removed.",
+                "warning": warn or "The repository section is removed from /etc/pacman.conf. A backup is written first.",
+            }
+            continue
+
+        if not url and not is_alhp:
+            # No verified catalog URL: no safe fixed command can be built; the
+            # WebUI shows a copy-only CLI hint for these repositories instead.
+            continue
+
+        if is_alhp:
+            lvl = "v4" if cpu_level >= 4 else ("v3" if cpu_level >= 3 else "v2")
+            explain = (
+                "Adds the ALHP optimised repositories ([core|extra|multilib]-x86-64-"
+                + lvl + ") to /etc/pacman.conf using /etc/pacman.d/alhp-mirrorlist. "
+                "The CPU microarchitecture level check runs first (this system reports x86-64-v"
+                + str(cpu_level) + "; unsupported levels are refused). alhp-mirrorlist and "
+                "alhp-keyring must already be installed by you from the AUR (this helper never "
+                "installs or imports them). By typing ARCHREPOENABLE you confirm you verified "
+                "ALHP's key handling yourself and accept the Arch Wiki warning below in full."
+            )
+        elif signed:
+            explain = (
+                f"Adds the [{name}] section to /etc/pacman.conf with SigLevel = PackageRequired and Server = {url}. "
+                + (f"Key-ID: {key}. " if key else "")
+                + "This helper NEVER imports or signs the key. By typing ARCHREPOENABLE you confirm: (1) you verified the Key-ID yourself and will import and locally sign it yourself, and (2) you accept the Arch Wiki warning below and take full responsibility."
+                + (f" Note: {note}" if note else "")
+            )
+        else:
+            explain = (
+                f"Adds the [{name}] section to /etc/pacman.conf with SigLevel FORCED to PackageOptional (signatures NOT checked — this repository is on the wiki's UNSIGNED list) and Server = {url}. "
+                + "By typing ARCHREPOENABLE you re-confirm you accept SigLevel = PackageOptional and the Arch Wiki warning below in full."
+                + (f" Note: {note}" if note else "")
+            )
+
+        out[f"arch-repos-enable:{name}"] = {
+            "title": f"Arch Repo: enable {name}",
+            "cmd": [HELPER_BIN, "--arch-repos", "enable", name, "--assume-yes", "--key-verified", "--unsigned-accepted"],
+            "timeout_s": 15 * 60,
+            "needs_confirm": True,
+            "phrase": "ARCHREPOENABLE",
+            "explain": explain,
+            "warning": warn or "Unofficial repositories are not tested by Arch developers; you take full responsibility for using them.",
+        }
+
+    return out
+
+
 def _quick_action_table() -> dict:
     """Return allowlisted quick actions.
 
     IMPORTANT: this must remain an allowlist. Do not accept arbitrary shell
     commands from the browser.
     """
-    return {
+    tbl = {
         # Read-only / safe
         "verify": {
             "title": "Verify & Fix",
@@ -65198,6 +66907,16 @@ def _quick_action_table() -> dict:
             "explain": "Installs pipx and shows how to manage Python CLI tools with pipx.",
         },
     }
+
+    # Arch unofficial repositories (--arch-repos; Arch family only): static
+    # status/health/failsafe/disables-all entries plus per-repo enable/disable
+    # entries generated from the helper's own catalog listing. See
+    # _arch_repos_quick_actions() above for the safety notes.
+    try:
+        tbl.update(_arch_repos_quick_actions())
+    except Exception:
+        pass
+    return tbl
 
 
 def _recover_quick_job(job_id: str) -> dict | None:
@@ -66124,8 +67843,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, history, AI, and streaming endpoints always require auth.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/") or path.startswith("/api/ai/") or path.startswith("/api/events/"):
+        # Snapper, self-update, system-update, scrub-ghost, quick-action, diag-logs, boot stats, history, AI, arch-repos, and streaming endpoints always require auth.
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/boot/") or path.startswith("/api/history/") or path.startswith("/api/ai/") or path.startswith("/api/arch-repos/") or path.startswith("/api/events/"):
             if not self._auth_ok():
                 try:
                     getattr(self.server, "_znh_log", lambda *_: None)("warn", f"Unauthorized GET {path} from {self.client_address[0]}")
@@ -68940,8 +70659,35 @@ class Handler(BaseHTTPRequestHandler):
                 "by_type": by_type,
             }, origin)
 
+        # --- Arch unofficial repositories (WebUI drawer; Arch family only) ---
+        # Runs the helper's own read-only catalog listing (local probes only:
+        # /etc/pacman.conf sections + the last health TSV; no network) and
+        # returns it as JSON. The per-repo enable/disable quick actions are
+        # built from the same listing via _arch_repos_quick_actions().
+        if path == "/api/arch-repos/list":
+            rc, out = _run_cmd(
+                [HELPER_BIN, "--arch-repos", "list", "--json"],
+                timeout_s=25,
+                log=getattr(self.server, "_znh_log", None),
+            )
+            data = None
+            if rc == 0 and out:
+                for ln in (out or "").splitlines():
+                    s = ln.strip()
+                    if s.startswith("{"):
+                        try:
+                            cand = json.loads(s)
+                            if isinstance(cand, dict):
+                                data = cand
+                                break
+                        except Exception:
+                            continue
+            if data is None:
+                return _json_response(self, 502, {"error": "arch-repos listing failed", "rc": rc}, origin)
+            return _json_response(self, 200, data, origin)
+
         # If we got here and the path is under an auth-required prefix, it's not implemented.
-        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/history/") or path.startswith("/api/ai/"):
+        if path.startswith("/api/snapper/") or path.startswith("/api/self-update/") or path.startswith("/api/system/") or path.startswith("/api/scrub/") or path.startswith("/api/quick/") or path.startswith("/api/diag-logs/") or path.startswith("/api/history/") or path.startswith("/api/ai/") or path.startswith("/api/arch-repos/"):
             return _json_response(self, 404, {"error": "not found"}, origin)
 
         if path == "/api/ping":
