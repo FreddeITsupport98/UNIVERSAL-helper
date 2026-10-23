@@ -197,7 +197,8 @@ require_contains "${source_text}" '"feat_arch_repos_healthy": ${json_feat_arch_r
 
 # --- 18) WebUI drawer card + per-repo quick-action wiring ---
 require_contains "${source_text}" 'id="arch-repos-drawer"' "Missing the Arch repos drawer element"
-require_contains "${source_text}" 'arch_repos_drawer_style="display:none;"' "Missing the drawer hidden style for non-Arch families"
+require_contains "${source_text}" 'arch_repos_notsupported_style="display:none;"' "Missing the non-Arch notice style default (hidden on Arch)"
+require_contains "${source_text}" 'arch_repos_toolbar_style="display:none;"' "Missing the non-Arch action-toolbar hidden style (v72: drawer always rendered, toolbar hidden on non-Arch)"
 require_contains "${source_text}" 'id="arch-repos-list"' "Missing the arch-repos list container"
 require_contains "${source_text}" 'id="arch-repos-warning"' "Missing the arch-repos warning banner element"
 require_contains "${source_text}" 'data-qa="arch-repos-auto-heal"' "Missing the Auto-disable faulty toolbar quick action button"

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 71 - Enterprise Edition: arch-repos enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 72 - Enterprise Edition: arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -13338,9 +13338,16 @@ generate_dashboard() {
             feat_arch_repos_install_class="feat-missing"
         fi
     fi
-    arch_repos_drawer_style="display:none;"
-    if [ "${feat_arch_repos_supported}" -eq 1 ] 2>/dev/null; then
-        arch_repos_drawer_style=""
+    # v72: the drawer is NO LONGER hidden on non-Arch families — it becomes an
+    # informational "Arch only" card so users get a clear in-WebUI message
+    # instead of a silently missing card (the old arch_repos_drawer_style
+    # hide was removed). Only the ACTION TOOLBAR is hidden (nothing can be
+    # applied on a non-Arch system) and a yellow notice is shown instead.
+    arch_repos_toolbar_style=""
+    arch_repos_notsupported_style="display:none;"
+    if [ "${feat_arch_repos_supported}" -ne 1 ] 2>/dev/null; then
+        arch_repos_toolbar_style="display:none;"
+        arch_repos_notsupported_style=""
     fi
 
     # Determine status color for a quick-glance badge.
@@ -14929,7 +14936,7 @@ generate_dashboard() {
 
       <!-- Arch unofficial repositories manager (Arch family only; --arch-repos). -->
       <!-- Hidden entirely on non-Arch systems via arch_repos_drawer_style. -->
-      <details id="arch-repos-drawer" style="margin-top: 16px;${arch_repos_drawer_style}">
+      <details id="arch-repos-drawer" style="margin-top: 16px;">
         <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Arch Unofficial Repositories (Arch only — safety-gated)</summary>
         <div style="margin-top: 12px; color: var(--muted); font-size: 0.9rem;">
           Every repository in the catalog is listed below with its class (signed/unsigned), Key-ID, stored Server URL,
@@ -14943,7 +14950,15 @@ generate_dashboard() {
           'Auto-disable faulty' is the failsafe: it removes repositories that fail to connect so a broken repo never
           blocks system updates.
         </div>
-        <div style="margin-top: 10px; display:flex; gap:10px; flex-wrap:wrap;">
+        <div id="arch-repos-notsupported" style="margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(250,204,21,0.45); background: rgba(250,204,21,0.10); color: var(--text); font-size: 0.88rem; font-weight: 850;${arch_repos_notsupported_style}">
+          ⚠ Arch Repos is ARCH-ONLY: the unofficial Arch user repositories configure /etc/pacman.conf and the pacman
+          keyring, which only exist on Arch-family systems (ID=arch or ID_LIKE contains arch). This system is not one,
+          so every action here is disabled and nothing can be enabled — the catalog below stays browsable for reference
+          only. Trying to apply from the CLI or this WebUI returns a clear error instead. On the Fedora family use Copr
+          instead (dnf copr-search &lt;query&gt;), and for multimedia/codec repositories on any distro family use the
+          Media Repos module (sudo zypper-auto-helper --media-repos).
+        </div>
+        <div style="margin-top: 10px; display:flex; gap:10px; flex-wrap:wrap;${arch_repos_toolbar_style}">
           <button class="pill" type="button" id="arch-repos-refresh-btn" title="Reload the repository list from the localhost API">Refresh list</button>
           <button class="cmd-btn" type="button" data-qa="arch-repos-enable-all" data-qa-copy="sudo zypper-auto-helper --arch-repos enable-all --import-keys --yes --key-verified" data-qa-danger="1" title="Bulk setup: enable every catalog repository with a verified URL AND import + locally sign all keys for you (per-repo failure rollback; confirmation required)">
             <span class="cmd-label">Enable all + import keys</span>
@@ -34781,6 +34796,13 @@ generate_dashboard() {
                 b.addEventListener('click', function(ev) {
                     try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (e0) {}
                     var mod = String(b.getAttribute('data-module') || '').trim();
+                    // v72: Arch Repos on a NON-ARCH family — explain instead of
+                    // launching anything, and open the informational card.
+                    if (mod === 'arch-repos' && window._znhArchReposSupported !== true) {
+                        toast('Arch Repos — Arch family only', 'The unofficial Arch user repositories apply only to Arch-family systems (ID=arch or ID_LIKE contains arch). This system is not one, so nothing can be enabled — opened the Arch Repos card for details.', 'err');
+                        try { var _arDrawerEl = document.getElementById('arch-repos-drawer'); if (_arDrawerEl) { _arDrawerEl.open = true; } } catch (eARD) {}
+                        return;
+                    }
                     // Green badge (installed + healthy): show info overlay
                     if (b.classList.contains('feat-installed')) {
                         var _inf = _modInfoMap[mod] || {};
@@ -34872,7 +34894,11 @@ generate_dashboard() {
             }
         }
         if (!d || !d.supported) {
-            listEl.textContent = '(not supported on this system — Arch family only)';
+            // v72: clear in-WebUI message about Arch on non-Arch systems
+            // (the yellow notice above explains it in detail; this line names
+            // the detected family dynamically from the API payload).
+            var fam = String(d.family || 'unknown');
+            listEl.textContent = '(Arch family only — this system reports family: ' + fam + '. Nothing can be enabled or applied here; see the yellow notice above. On the Fedora family, use Copr instead: dnf copr-search <query>.)';
             return;
         }
         var rows = (d.repos && d.repos.length) ? d.repos : [];
@@ -35006,6 +35032,9 @@ generate_dashboard() {
         if (typeof _api !== 'function') return;
         _api('/api/arch-repos/list').then(function(r) {
             _znhArchReposData = r || {};
+            // v72: remember the support state so the module-badge click can
+            // explain (instead of launching an action) on non-Arch systems.
+            try { window._znhArchReposSupported = !!(_znhArchReposData && _znhArchReposData.supported); } catch (eARs0) {}
             _znhArchReposRender();
         }).catch(function(err) {
             var msg = (err && err.message) ? err.message : 'API not reachable';
@@ -35734,6 +35763,8 @@ generate_dashboard() {
             var _arIns = !!(d.feat_arch_repos_installed);
             var _arHea = !!(d.feat_arch_repos_healthy);
             setText('feat-arch-repos-val', _arSup ? (_arIns ? (_arHea ? 'READY' : 'ATTN') : 'NONE') : 'N/A');
+            // v72: badge-click gating — remember the support state.
+            window._znhArchReposSupported = _arSup;
         } catch (eARv) {}
 
         // Module dot color: green=healthy, yellow=installed but unhealthy, red=missing
@@ -53379,9 +53410,48 @@ run_arch_repos_only() {
     [ "${_ar_cmd}" = "history" ] && _ar_history=1
 
     # --- FC1: Arch-family gate (ID=arch or ID_LIKE contains arch) ---
+    # v72 split behaviour: READ-ONLY subcommands (list/status/history + --json)
+    # keep the informational clean exit (rc=0), but APPLYING subcommands
+    # (enable / enable-all / disable / disable-all / health) on a non-Arch
+    # family are a clear ERROR (rc=1): the user asked to change Arch pacman
+    # state (/etc/pacman.conf + the pacman keyring) on a system that has
+    # neither — they get the exact reason, what was detected, and what to use
+    # on their distro instead.
     local _ar_family
     _ar_family="$(znh_media_repos_detect_family)"
     if [ "${_ar_family}" != "arch" ]; then
+        local _ar_os_name="" _ar_os_id="" _ar_hint=""
+        if [ -r "${ZNH_OS_RELEASE_FILE:-/etc/os-release}" ]; then
+            _ar_os_name="$(sed -n 's/^NAME=//p' "${ZNH_OS_RELEASE_FILE}" 2>/dev/null | head -n1 | tr -d '\"' || true)"
+            _ar_os_id="$(sed -n 's/^ID=//p' "${ZNH_OS_RELEASE_FILE}" 2>/dev/null | head -n1 | tr -d '\"' || true)"
+        fi
+        case "${_ar_family}" in
+            fedora)
+                _ar_hint="On the Fedora family, use Copr for third-party repositories instead: dnf copr-search <query>  (or: zypper-auto-helper --copr-search <query>)."
+                ;;
+            suse)
+                _ar_hint="On openSUSE, use zypper addrepo / opi for third-party repositories instead (multimedia/codec repos: sudo zypper-auto-helper --media-repos)."
+                ;;
+            debian)
+                _ar_hint="On Debian/Ubuntu/Mint, use their documented add-apt-repository flows instead (multimedia/codec repos: sudo zypper-auto-helper --media-repos)."
+                ;;
+            *)
+                _ar_hint="Multimedia/codec repository setup works cross-distro: sudo zypper-auto-helper --media-repos."
+                ;;
+        esac
+        case "${_ar_cmd}" in
+            enable|enable-all|setup-all|disable|disable-all|health)
+                # v72: APPLYING on a non-Arch family is an ERROR, not a silent skip.
+                echo "" | tee -a "${LOG_FILE}"
+                echo "ERROR: --arch-repos ${_ar_cmd} can only run on the ARCH family — it configures /etc/pacman.conf and the pacman keyring, which do not apply to this system." | tee -a "${LOG_FILE}"
+                echo "Detected: ${_ar_os_name:-unknown distro}${_ar_os_id:+ (ID=${_ar_os_id})}, family: ${_ar_family}. Nothing was changed." | tee -a "${LOG_FILE}"
+                echo "The unofficial Arch user repositories — and this whole --arch-repos module, including its WebUI card — apply ONLY to Arch-family systems (ID=arch or ID_LIKE contains arch)." | tee -a "${LOG_FILE}"
+                echo "${_ar_hint}" | tee -a "${LOG_FILE}"
+                log_error "FAILCHECK (Arch family gate): refusing to '${_ar_cmd}' Arch repositories on the ${_ar_family} family (${_ar_os_name:-unknown}); nothing was changed."
+                update_status "REFUSED: arch-repos ${_ar_cmd} on non-Arch family (${_ar_family})"
+                return 1
+                ;;
+        esac
         log_info "Unofficial Arch repositories are an Arch-family ecosystem (detected family: ${_ar_family:-none/unsupported} via /etc/os-release ID/ID_LIKE)."
         if [ "${_ar_json}" -eq 1 ] && [ "${_ar_cmd}" = "list" ]; then
             # Machine-readable clean exit for the WebUI/API on other distros.
@@ -66954,9 +67024,19 @@ def _arch_repos_quick_actions() -> dict:
     out: dict = {}
     data = _arch_repos_listing_cached() or {}
     if not bool(data.get("supported", False)):
-        # Not an Arch-family system: no arch-repos quick actions at all (the
-        # helper CLI gates itself to the Arch family and exits cleanly
-        # everywhere else).
+        # Not an Arch-family system: NO apply actions exist at all (and the
+        # helper CLI refuses apply subcommands with a clear v72 error on
+        # non-Arch families), but keep ONE read-only status action so any API
+        # consumer / stale browser tab gets the informative catalog listing
+        # instead of a bare 'unsupported action'.
+        out["arch-repos-status"] = {
+            "title": "Arch Repos: Arch family only",
+            "cmd": [HELPER_BIN, "--arch-repos", "list"],
+            "timeout_s": 60,
+            "needs_confirm": False,
+            "phrase": "",
+            "explain": "Read-only: shows why the Arch unofficial repositories do not apply here — the module targets the Arch family only (ID=arch or ID_LIKE containing arch; /etc/pacman.conf and the pacman keyring do not exist on this system). Apply subcommands (enable / enable-all / disable / disable-all / health) are refused with a clear error on non-Arch families; nothing can be applied from this WebUI either.",
+        }
         return out
     warn = str(data.get("warning_text", "") or "")
     cpu_level = 0
