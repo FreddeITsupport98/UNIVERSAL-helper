@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 72 - Enterprise Edition: arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 73 - Enterprise Edition: ALL Arch-family distros detect as pacman (expanded IDs: garuda/artix/cachyos/parabola/hyperbola + /etc/pacman.conf filesystem hint beats PATH probes — kills the dnf false positive) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -36,6 +36,16 @@ fi
 SYSTEM_PKG_MANAGER=""
 
 detect_system_package_manager() {
+    # v73: ALL pacman-based (Arch-family) distros must detect as pacman —
+    # verified online: garuda/artix/cachyos/parabola/hyperbola etc. all use
+    # ID=<derivative> (some Garuda installs even ship WITHOUT ID_LIKE, which
+    # Garuda's own hooks package patches in), and dnf is packaged for Arch
+    # (AUR/Chaotic), so the old PATH-probe fallback could false-positive a
+    # pacman distro as dnf when dnf happened to be installed. Fixes, in order:
+    # (1) every known Arch-family ID maps to pacman directly; (2) ID_LIKE
+    # still catches anything else arch-like; (3) FILESYSTEM hints are checked
+    # BEFORE PATH probes — /etc/pacman.conf only exists on pacman distros,
+    # making pacman win regardless of what other PM binaries are installed.
     local id id_like
     id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
     id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
@@ -50,7 +60,7 @@ detect_system_package_manager() {
         fedora|rhel|centos|rocky|almalinux|ol|nobara)
             SYSTEM_PKG_MANAGER="dnf"
             ;;
-        arch|manjaro|endeavouros|garuda)
+        arch|archarm|manjaro|endeavouros|garuda|artix|cachyos|parabola|hyperbola|archbang|archcraft|rebornos)
             SYSTEM_PKG_MANAGER="pacman"
             ;;
     esac
@@ -70,6 +80,21 @@ detect_system_package_manager() {
                 SYSTEM_PKG_MANAGER="pacman"
                 ;;
         esac
+    fi
+
+    if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
+        # Filesystem hints (stronger than PATH probes): /etc/pacman.conf only
+        # exists on pacman-based distros, so pacman can never be beaten by an
+        # unrelated dnf/apt/zypper binary that happens to be installed.
+        if [ -f /etc/pacman.conf ]; then
+            SYSTEM_PKG_MANAGER="pacman"
+        elif [ -d /etc/zypp ]; then
+            SYSTEM_PKG_MANAGER="zypper"
+        elif [ -f /etc/dnf/dnf.conf ] || [ -d /etc/dnf ] || [ -d /etc/yum ]; then
+            SYSTEM_PKG_MANAGER="dnf"
+        elif [ -d /etc/apt ]; then
+            SYSTEM_PKG_MANAGER="apt"
+        fi
     fi
 
     if [ -z "${SYSTEM_PKG_MANAGER}" ]; then
@@ -14952,7 +14977,8 @@ generate_dashboard() {
         </div>
         <div id="arch-repos-notsupported" style="margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(250,204,21,0.45); background: rgba(250,204,21,0.10); color: var(--text); font-size: 0.88rem; font-weight: 850;${arch_repos_notsupported_style}">
           ⚠ Arch Repos is ARCH-ONLY: the unofficial Arch user repositories configure /etc/pacman.conf and the pacman
-          keyring, which only exist on Arch-family systems (ID=arch or ID_LIKE contains arch). This system is not one,
+          keyring, which only exist on Arch-family (pacman-based) systems: an Arch-family ID (arch, garuda, manjaro,
+          endeavouros, artix, cachyos, parabola, hyperbola, ...) or ID_LIKE containing arch. This system is not one,
           so every action here is disabled and nothing can be enabled — the catalog below stays browsable for reference
           only. Trying to apply from the CLI or this WebUI returns a clear error instead. On the Fedora family use Copr
           instead (dnf copr-search &lt;query&gt;), and for multimedia/codec repositories on any distro family use the
@@ -51443,7 +51469,10 @@ znh_media_repos_detect_family() {
             printf '%s\n' "fedora"
             return 0
             ;;
-        arch)
+        # v73: ALL Arch-family (pacman-based) IDs detect as "arch" directly —
+        # some Arch derivatives (verified: Garuda hooks even patch in a MISSING
+        # ID_LIKE=arch on some installs) do not rely on ID_LIKE at all.
+        arch|archarm|manjaro|endeavouros|garuda|artix|cachyos|parabola|hyperbola|archbang|archcraft|rebornos)
             printf '%s\n' "arch"
             return 0
             ;;
@@ -52711,7 +52740,9 @@ for it in items:
 # default and nothing is enabled without explicit confirmation.
 #
 # FAILCHECKS (each one aborts BEFORE /etc/pacman.conf is touched):
-#   FC1  Arch-family gate: /etc/os-release must report ID=arch or an
+#   FC1  Arch-family gate: /etc/os-release must report an Arch-family ID
+#        (arch, garuda, manjaro, endeavouros, artix, cachyos, parabola,
+#        hyperbola, ... — ALL pacman-based distros, verified online) or an
 #        ID_LIKE containing arch (shared family detector). Other families
 #        exit cleanly with a message; nothing is changed.
 #   FC2  HTTPS-only: a repository whose Server URL is not https:// is refused
@@ -53409,7 +53440,7 @@ run_arch_repos_only() {
     [ -n "${_ar_cmd}" ] || _ar_cmd="list"
     [ "${_ar_cmd}" = "history" ] && _ar_history=1
 
-    # --- FC1: Arch-family gate (ID=arch or ID_LIKE contains arch) ---
+    # --- FC1: Arch-family gate (any Arch-family ID or ID_LIKE contains arch) ---
     # v72 split behaviour: READ-ONLY subcommands (list/status/history + --json)
     # keep the informational clean exit (rc=0), but APPLYING subcommands
     # (enable / enable-all / disable / disable-all / health) on a non-Arch
@@ -53445,7 +53476,7 @@ run_arch_repos_only() {
                 echo "" | tee -a "${LOG_FILE}"
                 echo "ERROR: --arch-repos ${_ar_cmd} can only run on the ARCH family — it configures /etc/pacman.conf and the pacman keyring, which do not apply to this system." | tee -a "${LOG_FILE}"
                 echo "Detected: ${_ar_os_name:-unknown distro}${_ar_os_id:+ (ID=${_ar_os_id})}, family: ${_ar_family}. Nothing was changed." | tee -a "${LOG_FILE}"
-                echo "The unofficial Arch user repositories — and this whole --arch-repos module, including its WebUI card — apply ONLY to Arch-family systems (ID=arch or ID_LIKE contains arch)." | tee -a "${LOG_FILE}"
+                echo "The unofficial Arch user repositories — and this whole --arch-repos module, including its WebUI card — apply ONLY to Arch-family (pacman-based) systems: an Arch-family ID (arch, garuda, manjaro, endeavouros, artix, cachyos, parabola, hyperbola, ...) or ID_LIKE containing arch." | tee -a "${LOG_FILE}"
                 echo "${_ar_hint}" | tee -a "${LOG_FILE}"
                 log_error "FAILCHECK (Arch family gate): refusing to '${_ar_cmd}' Arch repositories on the ${_ar_family} family (${_ar_os_name:-unknown}); nothing was changed."
                 update_status "REFUSED: arch-repos ${_ar_cmd} on non-Arch family (${_ar_family})"
@@ -67035,7 +67066,7 @@ def _arch_repos_quick_actions() -> dict:
             "timeout_s": 60,
             "needs_confirm": False,
             "phrase": "",
-            "explain": "Read-only: shows why the Arch unofficial repositories do not apply here — the module targets the Arch family only (ID=arch or ID_LIKE containing arch; /etc/pacman.conf and the pacman keyring do not exist on this system). Apply subcommands (enable / enable-all / disable / disable-all / health) are refused with a clear error on non-Arch families; nothing can be applied from this WebUI either.",
+            "explain": "Read-only: shows why the Arch unofficial repositories do not apply here — the module targets the Arch (pacman-based) family only: an Arch-family ID (arch, garuda, manjaro, endeavouros, artix, cachyos, parabola, hyperbola, ...) or ID_LIKE containing arch. /etc/pacman.conf and the pacman keyring do not exist on this system. Apply subcommands (enable / enable-all / disable / disable-all / health) are refused with a clear error on non-Arch families; nothing can be applied from this WebUI either.",
         }
         return out
     warn = str(data.get("warning_text", "") or "")
