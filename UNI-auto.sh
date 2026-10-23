@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 75 - Enterprise Edition: nemesis_repo (erikdubois, verified from the upstream README: https Server + Kiro signing key 149ABD0C3A0563EE) added to the arch-repos catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 76 - Enterprise Edition: arch-repos key import goes through the keyserver WEB endpoint first (curl + pacman-key --add over HTTPS 443 — bypasses the broken dirmngr/HKP path that failed every fetch on Garuda while the same keyserver's web endpoint answered every key; live-verified), imports BEFORE writing (failed import = nothing to roll back), and bulk enable-all validates with ONE final pacman -Sy instead of one per repo (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -52835,7 +52835,7 @@ ZNH_ARCH_REPO_SPECS=(
     'avr|signed|https://bouchaud.org/packages/$repo/$arch|157B08346330029C|Kubernetes-related AUR builds plus additional personal packages'
     'bioarchlinux|signed|https://repo.bioarchlinux.org/$arch|B1F96021DB62254D|Biological software repository incl. R CRAN binary packages'
     'blackeagle-pre-community|signed|https://repo.herecura.eu/$repo/$arch|in the archlinux keyring|Testing of packages maintained by a Package Maintainer before they move to extra'
-    'build.kilabit.info|signed|https://build.kilabit.info/aur|4A5360B500C9C4F0|AUR builds by shulhan'
+    'build.kilabit.info|signed|https://build.kilabit.info/aur|4A5360B500C9C4F0|AUR builds by shulhan (host observed unreachable 2026-10; the enable-all validation skips it automatically if it is still down)'
     'chaotic-aur|signed|https://geo-mirror.chaotic.cx/$repo/$arch|FBA220DFC880C036|Auto-built AUR packages, updated hourly, several mirrors worldwide, x86_64 only (see also aur.chaotic.cx)'
     'coderkun-aur|signed|https://arch.suruatoel.xyz/$repo/$arch/|39E27199A6BEE374|AUR packages with random software, package deltas, database signing'
     'desolve|signed||see the wiki page|Binary R cran collection (the wiki marks it deprecated; use bioarchlinux)'
@@ -53348,19 +53348,48 @@ znh_arch_repos_import_key() {
             log_info "[arch-repos] ${_arki_repo} key ${_arki_key} is already in the pacman keyring; only ensuring the local signature..."
         else
             local _arki_ks _arki_recv_ok=0
-            local _arki_ks_list="${ZNH_ARCH_REPOS_KEYSERVERS:-hkps://keyserver.ubuntu.com hkp://keyserver.ubuntu.com hkps://keys.openpgp.org}"
-            for _arki_ks in ${_arki_ks_list}; do
-                log_info "[arch-repos] importing the ${_arki_repo} key ${_arki_key} via ${_arki_ks} (pacman-key --recv-keys)..."
-                # Flush dirmngr's cached failure state between attempts.
-                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pkill -x dirmngr >/dev/null 2>&1 || true
-                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --keyserver "${_arki_ks}" --recv-keys "${_arki_id}"; then
-                    _arki_recv_ok=1
-                    break
+            # v76 WEB-ENDPOINT FIRST (bypasses dirmngr entirely — the proven
+            # root cause on the Garuda run: EVERY hkps/hkp pacman-key fetch
+            # failed with "Server indicated a failure" while the same
+            # keyserver's HTTPS WEB endpoint answered every key over plain
+            # curl, port 443 — the box's gpg/dirmngr HKP path is broken, not
+            # the keys and not the keyserver). curl the armored key from
+            # https://keyserver.ubuntu.com/pks/lookup?op=get (Hockeypuck;
+            # accepts 0x<16-char-long-ID>) and import it with pacman-key --add.
+            if command -v curl >/dev/null 2>&1; then
+                local _arki_web_tmp _arki_web_arm
+                _arki_web_tmp="$(mktemp)"
+                _arki_web_arm="${_arki_web_tmp}.arm"
+                if curl -sf --max-time 30 --connect-timeout 10 \
+                    "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${_arki_id}" \
+                    -o "${_arki_web_tmp}" 2>/dev/null \
+                   && sed -n '/-----BEGIN PGP PUBLIC KEY BLOCK-----/,/-----END PGP PUBLIC KEY BLOCK-----/p' \
+                        "${_arki_web_tmp}" >"${_arki_web_arm}" 2>/dev/null \
+                   && grep -q "BEGIN PGP PUBLIC KEY" "${_arki_web_arm}" 2>/dev/null; then
+                    log_info "[arch-repos] importing the ${_arki_repo} key ${_arki_key} via the keyserver.ubuntu.com WEB endpoint (curl + pacman-key --add; bypasses dirmngr)..."
+                    if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --add "${_arki_web_arm}"; then
+                        _arki_recv_ok=1
+                    fi
                 fi
-                log_error "[arch-repos] keyserver ${_arki_ks} failed for ${_arki_repo}; trying the next one..."
-            done
+                rm -f "${_arki_web_tmp}" "${_arki_web_arm}" 2>/dev/null || true
+            fi
             if [ "${_arki_recv_ok}" -ne 1 ]; then
-                log_error "[arch-repos] pacman-key --recv-keys failed for ${_arki_repo} (${_arki_key}) on ALL keyservers (${_arki_ks_list}). The key may not be published on any keyserver, or your network blocks them (verify manually with: sudo pacman-key --keyserver hkps://keyserver.ubuntu.com --recv-keys ${_arki_id})."
+                # HKP fallback loop (pacman-key --recv-keys) for hosts where the
+                # web endpoint is blocked but dirmngr works.
+                local _arki_ks_list="${ZNH_ARCH_REPOS_KEYSERVERS:-hkps://keyserver.ubuntu.com hkp://keyserver.ubuntu.com hkps://keys.openpgp.org}"
+                for _arki_ks in ${_arki_ks_list}; do
+                    log_info "[arch-repos] importing the ${_arki_repo} key ${_arki_key} via ${_arki_ks} (pacman-key --recv-keys)..."
+                    # Flush dirmngr's cached failure state between attempts.
+                    ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pkill -x dirmngr >/dev/null 2>&1 || true
+                    if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --keyserver "${_arki_ks}" --recv-keys "${_arki_id}"; then
+                        _arki_recv_ok=1
+                        break
+                    fi
+                    log_error "[arch-repos] keyserver ${_arki_ks} failed for ${_arki_repo}; trying the next one..."
+                done
+            fi
+            if [ "${_arki_recv_ok}" -ne 1 ]; then
+                log_error "[arch-repos] key import failed for ${_arki_repo} (${_arki_key}) — web endpoint AND all keyservers failed. Live-verified fallback commands: curl -s 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${_arki_id}' | sudo pacman-key --add /dev/stdin   (or: sudo pacman-key --keyserver hkps://keyserver.ubuntu.com --recv-keys ${_arki_id})"
                 return 1
             fi
         fi
@@ -54036,68 +54065,109 @@ run_arch_repos_only() {
                     _area_body="${_area_body}\nServer = https://mirrors.uni-plovdiv.net/archzfs/experimental"
                 fi
             fi
+            # v76 IMPORT BEFORE WRITE (with --import-keys): a failed key
+            # import means the section is NEVER written — no rollback needed,
+            # and no wasted pacman.conf churn. Much faster progression.
+            if [ "${_ar_import_keys}" -eq 1 ]; then
+                if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}"; then
+                    log_error "[arch-repos] key import for ${_area_fname} failed; skipping WITHOUT writing its section (smart continue)."
+                    _area_failed+=("${_area_fname}")
+                    continue
+                fi
+            fi
             if ! znh_arch_repos_append_block "${_area_body}"; then
                 log_error "[arch-repos] failed to write the ${_area_fname} section; skipping it (smart continue)."
                 _area_failed+=("${_area_fname}")
                 continue
             fi
-            # Optional key import (v71 --import-keys): failure rolls back just
-            # this repository and the run continues.
-            if [ "${_ar_import_keys}" -eq 1 ]; then
-                if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}"; then
-                    log_error "[arch-repos] key import for ${_area_fname} failed; rolling its section back (smart continue)."
-                    if [ "${_area_fname}" = "ALHP" ]; then
-                        for _area_sec in core extra multilib; do
-                            znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_lvl}" >/dev/null 2>&1 || true
-                        done
-                    else
-                        znh_arch_repos_remove_section "${_area_fname}" 1 >/dev/null 2>&1 || true
-                        znh_arch_repos_remove_section "${_area_fname}" 0 >/dev/null 2>&1 || true
-                    fi
-                    _area_failed+=("${_area_fname}")
-                    continue
-                fi
-            fi
-            # FC9-style validation; on failure roll back ONLY this repository's
-            # freshly added section (NOT a backup restore — that would undo
-            # earlier successes in the same bulk run).
-            _area_sync_out=""
-            _area_sync_rc=0
-            _area_sec_esc="${_area_fname//./\\.}"
-            if command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
-                log_info "[arch-repos] Validating with ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
-                _area_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
-                if printf '%s' "${_area_sync_out}" | grep -Eiq "failed to synchroni[sz]e"; then
-                    _area_sync_rc=1
-                fi
-                if [ "${_area_sync_rc}" -eq 0 ] && printf '%s' "${_area_sync_out}" | grep -Eiq "(error|fail).*${_area_sec_esc}|${_area_sec_esc}.*(error|fail)"; then
-                    _area_sync_rc=1
-                fi
-                if [ "${_area_sync_rc}" -eq 0 ] && [ "${_area_fname}" = "ALHP" ] && printf '%s' "${_area_sync_out}" | grep -Eiq "(error|fail).*alhp|alhp.*(error|fail)"; then
-                    _area_sync_rc=1
-                fi
-            else
-                log_warn "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; skipping the pacman -Sy validation (fixture/test mode)."
-            fi
-            if [ "${_area_sync_rc}" -ne 0 ]; then
-                echo "${_area_sync_out}" | tail -n 10 | tee -a "${LOG_FILE}"
-                log_error "[arch-repos] FAILCHECK (post-add validation): ${_area_fname} failed after being added; removing its section (smart continue)."
-                if [ "${_area_fname}" = "ALHP" ]; then
-                    for _area_sec in core extra multilib; do
-                        znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_lvl}" >/dev/null 2>&1 || true
-                    done
-                else
-                    znh_arch_repos_remove_section "${_area_fname}" 1 >/dev/null 2>&1 || true
-                    znh_arch_repos_remove_section "${_area_fname}" 0 >/dev/null 2>&1 || true
-                fi
-                znh_arch_repos_state_log "${_area_fname}" "rolled-back" "enable-all post-add validation failed"
-                _area_failed+=("${_area_fname}")
-                continue
-            fi
-            log_success "[arch-repos] ${_area_fname} enabled and validated."
-            znh_arch_repos_state_log "${_area_fname}" "enabled" "${_area_fclass} (enable-all)"
+            # v76 DEFERRED VALIDATION: the whole bulk run is validated with ONE
+            # final pacman -Sy AFTER the loop (14 syncs -> 1; pacman errors name
+            # the failing repository, so failures are still attributed and only
+            # those sections are rolled back). This is the big speedup.
             _area_done+=("${_area_fname}")
         done
+        # --- v76 ONE final pacman -Sy validation for the entire bulk run ---
+        if [ "${#_area_done[@]}" -gt 0 ] && command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
+            local _area_v_out _area_v_rc
+            log_info "[arch-repos] Validating ALL ${#_area_done[@]} newly enabled repos with ONE ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
+            _area_v_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+            _area_v_rc=0
+            if printf '%s' "${_area_v_out}" | grep -Eiq "failed to synchroni[sz]e"; then
+                _area_v_rc=1
+            fi
+            if [ "${_area_v_rc}" -eq 0 ]; then
+                local _area_v_esc
+                for _area_fname in "${_area_done[@]}"; do
+                    _area_v_esc="${_area_fname//./\\.}"
+                    if printf '%s' "${_area_v_out}" | grep -Eiq "(error|fail).*${_area_v_esc}|${_area_v_esc}.*(error|fail)"; then
+                        _area_v_rc=1
+                        break
+                    fi
+                done
+            fi
+            if [ "${_area_v_rc}" -ne 0 ]; then
+                echo "${_area_v_out}" | tail -n 15 | tee -a "${LOG_FILE}"
+                log_error "[arch-repos] FAILCHECK (post-add validation): the final pacman -Sy failed; attributing failures by repository name and rolling back only those..."
+                # Capture the ALHP level ONCE before removing any of its sections.
+                local _area_alhp_lvl_rb
+                _area_alhp_lvl_rb="$(znh_arch_repos_alhp_level)"
+                [ -n "${_area_alhp_lvl_rb}" ] || _area_alhp_lvl_rb="v2"
+                # Which of OUR repos are named in the error output?
+                local _area_bad_any=0 _area_v_esc2 _area_dn _area_keep _area_is_bad
+                local -a _area_done_keep=()
+                for _area_dn in "${_area_done[@]}"; do
+                    _area_is_bad=0
+                    if [ "${_area_dn}" = "ALHP" ]; then
+                        if printf '%s' "${_area_v_out}" | grep -Eiq "(error|fail).*alhp|alhp.*(error|fail)"; then
+                            _area_is_bad=1
+                        fi
+                    else
+                        _area_v_esc2="${_area_dn//./\\.}"
+                        if printf '%s' "${_area_v_out}" | grep -Eiq "(error|fail).*${_area_v_esc2}|${_area_v_esc2}.*(error|fail)"; then
+                            _area_is_bad=1
+                        fi
+                    fi
+                    if [ "${_area_is_bad}" -eq 1 ]; then
+                        _area_bad_any=1
+                        log_error "[arch-repos] ${_area_dn} named in the sync errors; removing its section (smart continue)."
+                        if [ "${_area_dn}" = "ALHP" ]; then
+                            for _area_sec in core extra multilib; do
+                                znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_alhp_lvl_rb}" >/dev/null 2>&1 || true
+                            done
+                        else
+                            znh_arch_repos_remove_section "${_area_dn}" 1 >/dev/null 2>&1 || true
+                            znh_arch_repos_remove_section "${_area_dn}" 0 >/dev/null 2>&1 || true
+                        fi
+                        znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed"
+                        _area_failed+=("${_area_dn}")
+                    else
+                        _area_done_keep+=("${_area_dn}")
+                    fi
+                done
+                _area_done=("${_area_done_keep[@]+"${_area_done_keep[@]}"}")
+                if [ "${_area_bad_any}" -eq 0 ]; then
+                    # General failure naming none of ours: conservative — roll
+                    # back ALL newly enabled sections (do not leave a state that
+                    # breaks every future pacman -Sy).
+                    log_error "[arch-repos] the sync failed without naming our repositories; conservatively rolling back ALL of this run's sections..."
+                    for _area_dn in "${_area_done[@]}"; do
+                        if [ "${_area_dn}" = "ALHP" ]; then
+                            for _area_sec in core extra multilib; do
+                                znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_alhp_lvl_rb}" >/dev/null 2>&1 || true
+                            done
+                        else
+                            znh_arch_repos_remove_section "${_area_dn}" 1 >/dev/null 2>&1 || true
+                            znh_arch_repos_remove_section "${_area_dn}" 0 >/dev/null 2>&1 || true
+                        fi
+                        znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed (unattributed)"
+                        _area_failed+=("${_area_dn}")
+                    done
+                    _area_done=()
+                fi
+            fi
+        elif [ "${#_area_done[@]}" -gt 0 ]; then
+            log_warn "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; skipping the final validation (fixture/test mode)."
+        fi
         # Smart summary.
         echo "" | tee -a "${LOG_FILE}"
         echo "enable-all summary: enabled=${#_area_done[@]}, failed(rolled back)=${#_area_failed[@]}${_area_alhp_note:+, ALHP=${_area_alhp_note}}." | tee -a "${LOG_FILE}"
