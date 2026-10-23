@@ -125,8 +125,13 @@ require_contains "${source_text}" 'archlinuxcn-keyring|blackarch-keyring) _area_
 require_contains "${source_text}" 'v83 KEY SYNC' "Missing the v83 key sync for already-enabled repos (heals rotated signing keys)"
 require_contains "${source_text}" 'key sync for the already-enabled ${_area_fname} failed' "Missing the v83 key-sync warn-only failure message"
 require_contains "${source_text}" 'if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Q "${_arki_key}" >/dev/null 2>&1; then' "Missing the v83 keyring-package idempotency check (pacman -Q skip)"
-require_contains "${source_text}" 'env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1' "Missing the v83 LC_ALL=C locale-proofed sync (Swedish pacman \"fel:\" was invisible to the error|fail greps)"
-require_contains_re "${source_text}" 'env LC_ALL=C timeout "\$\{ZNH_ARCH_REPOS_SYNC_TIMEOUT\}"' "Missing the v83 LC_ALL=C prefix on the module pacman syncs (at least one)"
+require_contains "${source_text}" 'znh_arch_repos_pacman_sync() {' "Missing the v84 process-tree-safe pacman sync helper"
+require_contains "${source_text}" 'env LC_ALL=C timeout -k 15 "${_arps_t}" "${ZNH_ARCH_REPOS_PACMAN_BIN}"' "Missing the v84 helper core (LC_ALL=C + timeout -k SIGKILL follow-up)"
+require_contains "${source_text}" '>"${_arps_tmp}" 2>&1' "Missing the v84 temp-file capture (an orphaned import child can hold a pipe hostage forever)"
+require_contains "${source_text}" 'ZNH_ARCH_REPOS_SYNC_RC' "Missing the v84 sync rc reporting global"
+require_contains "${source_text}" 'pkill -x dirmngr' "Missing the v84 dirmngr flush on timeout"
+require_contains "${source_text}" 'znh_arch_repos_pacman_sync "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" -Sy --noconfirm' "Missing the v84 helper-routed sync call (at least one site)"
+require_not_contains "${source_text}" 'env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1' "v84 drift guard: the old inline pipe-captured sync must be gone (all syncs route through the helper)"
 require_contains "${source_text}" 'pacman reports the database signer as this 40-char fingerprint' "Missing the v83 coderkun-aur rotated-key note in the catalog"
 
 # --- 6) FC4: ALHP microarchitecture level check (exact psABI flag sets) ---
@@ -154,7 +159,7 @@ require_contains "${source_text}" 'FAILCHECK (one repository per run): refusing 
 
 # --- 10) FC9: post-add pacman -Sy validation with rollback ---
 require_contains "${source_text}" 'FAILCHECK (post-add validation): ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy failed after adding ${_ar_name}; rolling the change back.' "Missing the post-add validation failcheck"
-require_contains "${source_text}" 'timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm' "Missing the timeout-bounded pacman -Sy post-add validation"
+require_contains "${source_text}" 'timeout -k 15 "${_arps_t}"' "Missing the timeout-bounded (TERM + KILL follow-up) pacman sync execution in the v84 helper"
 require_contains "${source_text}" 'ZNH_ARCH_REPOS_SYNC_TIMEOUT="${ZNH_ARCH_SYNC_TIMEOUT:-90}"' "Missing the ZNH_ARCH_REPOS_SYNC_TIMEOUT default (90s)"
 require_contains "${source_text}" 'Rolled back: ${ZNH_ARCH_REPOS_INCLUDE_FILE} restored from ${_ar_backup}.' "Missing the rollback restore from the include-file backup (v82)"
 require_contains "${source_text}" 'Rolled back: the [${_ar_section}] stanza was removed from the arch-repos config locations.' "Missing the v82 per-section rollback message"
