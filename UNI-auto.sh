@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 79 - Enterprise Edition (FINAL): arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 80 - Enterprise Edition: archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -54445,10 +54445,19 @@ run_arch_repos_only() {
                     _area_body="${_area_body}\nServer = https://mirrors.uni-plovdiv.net/archzfs/experimental"
                 fi
             fi
-            # v76 IMPORT BEFORE WRITE (with --import-keys): a failed key
-            # import means the section is NEVER written — no rollback needed,
-            # and no wasted pacman.conf churn. Much faster progression.
-            if [ "${_ar_import_keys}" -eq 1 ]; then
+            # v80 KEYRING-PACKAGE repos (archlinuxcn) are chicken-and-egg: the
+            # keyring package comes FROM the repository itself, so the section
+            # must be written FIRST and a failed keyring install rolls the
+            # freshly written section back. Hex-key repos keep the fast v76
+            # order (import before write — a failed import means NOTHING was
+            # written, no rollback needed). Caught live on the v79 bulk run:
+            # 'target not found: archlinuxcn-keyring' because pacman -Sy could
+            # not see the repo that provides it yet.
+            local _area_kg_pkg=0
+            case "${_area_fkey}" in
+                archlinuxcn-keyring) _area_kg_pkg=1 ;;
+            esac
+            if [ "${_ar_import_keys}" -eq 1 ] && [ "${_area_kg_pkg}" -ne 1 ]; then
                 if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}" "${_area_pdir:+${_area_pdir}/${_area_fname}.arm}"; then
                     log_error "[arch-repos] key import for ${_area_fname} failed; skipping WITHOUT writing its section (smart continue)."
                     _area_failed+=("${_area_fname}")
@@ -54459,6 +54468,26 @@ run_arch_repos_only() {
                 log_error "[arch-repos] failed to write the ${_area_fname} section; skipping it (smart continue)."
                 _area_failed+=("${_area_fname}")
                 continue
+            fi
+            # v80: keyring-package repos import AFTER the write (the repo now
+            # exists, so pacman can fetch the keyring package from it — the
+            # package itself is signed by an Arch developer, so it installs
+            # even before the repo's own key is trusted). A failed install
+            # rolls the freshly written section back.
+            if [ "${_ar_import_keys}" -eq 1 ] && [ "${_area_kg_pkg}" -eq 1 ]; then
+                if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}"; then
+                    log_error "[arch-repos] keyring-package install for ${_area_fname} failed after writing its section; rolling it back (smart continue)."
+                    if [ "${_area_fname}" = "ALHP" ]; then
+                        for _area_sec in core extra multilib; do
+                            znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_lvl}" >/dev/null 2>&1 || true
+                        done
+                    else
+                        znh_arch_repos_remove_section "${_area_fname}" 1 >/dev/null 2>&1 || true
+                        znh_arch_repos_remove_section "${_area_fname}" 0 >/dev/null 2>&1 || true
+                    fi
+                    _area_failed+=("${_area_fname}")
+                    continue
+                fi
             fi
             # v76 DEFERRED VALIDATION: the whole bulk run is validated with ONE
             # final pacman -Sy AFTER the loop (14 syncs -> 1; pacman errors name
