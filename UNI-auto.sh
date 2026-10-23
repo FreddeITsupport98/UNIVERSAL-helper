@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 70 - Enterprise Edition: arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 71 - Enterprise Edition: arch-repos enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -14932,15 +14932,24 @@ generate_dashboard() {
       <details id="arch-repos-drawer" style="margin-top: 16px;${arch_repos_drawer_style}">
         <summary style="cursor:pointer; font-weight: 900; color: var(--text);">▸ Arch Unofficial Repositories (Arch only — safety-gated)</summary>
         <div style="margin-top: 12px; color: var(--muted); font-size: 0.9rem;">
-          Enable/disable the unofficial Arch user repositories from the WebUI with the same hard failchecks as the CLI
-          (HTTPS-only server URLs, duplicate guard in /etc/pacman.conf, ALHP CPU-level check, the Arch Wiki warning
-          printed verbatim before any change, explicit confirmation phrases, and a post-add pacman -Sy validation with
-          rollback). Keys are NEVER auto-imported — enabling a signed repository requires a phrase that states you
-          verified its Key-ID yourself. 'Auto-disable faulty' is the failsafe: it removes repositories that fail to
-          connect so a broken repo never blocks system updates.
+          Every repository in the catalog is listed below with its class (signed/unsigned), Key-ID, stored Server URL,
+          current enablement and last health state. Each enableable row carries a SigLevel CHOICE (PackageRequired /
+          PackageOptional / TrustedOnly — defaults follow the class) and an Enable button that runs the SAME hard
+          failchecks as the CLI (HTTPS-only, duplicate guard, ALHP CPU-level check, the Arch Wiki warning verbatim,
+          confirmation phrase, pacman -Sy validation with rollback) before anything is written. 'Enable all + import
+          keys' is the v71 bulk setup: one confirmed run enables every catalog repository with a verified URL AND
+          imports + locally signs all keys for you (an explicit exception to the never-auto-import default), with
+          smart per-repo failure handling — a failing repository is rolled back individually and the run continues.
+          'Auto-disable faulty' is the failsafe: it removes repositories that fail to connect so a broken repo never
+          blocks system updates.
         </div>
         <div style="margin-top: 10px; display:flex; gap:10px; flex-wrap:wrap;">
           <button class="pill" type="button" id="arch-repos-refresh-btn" title="Reload the repository list from the localhost API">Refresh list</button>
+          <button class="cmd-btn" type="button" data-qa="arch-repos-enable-all" data-qa-copy="sudo zypper-auto-helper --arch-repos enable-all --import-keys --yes --key-verified" data-qa-danger="1" title="Bulk setup: enable every catalog repository with a verified URL AND import + locally sign all keys for you (per-repo failure rollback; confirmation required)">
+            <span class="cmd-label">Enable all + import keys</span>
+            <span class="cmd-desc">Bulk setup • smart failure handling</span>
+            <div class="cmd-copy-feedback">Running…</div>
+          </button>
           <button class="cmd-btn" type="button" data-qa="arch-repos-health" data-qa-copy="sudo zypper-auto-helper --arch-repos health" title="Run the pacman -Sy based health check of the enabled unofficial repos (read-only)">
             <span class="cmd-label">Check repos health</span>
             <span class="cmd-desc">pacman -Sy based • read-only</span>
@@ -34898,6 +34907,19 @@ generate_dashboard() {
             } else {
                 btn = '<button class="pill" type="button" data-ar-copy="' + _znhArchReposEscapeHtml(name) + '" title="No stored Server URL for this repository — copy the CLI command and pass the URL you verified on the wiki page">Copy CLI</button>';
             }
+            // v71: per-repo SigLevel CHOICE select for every enableable row.
+            // Defaults follow the class (signed = PackageRequired; unsigned =
+            // the spec-forced PackageOptional); pick another value and click
+            // Enable — the confirm dialog then shows your chosen SigLevel.
+            var sigSel = '';
+            if (!enabled && (url || name.toUpperCase() === 'ALHP')) {
+                var defSig = signed ? 'PackageRequired' : 'PackageOptional';
+                sigSel = '<select data-ar-siglevel="' + _znhArchReposEscapeHtml(name) + '" title="SigLevel written into /etc/pacman.conf for this repository (choice applies when you click Enable)" style="padding:4px 6px;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:0.78rem;">'
+                    + '<option value="PackageRequired"' + (defSig === 'PackageRequired' ? ' selected' : '') + '>PackageRequired</option>'
+                    + '<option value="PackageOptional"' + (defSig === 'PackageOptional' ? ' selected' : '') + '>PackageOptional</option>'
+                    + '<option value="TrustedOnly">TrustedOnly</option>'
+                    + '</select>';
+            }
             var keyHtml = key ? (' • key: <code style="font-size:0.76rem;">' + _znhArchReposEscapeHtml(key) + '</code>') : '';
             var urlHtml = (name.toUpperCase() === 'ALHP') ? ' • mirrorlist: /etc/pacman.d/alhp-mirrorlist' : (url ? (' • ' + _znhArchReposEscapeHtml(url)) : ' • (pass the Server URL from the wiki)');
             html.push('<div class="feat-badge" style="align-items:center; gap:8px; flex-wrap:wrap;">'
@@ -34906,6 +34928,7 @@ generate_dashboard() {
                 + ' <span style="color:var(--muted);">(' + sigLabel + ')</span>'
                 + stateHtml
                 + '<span style="color:var(--muted); font-size:0.78rem;">' + keyHtml + urlHtml + '</span>'
+                + sigSel
                 + btn
                 + '</div>');
         });
@@ -34919,17 +34942,32 @@ generate_dashboard() {
                     try { if (ev) addRipple(b, ev.clientX, ev.clientY); } catch (eR0) {}
                     var n = String(b.getAttribute('data-ar-enable') || '').trim();
                     if (!n) return;
+                    // v71: read this row's SigLevel CHOICE select and route to
+                    // the matching allowlisted quick action (the default select
+                    // value matches the class default action).
+                    var sig = '';
+                    try {
+                        var rowEl = b.closest ? b.closest('.feat-badge') : null;
+                        var selEl = rowEl ? rowEl.querySelector('[data-ar-siglevel="' + n + '"]') : null;
+                        if (selEl) sig = String(selEl.value || '').trim();
+                    } catch (eSel) { sig = ''; }
+                    var act = 'arch-repos-enable:' + n;
+                    var copyTxt = 'sudo zypper-auto-helper --arch-repos enable ' + n;
+                    if (sig === 'PackageRequired' || sig === 'PackageOptional' || sig === 'TrustedOnly') {
+                        act = 'arch-repos-enable:' + n + ':' + sig;
+                        copyTxt = copyTxt + ' --siglevel ' + sig;
+                    }
                     if (typeof quickActionOpen === 'function') {
                         quickActionOpen({
-                            action: 'arch-repos-enable:' + n,
-                            title: 'Enable ' + n,
-                            desc: 'Add the [' + n + '] repository section (safety-gated; confirmation phrase required)',
-                            copy_cmd: 'sudo zypper-auto-helper --arch-repos enable ' + n,
+                            action: act,
+                            title: 'Enable ' + n + (sig ? (' (SigLevel ' + sig + ')') : ''),
+                            desc: 'Add the [' + n + '] repository section (safety-gated; confirmation phrase required' + (sig ? ('; SigLevel ' + sig) : '') + ')',
+                            copy_cmd: copyTxt,
                             danger: true,
                             interactive: false
                         });
                     } else {
-                        copyCmd('sudo zypper-auto-helper --arch-repos enable ' + n, b);
+                        copyCmd(copyTxt, b);
                     }
                 });
             });
@@ -53182,13 +53220,75 @@ znh_arch_repos_append_block() {
     return 0
 }
 
+znh_arch_repos_import_key() {
+    # Args: <repo-name> <key-field>
+    # v71 bulk/import-keys support: imports + locally signs ONE repository key
+    # for the user. This is an EXPLICIT, opt-in exception to the FC7
+    # never-auto-import policy — it is only reachable via the enable-all bulk
+    # mode with --import-keys (or a manual CLI call), never via plain enable.
+    # Returns 0 when the key is available + locally signed afterwards.
+    local _arki_repo="$1" _arki_key="$2" _arki_id
+    if [ -z "${_arki_key}" ] || [ "${_arki_key}" = "see the wiki page" ]; then
+        log_error "[arch-repos] no importable Key-ID stored for ${_arki_repo}; import it manually per the wiki page."
+        return 1
+    fi
+    case "${_arki_key}" in
+        "in the archlinux keyring")
+            # The key ships in the official archlinux keyring: already trusted.
+            log_info "[arch-repos] ${_arki_repo}'s key ships in the official archlinux keyring; nothing to import."
+            return 0
+            ;;
+        archlinuxcn-keyring)
+            # Per the wiki: once the repository is added, the archlinuxcn-keyring
+            # package must be installed first (it is signed by a developer).
+            if ! command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
+                log_error "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; cannot install archlinuxcn-keyring."
+                return 1
+            fi
+            log_info "[arch-repos] installing the archlinuxcn-keyring package from the freshly added repository..."
+            znh_arch_repos_need_root "install archlinuxcn-keyring" || return 1
+            if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm archlinuxcn-keyring; then
+                log_success "[arch-repos] archlinuxcn-keyring installed and trusted."
+                return 0
+            fi
+            log_error "[arch-repos] archlinuxcn-keyring installation failed."
+            return 1
+            ;;
+    esac
+    # Hex Key-ID form (optionally 0x-prefixed): pacman-key recv + finger +
+    # lsign via the configured keyserver — the documented pacman workflow.
+    _arki_id="${_arki_key#0x}"
+    if [[ "${_arki_id}" =~ ^[0-9A-Fa-f]{8,}$ ]]; then
+        if ! command -v pacman-key >/dev/null 2>&1; then
+            log_error "[arch-repos] pacman-key not available; cannot import the ${_arki_repo} key."
+            return 1
+        fi
+        znh_arch_repos_need_root "import the ${_arki_repo} key into the pacman keyring" || return 1
+        log_info "[arch-repos] importing + locally signing the ${_arki_repo} key ${_arki_key} (pacman-key --recv-keys/--lsign-key)..."
+        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --recv-keys "${_arki_id}" \
+           && ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --finger "${_arki_id}" \
+           && ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --lsign-key "${_arki_id}"; then
+            log_success "[arch-repos] ${_arki_repo} key ${_arki_key} imported + locally signed."
+            return 0
+        fi
+        log_error "[arch-repos] pacman-key import/lsign failed for ${_arki_repo} (${_arki_key})."
+        return 1
+    fi
+    if [[ "${_arki_key}" == *"AUR"* ]]; then
+        log_error "[arch-repos] the ${_arki_repo} key comes from an AUR keyring package (${_arki_key}); install it with your AUR helper first (not auto-installable)."
+        return 1
+    fi
+    log_error "[arch-repos] unrecognised key form for ${_arki_repo} (${_arki_key}); import it manually per the wiki page."
+    return 1
+}
+
 run_arch_repos_only() {
     log_info ">>> Arch unofficial repository manager (safety-gated)..."
     update_status "Running Arch unofficial repository manager..."
 
     local rc=0
-    local _ar_cmd="" _ar_repo="" _ar_url_arg="" _ar_level_arg=""
-    local _ar_dry=0 _ar_json=0 _ar_yes=0 _ar_key_verified=0 _ar_unsigned_ok=0 _ar_auto_disable=0 _ar_history=0
+    local _ar_cmd="" _ar_repo="" _ar_url_arg="" _ar_level_arg="" _ar_siglevel_arg=""
+    local _ar_dry=0 _ar_json=0 _ar_yes=0 _ar_key_verified=0 _ar_unsigned_ok=0 _ar_auto_disable=0 _ar_history=0 _ar_import_keys=0
     local -a _ar_extra=()
     local _ar_arg
 
@@ -53198,6 +53298,11 @@ run_arch_repos_only() {
         _ar_arg="$1"
         case "${_ar_arg}" in
             list|status|enable|disable|disable-all|health|history)
+                if [ -z "${_ar_cmd}" ]; then _ar_cmd="${_ar_arg}"; else _ar_extra+=("${_ar_arg}"); fi
+                ;;
+            enable-all|setup-all)
+                # v71 bulk mode: see the enable-all block below (smart per-repo
+                # failure handling + the opt-in --import-keys key import).
                 if [ -z "${_ar_cmd}" ]; then _ar_cmd="${_ar_arg}"; else _ar_extra+=("${_ar_arg}"); fi
                 ;;
             --history|--arch-repos-history)
@@ -53221,6 +53326,11 @@ run_arch_repos_only() {
             --auto-disable)
                 _ar_auto_disable=1
                 ;;
+            --import-keys)
+                # v71: opt-in exception to the FC7 never-auto-import policy —
+                # enable-all imports + locally signs all keys for the user.
+                _ar_import_keys=1
+                ;;
             --level)
                 shift
                 case "${1:-}" in
@@ -53232,9 +53342,24 @@ run_arch_repos_only() {
                 _ar_level_arg="${_ar_arg#--level=}"
                 case "${_ar_level_arg}" in v2|v3|v4) ;; *) log_error "--level needs v2, v3 or v4."; return 1 ;; esac
                 ;;
+            --siglevel)
+                # v71: explicit SigLevel choice for 'enable' / 'enable-all'
+                # (pacman-valid values; the class default stays
+                # PackageRequired for signed / forced PackageOptional for
+                # unsigned unless you explicitly choose otherwise).
+                shift
+                case "${1:-}" in
+                    PackageRequired|PackageOptional|TrustedOnly) _ar_siglevel_arg="$1" ;;
+                    *) log_error "--siglevel needs PackageRequired, PackageOptional or TrustedOnly."; return 1 ;;
+                esac
+                ;;
+            --siglevel=*)
+                _ar_siglevel_arg="${_ar_arg#--siglevel=}"
+                case "${_ar_siglevel_arg}" in PackageRequired|PackageOptional|TrustedOnly) ;; *) log_error "--siglevel needs PackageRequired, PackageOptional or TrustedOnly."; return 1 ;; esac
+                ;;
             --*)
                 log_error "Unknown option for --arch-repos: ${_ar_arg}"
-                log_error "Usage: zypper-auto-helper --arch-repos [list|status|enable <repo> [url]|disable <repo>|disable-all|health [--auto-disable]|history] [--dry-run] [--json]"
+                log_error "Usage: zypper-auto-helper --arch-repos [list|status|enable <repo> [url] [--siglevel ...]|enable-all [--import-keys]|disable <repo>|disable-all|health [--auto-disable]|history] [--dry-run] [--json]"
                 return 1
                 ;;
             *)
@@ -53398,7 +53523,7 @@ run_arch_repos_only() {
                 return 1
             fi
             # FC4: microarchitecture level check before anything is written.
-            local _ar_cpu _ar_lvl _ar_want
+            local _ar_cpu _ar_lvl _ar_want _ar_alhp_sig=""
             _ar_cpu="$(znh_arch_repos_cpu_level)"
             if [ -n "${_ar_level_arg}" ]; then
                 _ar_lvl="${_ar_level_arg}"
@@ -53425,11 +53550,16 @@ run_arch_repos_only() {
                 log_error "Disable them first: zypper-auto-helper --arch-repos disable ALHP"
                 return 1
             fi
+            _ar_alhp_sig=""
+            [ -n "${_ar_siglevel_arg}" ] && _ar_alhp_sig="${_ar_siglevel_arg}"
             _ar_body="[core-x86-64-${_ar_lvl}]"
+            if [ -n "${_ar_alhp_sig}" ]; then _ar_body="${_ar_body}\nSigLevel = ${_ar_alhp_sig}"; fi
             _ar_body="${_ar_body}\nInclude = ${_ar_ml}"
             _ar_body="${_ar_body}\n[extra-x86-64-${_ar_lvl}]"
+            if [ -n "${_ar_alhp_sig}" ]; then _ar_body="${_ar_body}\nSigLevel = ${_ar_alhp_sig}"; fi
             _ar_body="${_ar_body}\nInclude = ${_ar_ml}"
             _ar_body="${_ar_body}\n[multilib-x86-64-${_ar_lvl}]"
+            if [ -n "${_ar_alhp_sig}" ]; then _ar_body="${_ar_body}\nSigLevel = ${_ar_alhp_sig}"; fi
             _ar_body="${_ar_body}\nInclude = ${_ar_ml}"
             _ar_display="ALHP (core/extra/multilib for x86-64-${_ar_lvl}, via ${_ar_ml})"
         else
@@ -53464,6 +53594,13 @@ run_arch_repos_only() {
                 # Unsigned: SigLevel is FORCED to PackageOptional (spec) and
                 # re-confirmed below (FC6).
                 _ar_siglevel="PackageOptional"
+            fi
+            if [ -n "${_ar_siglevel_arg}" ]; then
+                # v71: explicit user choice (CLI --siglevel or the WebUI row
+                # select) overrides the class default — shown in the preview
+                # below and applied verbatim.
+                _ar_siglevel="${_ar_siglevel_arg}"
+                log_info "[arch-repos] using the explicitly chosen SigLevel for ${_ar_name}: ${_ar_siglevel}"
             fi
             _ar_body="[${_ar_section}]\nSigLevel = ${_ar_siglevel}\nServer = ${_ar_url}"
             if [ "${_ar_name}" = "archzfs" ]; then
@@ -53607,6 +53744,238 @@ run_arch_repos_only() {
         echo "" | tee -a "${LOG_FILE}"
         echo "Repository ${_ar_name} is enabled and validated. Packages from it are NOT verified by Arch developers — you are responsible for them." | tee -a "${LOG_FILE}"
         return 0
+    fi
+
+    # ======================= enable-all (bulk; smart failure handling) =======================
+    if [ "${_ar_cmd}" = "enable-all" ] || [ "${_ar_cmd}" = "setup-all" ]; then
+        # v71 bulk convenience mode: enable EVERY catalog repository with a
+        # verified https URL in one run, optionally importing + locally signing
+        # all keys (--import-keys — an explicit, loudly-warned exception to the
+        # FC7 never-auto-import policy). FC8 (one repo per run) does NOT apply
+        # here: this whole mode is one deliberate bulk action confirmed by the
+        # ENABLEALL phrase (or --assume-yes --key-verified non-interactively).
+        # SMART failure handling: every repository is added + validated
+        # independently; a failing repository is rolled back individually (by
+        # REMOVING just its section — a backup restore would undo earlier
+        # successes in the same run) and the run continues, then a summary
+        # lists enabled / skipped / failed with reasons.
+        local -a _area_targets=() _area_nourl=() _area_done=() _area_failed=()
+        local _area_spec _area_name _area_class _area_url _area_key _area_note
+        local _area_ml="${ZNH_ARCH_ALHP_MIRRORLIST:-/etc/pacman.d/alhp-mirrorlist}"
+        local _area_alhp_note=""
+        for _area_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            IFS='|' read -r _area_name _area_class _area_url _area_key _area_note <<<"${_area_spec}"
+            if [ "${_area_name}" = "ALHP" ]; then
+                # ALHP needs the user-installed mirrorlist; smart-skip when absent.
+                if [ -r "${_area_ml}" ]; then
+                    _area_targets+=("${_area_spec}")
+                else
+                    _area_alhp_note="mirrorlist missing"
+                    log_info "[arch-repos] ALHP skipped in bulk mode: ${_area_ml} is missing (install alhp-mirrorlist + alhp-keyring from the AUR first)."
+                fi
+                continue
+            fi
+            if [ -n "${_area_url}" ]; then
+                _area_targets+=("${_area_spec}")
+            else
+                _area_nourl+=("${_area_name}")
+            fi
+        done
+        if [ "${#_area_targets[@]}" -eq 0 ]; then
+            echo "No catalog repositories with verified Server URLs are available to enable${_area_alhp_note:+ (ALHP mirrorlist missing)}." | tee -a "${LOG_FILE}"
+            return 0
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        echo "BULK ENABLE (enable-all): ${#_area_targets[@]} repositories with verified catalog URLs will be added to ${ZNH_ARCH_REPOS_PACMAN_CONF}, one managed section each." | tee -a "${LOG_FILE}"
+        echo "WARNING (verbatim from ${ZNH_ARCH_REPOS_WIKI_URL}):" | tee -a "${LOG_FILE}"
+        echo "  ${ZNH_ARCH_REPOS_WIKI_WARNING}" | tee -a "${LOG_FILE}"
+        if [ "${_ar_import_keys}" -eq 1 ]; then
+            echo "" | tee -a "${LOG_FILE}"
+            echo "KEY IMPORT MODE (--import-keys): this run IMPORTS and LOCALLY SIGNS every repository key FOR YOU (pacman-key --recv-keys + --lsign-key, or the archlinuxcn-keyring package). This is an explicit exception to the never-auto-import default — only proceed if you trust ALL of these repositories." | tee -a "${LOG_FILE}"
+        else
+            echo "" | tee -a "${LOG_FILE}"
+            echo "No key import (--import-keys not set): signed repositories whose keys are not already imported will FAIL validation and be rolled back individually. Re-run with --import-keys to have the keys imported for you, or import them yourself first." | tee -a "${LOG_FILE}"
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        for _area_spec in "${_area_targets[@]}"; do
+            IFS='|' read -r _area_name _area_class _area_url _area_key _area_note <<<"${_area_spec}"
+            echo "  - ${_area_name} (${_area_class}; key: ${_area_key:-—})" | tee -a "${LOG_FILE}"
+        done
+        if [ "${#_area_nourl[@]}" -gt 0 ]; then
+            echo "Skipped (no verified catalog URL — enable individually with the URL from the wiki page): ${_area_nourl[*]}" | tee -a "${LOG_FILE}"
+        fi
+        if [ "${_ar_dry}" -eq 1 ]; then
+            if [ "${_ar_import_keys}" -eq 1 ]; then
+                echo "[dry-run] Would enable the ${#_area_targets[@]} repositories above WITH automatic key import (--import-keys)." | tee -a "${LOG_FILE}"
+            else
+                echo "[dry-run] Would enable the ${#_area_targets[@]} repositories above (no key import)." | tee -a "${LOG_FILE}"
+            fi
+            echo "[dry-run] Would validate each with pacman -Sy and roll back any repository that fails (smart per-repo failure handling)." | tee -a "${LOG_FILE}"
+            log_info "Dry-run mode: nothing was changed."
+            return 0
+        fi
+        # One bulk confirmation (FC5 warning shown above; ENABLEALL phrase).
+        local _area_interactive=1
+        if [ "${ZNH_NON_INTERACTIVE:-0}" -eq 1 ] 2>/dev/null || [ ! -t 0 ]; then _area_interactive=0; fi
+        if [ "${_area_interactive}" -eq 1 ]; then
+            local _area_c=""
+            if [ "${_ar_import_keys}" -eq 1 ]; then
+                read -r -p "Type ENABLEALL to accept the warning above and enable all ${#_area_targets[@]} repositories WITH automatic key import: " _area_c || true
+            else
+                read -r -p "Type ENABLEALL to accept the warning above and enable all ${#_area_targets[@]} repositories: " _area_c || true
+            fi
+            echo ""
+            if [ "${_area_c}" != "ENABLEALL" ]; then
+                log_error "Not confirmed (expected ENABLEALL); aborting. Nothing was changed."
+                return 1
+            fi
+        else
+            if [ "${_ar_yes}" -ne 1 ] || [ "${_ar_key_verified}" -ne 1 ]; then
+                log_error "FAILCHECK (no silent defaults): non-interactive enable-all requires --assume-yes and --key-verified."
+                return 1
+            fi
+            log_info "[arch-repos] non-interactive enable-all confirmed via flags (--assume-yes --key-verified)."
+        fi
+        znh_arch_repos_need_root "enable-all (edit ${ZNH_ARCH_REPOS_PACMAN_CONF})" || return 1
+        # --- Smart per-repo loop (add -> optional key import -> validate ->
+        # --- rollback-that-repo-only-on-failure -> continue) ---
+        local _area_fspec _area_fname _area_fclass _area_furl _area_fkey _area_fnote
+        local _area_body _area_lvl _area_sec _area_sig _area_sec_esc
+        local _area_sync_out _area_sync_rc
+        for _area_fspec in "${_area_targets[@]}"; do
+            IFS='|' read -r _area_fname _area_fclass _area_furl _area_fkey _area_fnote <<<"${_area_fspec}"
+            echo "" | tee -a "${LOG_FILE}"
+            echo "--- ${_area_fname} (${_area_fclass}) ---" | tee -a "${LOG_FILE}"
+            # FC3 idempotent skip.
+            if [ "${_area_fname}" = "ALHP" ] && [ -n "$(znh_arch_repos_alhp_level)" ]; then
+                log_info "[arch-repos] ALHP already enabled; skipping (idempotent)."
+                continue
+            fi
+            if [ "${_area_fname}" != "ALHP" ] && znh_arch_repos_section_exists "${_area_fname}"; then
+                log_info "[arch-repos] [${_area_fname}] already exists in ${ZNH_ARCH_REPOS_PACMAN_CONF}; skipping (idempotent)."
+                continue
+            fi
+            # FC2 HTTPS-only (skips http catalog rows like 'ada' — smart skip).
+            if [ "${_area_fname}" != "ALHP" ]; then
+                case "${_area_furl}" in
+                    https://*) : ;;
+                    *)
+                        log_error "[arch-repos] FAILCHECK (HTTPS-only): skipping ${_area_fname} — the catalog URL is not https: ${_area_furl}"
+                        _area_failed+=("${_area_fname}")
+                        continue
+                        ;;
+                esac
+            fi
+            # Build the section body (ALHP level check FC4 included).
+            _area_body=""
+            _area_lvl=""
+            if [ "${_area_fname}" = "ALHP" ]; then
+                local _area_cpu
+                _area_cpu="$(znh_arch_repos_cpu_level)"
+                if [ -n "${_ar_level_arg}" ]; then
+                    _area_lvl="${_ar_level_arg}"
+                elif [ "${_area_cpu}" -ge 2 ] 2>/dev/null; then
+                    _area_lvl="v${_area_cpu}"
+                else
+                    _area_lvl="v2"
+                fi
+                if ! [ "${_area_cpu}" -ge "${_area_lvl#v}" ] 2>/dev/null; then
+                    log_error "[arch-repos] FAILCHECK (ALHP CPU level): CPU is x86-64-v${_area_cpu} but ${_area_lvl} requested; skipping ALHP."
+                    _area_failed+=("ALHP")
+                    continue
+                fi
+                for _area_sec in core extra multilib; do
+                    if [ -n "${_area_body}" ]; then _area_body="${_area_body}\n"; fi
+                    _area_body="${_area_body}[${_area_sec}-x86-64-${_area_lvl}]"
+                    if [ -n "${_ar_siglevel_arg}" ]; then _area_body="${_area_body}\nSigLevel = ${_ar_siglevel_arg}"; fi
+                    _area_body="${_area_body}\nInclude = ${_area_ml}"
+                done
+            else
+                _area_sig="PackageRequired"
+                [ "${_area_fclass}" = "unsigned" ] && _area_sig="PackageOptional"
+                [ -n "${_ar_siglevel_arg}" ] && _area_sig="${_ar_siglevel_arg}"
+                _area_body="[${_area_fname}]\nSigLevel = ${_area_sig}\nServer = ${_area_furl}"
+                if [ "${_area_fname}" = "archzfs" ]; then
+                    _area_body="${_area_body}\nServer = https://mirrors.uni-plovdiv.net/archzfs/experimental"
+                fi
+            fi
+            if ! znh_arch_repos_append_block "${_area_body}"; then
+                log_error "[arch-repos] failed to write the ${_area_fname} section; skipping it (smart continue)."
+                _area_failed+=("${_area_fname}")
+                continue
+            fi
+            # Optional key import (v71 --import-keys): failure rolls back just
+            # this repository and the run continues.
+            if [ "${_ar_import_keys}" -eq 1 ]; then
+                if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}"; then
+                    log_error "[arch-repos] key import for ${_area_fname} failed; rolling its section back (smart continue)."
+                    if [ "${_area_fname}" = "ALHP" ]; then
+                        for _area_sec in core extra multilib; do
+                            znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_lvl}" >/dev/null 2>&1 || true
+                        done
+                    else
+                        znh_arch_repos_remove_section "${_area_fname}" 1 >/dev/null 2>&1 || true
+                        znh_arch_repos_remove_section "${_area_fname}" 0 >/dev/null 2>&1 || true
+                    fi
+                    _area_failed+=("${_area_fname}")
+                    continue
+                fi
+            fi
+            # FC9-style validation; on failure roll back ONLY this repository's
+            # freshly added section (NOT a backup restore — that would undo
+            # earlier successes in the same bulk run).
+            _area_sync_out=""
+            _area_sync_rc=0
+            _area_sec_esc="${_area_fname//./\\.}"
+            if command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
+                log_info "[arch-repos] Validating with ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
+                _area_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+                if printf '%s' "${_area_sync_out}" | grep -Eiq "failed to synchroni[sz]e"; then
+                    _area_sync_rc=1
+                fi
+                if [ "${_area_sync_rc}" -eq 0 ] && printf '%s' "${_area_sync_out}" | grep -Eiq "(error|fail).*${_area_sec_esc}|${_area_sec_esc}.*(error|fail)"; then
+                    _area_sync_rc=1
+                fi
+                if [ "${_area_sync_rc}" -eq 0 ] && [ "${_area_fname}" = "ALHP" ] && printf '%s' "${_area_sync_out}" | grep -Eiq "(error|fail).*alhp|alhp.*(error|fail)"; then
+                    _area_sync_rc=1
+                fi
+            else
+                log_warn "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; skipping the pacman -Sy validation (fixture/test mode)."
+            fi
+            if [ "${_area_sync_rc}" -ne 0 ]; then
+                echo "${_area_sync_out}" | tail -n 10 | tee -a "${LOG_FILE}"
+                log_error "[arch-repos] FAILCHECK (post-add validation): ${_area_fname} failed after being added; removing its section (smart continue)."
+                if [ "${_area_fname}" = "ALHP" ]; then
+                    for _area_sec in core extra multilib; do
+                        znh_arch_repos_remove_section "${_area_sec}-x86-64-${_area_lvl}" >/dev/null 2>&1 || true
+                    done
+                else
+                    znh_arch_repos_remove_section "${_area_fname}" 1 >/dev/null 2>&1 || true
+                    znh_arch_repos_remove_section "${_area_fname}" 0 >/dev/null 2>&1 || true
+                fi
+                znh_arch_repos_state_log "${_area_fname}" "rolled-back" "enable-all post-add validation failed"
+                _area_failed+=("${_area_fname}")
+                continue
+            fi
+            log_success "[arch-repos] ${_area_fname} enabled and validated."
+            znh_arch_repos_state_log "${_area_fname}" "enabled" "${_area_fclass} (enable-all)"
+            _area_done+=("${_area_fname}")
+        done
+        # Smart summary.
+        echo "" | tee -a "${LOG_FILE}"
+        echo "enable-all summary: enabled=${#_area_done[@]}, failed(rolled back)=${#_area_failed[@]}${_area_alhp_note:+, ALHP=${_area_alhp_note}}." | tee -a "${LOG_FILE}"
+        if [ "${#_area_done[@]}" -gt 0 ]; then
+            echo "  Enabled : ${_area_done[*]}" | tee -a "${LOG_FILE}"
+        fi
+        if [ "${#_area_failed[@]}" -gt 0 ]; then
+            echo "  Failed  : ${_area_failed[*]} (rolled back — nothing broken left behind; re-run enable-all after fixing them, or enable one with --arch-repos enable <repo>)" | tee -a "${LOG_FILE}"
+        fi
+        if [ "${#_area_failed[@]}" -eq 0 ]; then
+            update_status "SUCCESS: arch-repos enable-all (${#_area_done[@]} enabled)"
+            return 0
+        fi
+        update_status "COMPLETED WITH WARNINGS: arch-repos enable-all (${#_area_done[@]} enabled, ${#_area_failed[@]} rolled back)"
+        return 1
     fi
 
     # ======================= disable / disable-all =======================
@@ -53930,6 +54299,18 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          run, a post-add pacman -Sy validation with rollback, and full state"
     echo "                          logging. 'health --auto-disable' removes faulty repos (the WebUI"
     echo "                          failsafe); --dry-run prints what would be written."
+    echo "  --arch-repos enable-all [--import-keys] [--level vN] [--siglevel ...]"
+    echo "                          Bulk setup (v71): enable EVERY catalog repository with a verified"
+    echo "                          https URL in one run. With --import-keys the helper imports +"
+    echo "                          locally signs every repository key FOR you (pacman-key"
+    echo "                          --recv-keys/--lsign-key, or the archlinuxcn-keyring package) — an"
+    echo "                          explicit, warned exception to the never-auto-import default. Smart"
+    echo "                          failure handling: each repository is validated with pacman -Sy and"
+    echo "                          rolled back individually on failure while the run continues; a"
+    echo "                          summary lists enabled/failed. 'enable <repo> --siglevel"
+    echo "                          PackageRequired|PackageOptional|TrustedOnly' picks the SigLevel"
+    echo "                          explicitly (default: PackageRequired signed / PackageOptional"
+    echo "                          forced for unsigned)."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -66626,6 +67007,26 @@ def _arch_repos_quick_actions() -> dict:
         "warning": warn or "Every enabled unofficial repository section is removed from /etc/pacman.conf. A backup is written first.",
     }
 
+    # v71 bulk setup: enable EVERY catalog repository with a verified https
+    # URL in one run and IMPORT + locally sign all keys for the user (the
+    # explicit opt-in exception to the never-auto-import default). Smart
+    # per-repo failure handling: each repository is validated and rolled back
+    # individually on failure while the run continues.
+    out["arch-repos-enable-all"] = {
+        "title": "Arch Repos: Enable all + import keys",
+        "cmd": [HELPER_BIN, "--arch-repos", "enable-all", "--import-keys", "--assume-yes", "--key-verified"],
+        "timeout_s": 40 * 60,
+        "needs_confirm": True,
+        "phrase": "ARCHREPOALL",
+        "explain": (
+            "Bulk setup: enables EVERY catalog repository with a verified https Server URL in one run "
+            "(already-enabled ones are skipped idempotently; repositories without a stored URL and ALHP without its mirrorlist are skipped with a reason). "
+            "With key import enabled, the helper IMPORTS and LOCALLY SIGNS every repository key FOR YOU (pacman-key --recv-keys + --lsign-key from the keyserver, or the archlinuxcn-keyring package) — an explicit exception to the never-auto-import default, so only proceed if you trust ALL of these repositories. "
+            "Smart failure handling: each repository is validated with pacman -Sy afterwards; any failure is rolled back individually (only that repository's section is removed — earlier successes stay) and the run continues, then a summary lists enabled/failed with reasons."
+        ),
+        "warning": (warn or "Unofficial repositories are not tested by Arch developers; you take full responsibility for using them.") + " KEY IMPORT: this bulk mode imports and locally signs all repository keys automatically.",
+    }
+
     for r in (data.get("repos") or []):
         if not isinstance(r, dict):
             continue
@@ -66690,6 +67091,22 @@ def _arch_repos_quick_actions() -> dict:
             "explain": explain,
             "warning": warn or "Unofficial repositories are not tested by Arch developers; you take full responsibility for using them.",
         }
+
+        # v71 SigLevel choice variants (the WebUI per-repo select): the same
+        # confirmed enable flow with an explicit --siglevel choice. The base
+        # action above stays the class default (signed = PackageRequired,
+        # unsigned = forced PackageOptional).
+        _class_default = "PackageRequired" if signed else "PackageOptional"
+        for _sig in ("PackageRequired", "PackageOptional", "TrustedOnly"):
+            out[f"arch-repos-enable:{name}:{_sig}"] = {
+                "title": f"Arch Repo: enable {name} (SigLevel {_sig})",
+                "cmd": [HELPER_BIN, "--arch-repos", "enable", name, "--siglevel", _sig, "--assume-yes", "--key-verified", "--unsigned-accepted"],
+                "timeout_s": 15 * 60,
+                "needs_confirm": True,
+                "phrase": "ARCHREPOENABLE",
+                "explain": explain + f" SigLevel explicitly chosen: {_sig} (the class default is {_class_default}).",
+                "warning": warn or "Unofficial repositories are not tested by Arch developers; you take full responsibility for using them.",
+            }
 
     return out
 
