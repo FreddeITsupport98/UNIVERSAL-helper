@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 76 - Enterprise Edition: arch-repos key import goes through the keyserver WEB endpoint first (curl + pacman-key --add over HTTPS 443 — bypasses the broken dirmngr/HKP path that failed every fetch on Garuda while the same keyserver's web endpoint answered every key; live-verified), imports BEFORE writing (failed import = nothing to roll back), and bulk enable-all validates with ONE final pacman -Sy instead of one per repo (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 77 - Enterprise Edition: arch-repos key import now REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -53283,6 +53283,36 @@ znh_arch_repos_append_block() {
     return 0
 }
 
+znh_arch_repos_repair_keyserver_config() {
+    # v77: runs after a successful WEB-endpoint import — the fact that the web
+    # path was needed means the box's HKP config/path is broken. Point the
+    # pacman gnupg configs at the verified-working keyserver so pacman-key
+    # --recv-keys/--refresh-keys, makepkg/AUR helpers and every other HKP
+    # consumer works SYSTEM-WIDE again (not just this module). Idempotent
+    # (runs at most once per process), backup per file, best-effort.
+    [ "${ZNH_ARCH_KEYSERVER_REPAIRED:-0}" -eq 1 ] 2>/dev/null && return 0
+    local _arksc_conf _arksc_stamp
+    _arksc_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
+    for _arksc_conf in /etc/pacman.d/gnupg/gpg.conf /etc/pacman.d/gnupg/dirmngr.conf; do
+        [ -f "${_arksc_conf}" ] || continue
+        if grep -q "^keyserver hkps://keyserver.ubuntu.com" "${_arksc_conf}" 2>/dev/null; then
+            continue
+        fi
+        znh_arch_repos_need_root "repair the system keyserver config" || return 1
+        ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_arksc_conf}" "${_arksc_conf}.znh-backup-${_arksc_stamp}" 2>/dev/null || true
+        if grep -Eq "^[[:space:]]*keyserver[[:space:]]" "${_arksc_conf}" 2>/dev/null; then
+            ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} sed -i -E 's|^[[:space:]]*keyserver[[:space:]].*|keyserver hkps://keyserver.ubuntu.com|' "${_arksc_conf}" 2>/dev/null || true
+        else
+            printf 'keyserver hkps://keyserver.ubuntu.com\n' | ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} tee -a "${_arksc_conf}" >/dev/null 2>&1 || true
+        fi
+        # dirmngr must restart to pick up the config change.
+        ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pkill -x dirmngr >/dev/null 2>&1 || true
+        log_success "[arch-repos] repaired ${_arksc_conf}: keyserver set to hkps://keyserver.ubuntu.com (backup kept, dirmngr restarted)."
+    done
+    ZNH_ARCH_KEYSERVER_REPAIRED=1
+    return 0
+}
+
 znh_arch_repos_import_key() {
     # Args: <repo-name> <key-field>
     # v71 bulk/import-keys support: imports + locally signs ONE repository key
@@ -53357,18 +53387,62 @@ znh_arch_repos_import_key() {
             # https://keyserver.ubuntu.com/pks/lookup?op=get (Hockeypuck;
             # accepts 0x<16-char-long-ID>) and import it with pacman-key --add.
             if command -v curl >/dev/null 2>&1; then
-                local _arki_web_tmp _arki_web_arm
+                local _arki_web_tmp _arki_web_arm _arki_web_src
                 _arki_web_tmp="$(mktemp)"
                 _arki_web_arm="${_arki_web_tmp}.arm"
-                if curl -sf --max-time 30 --connect-timeout 10 \
-                    "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${_arki_id}" \
-                    -o "${_arki_web_tmp}" 2>/dev/null \
+                # v77 WEB #1: keyserver.ubuntu.com pks/lookup (verified live —
+                # works for 16-char long IDs too).
+                _arki_web_src="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${_arki_id}"
+                if curl -sf --max-time 30 --connect-timeout 10 "${_arki_web_src}" -o "${_arki_web_tmp}" 2>/dev/null \
                    && sed -n '/-----BEGIN PGP PUBLIC KEY BLOCK-----/,/-----END PGP PUBLIC KEY BLOCK-----/p' \
                         "${_arki_web_tmp}" >"${_arki_web_arm}" 2>/dev/null \
                    && grep -q "BEGIN PGP PUBLIC KEY" "${_arki_web_arm}" 2>/dev/null; then
                     log_info "[arch-repos] importing the ${_arki_repo} key ${_arki_key} via the keyserver.ubuntu.com WEB endpoint (curl + pacman-key --add; bypasses dirmngr)..."
                     if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --add "${_arki_web_arm}"; then
                         _arki_recv_ok=1
+                        # v77: the web path was needed, so the box's HKP config
+                        # is broken — repair the system keyserver config ONCE so
+                        # pacman-key --recv-keys/--refresh-keys + makepkg/AUR
+                        # helpers work system-wide again.
+                        znh_arch_repos_repair_keyserver_config || true
+                    fi
+                fi
+                # v77 WEB #2: keys.openpgp.org VKS by-fingerprint endpoint (the
+                # VKS API accepts ONLY full 40-char fingerprints — skip for
+                # 16-char IDs).
+                if [ "${_arki_recv_ok}" -ne 1 ] && [ "${_arki_len}" -eq 40 ]; then
+                    _arki_web_src="https://keys.openpgp.org/vks/v1/by-fingerprint/${_arki_id^^}"
+                    if curl -sf --max-time 30 --connect-timeout 10 "${_arki_web_src}" -o "${_arki_web_tmp}" 2>/dev/null \
+                       && sed -n '/-----BEGIN PGP PUBLIC KEY BLOCK-----/,/-----END PGP PUBLIC KEY BLOCK-----/p' \
+                            "${_arki_web_tmp}" >"${_arki_web_arm}" 2>/dev/null \
+                       && grep -q "BEGIN PGP PUBLIC KEY" "${_arki_web_arm}" 2>/dev/null; then
+                        log_info "[arch-repos] importing the ${_arki_repo} key from keys.openpgp.org (VKS by-fingerprint web endpoint)..."
+                        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --add "${_arki_web_arm}"; then
+                            _arki_recv_ok=1
+                            znh_arch_repos_repair_keyserver_config || true
+                        fi
+                    fi
+                fi
+                # v77 WEB #3: raw keyfile fallback — set
+                # ZNH_ARCH_REPOS_KEYFILES="name=https://host/key.asc ..." to
+                # use upstream-published armored key files for specific repos.
+                if [ "${_arki_recv_ok}" -ne 1 ] && [ -n "${ZNH_ARCH_REPOS_KEYFILES:-}" ]; then
+                    local _arki_kf _arki_kf_url=""
+                    # shellcheck disable=SC2086  # intentional word splitting of the name=url list
+                    for _arki_kf in ${ZNH_ARCH_REPOS_KEYFILES}; do
+                        case "${_arki_kf}" in
+                            "${_arki_repo}="*) _arki_kf_url="${_arki_kf#*=}" ;;
+                        esac
+                    done
+                    if [ -n "${_arki_kf_url}" ] \
+                       && curl -sf --max-time 30 --connect-timeout 10 "${_arki_kf_url}" -o "${_arki_web_tmp}" 2>/dev/null \
+                       && sed -n '/-----BEGIN PGP PUBLIC KEY BLOCK-----/,/-----END PGP PUBLIC KEY BLOCK-----/p' \
+                            "${_arki_web_tmp}" >"${_arki_web_arm}" 2>/dev/null \
+                       && grep -q "BEGIN PGP PUBLIC KEY" "${_arki_web_arm}" 2>/dev/null; then
+                        log_info "[arch-repos] importing the ${_arki_repo} key from the configured keyfile ${_arki_kf_url}..."
+                        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --add "${_arki_web_arm}"; then
+                            _arki_recv_ok=1
+                        fi
                     fi
                 fi
                 rm -f "${_arki_web_tmp}" "${_arki_web_arm}" 2>/dev/null || true
@@ -54003,15 +54077,22 @@ run_arch_repos_only() {
             log_info "[arch-repos] non-interactive enable-all confirmed via flags (--assume-yes --key-verified)."
         fi
         znh_arch_repos_need_root "enable-all (edit ${ZNH_ARCH_REPOS_PACMAN_CONF})" || return 1
-        # --- Smart per-repo loop (add -> optional key import -> validate ->
-        # --- rollback-that-repo-only-on-failure -> continue) ---
+        # --- Smart per-repo loop (v76+: import key FIRST -> write section ->
+        # --- continue; ONE final pacman -Sy validates the whole run after the
+        # --- loop and only failing sections roll back) ---
         local _area_fspec _area_fname _area_fclass _area_furl _area_fkey _area_fnote
         local _area_body _area_lvl _area_sec _area_sig _area_sec_esc
-        local _area_sync_out _area_sync_rc
+        local _area_sync_out _area_sync_rc _area_total _area_i
+        _area_total="${#_area_targets[@]}"
+        _area_i=0
         for _area_fspec in "${_area_targets[@]}"; do
             IFS='|' read -r _area_fname _area_fclass _area_furl _area_fkey _area_fnote <<<"${_area_fspec}"
+            _area_i=$((_area_i + 1))
             echo "" | tee -a "${LOG_FILE}"
             echo "--- ${_area_fname} (${_area_fclass}) ---" | tee -a "${LOG_FILE}"
+            # v77 progressive feedback: the quick-action job stream picks this
+            # up live, so the WebUI overlay shows which repo is being processed.
+            echo "[webui] stage: arch-repos ${_area_fname} (${_area_i}/${_area_total})" | tee -a "${LOG_FILE}"
             # FC3 idempotent skip.
             if [ "${_area_fname}" = "ALHP" ] && [ -n "$(znh_arch_repos_alhp_level)" ]; then
                 log_info "[arch-repos] ALHP already enabled; skipping (idempotent)."
@@ -54089,6 +54170,7 @@ run_arch_repos_only() {
         # --- v76 ONE final pacman -Sy validation for the entire bulk run ---
         if [ "${#_area_done[@]}" -gt 0 ] && command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
             local _area_v_out _area_v_rc
+            echo "[webui] stage: arch-repos final validation (1 pacman -Sy)" | tee -a "${LOG_FILE}"
             log_info "[arch-repos] Validating ALL ${#_area_done[@]} newly enabled repos with ONE ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
             _area_v_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
             _area_v_rc=0
