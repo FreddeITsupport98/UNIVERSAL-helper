@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 73 - Enterprise Edition: ALL Arch-family distros detect as pacman (expanded IDs: garuda/artix/cachyos/parabola/hyperbola + /etc/pacman.conf filesystem hint beats PATH probes — kills the dnf false positive) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 74 - Enterprise Edition: arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -52837,7 +52837,7 @@ ZNH_ARCH_REPO_SPECS=(
     'blackeagle-pre-community|signed|https://repo.herecura.eu/$repo/$arch|in the archlinux keyring|Testing of packages maintained by a Package Maintainer before they move to extra'
     'build.kilabit.info|signed|https://build.kilabit.info/aur|4A5360B500C9C4F0|AUR builds by shulhan'
     'chaotic-aur|signed|https://geo-mirror.chaotic.cx/$repo/$arch|FBA220DFC880C036|Auto-built AUR packages, updated hourly, several mirrors worldwide, x86_64 only (see also aur.chaotic.cx)'
-    'coderkun-aur|signed|https://arch.suruatoel.xyz/$repo/$arch/|39E27199A6EE374|AUR packages with random software, package deltas, database signing'
+    'coderkun-aur|signed|https://arch.suruatoel.xyz/$repo/$arch/|39E27199A6BEE374|AUR packages with random software, package deltas, database signing'
     'desolve|signed||see the wiki page|Binary R cran collection (the wiki marks it deprecated; use bioarchlinux)'
     'devkitpro|signed||see the wiki page|Homebrew/devkitPro toolchain packages'
     'enhancedX11|signed||see the wiki page|Xorg server with additional patches'
@@ -53318,22 +53318,57 @@ znh_arch_repos_import_key() {
             ;;
     esac
     # Hex Key-ID form (optionally 0x-prefixed): pacman-key recv + finger +
-    # lsign via the configured keyserver — the documented pacman workflow.
+    # lsign. v74 KEYSERVER FIX (clue from the Garuda run: "Server indicated a
+    # failure" for every key): the SYSTEM keyserver config (gpg.conf/dirmngr)
+    # can point at the dead SKS pool or be network-blocked, so we NEVER rely on
+    # it — we iterate an explicit list of known-good keyservers via pacman-key
+    # --keyserver (recommended: hkps://keyserver.ubuntu.com), flushing the
+    # dirmngr cache between attempts (a known gpg caching quirk: dirmngr pins
+    # the first failing resolver/keyserver state). The list is overridable via
+    # ZNH_ARCH_REPOS_KEYSERVERS (space-separated).
     _arki_id="${_arki_key#0x}"
     if [[ "${_arki_id}" =~ ^[0-9A-Fa-f]{8,}$ ]]; then
         if ! command -v pacman-key >/dev/null 2>&1; then
             log_error "[arch-repos] pacman-key not available; cannot import the ${_arki_repo} key."
             return 1
         fi
+        # Strict length sanity: gpg accepts only 8/16/40-hex key IDs — anything
+        # else is a catalog data bug (caught live: coderkun-aur had a 15-char
+        # typo'd ID and gpg rejected it as "not a key ID").
+        local _arki_len
+        _arki_len="${#_arki_id}"
+        if [ "${_arki_len}" -ne 8 ] && [ "${_arki_len}" -ne 16 ] && [ "${_arki_len}" -ne 40 ]; then
+            log_error "[arch-repos] stored Key-ID for ${_arki_repo} (${_arki_key}, ${_arki_len} chars) is not a valid gpg key ID (8/16/40 hex chars); refusing to import. Report or fix the catalog entry."
+            return 1
+        fi
         znh_arch_repos_need_root "import the ${_arki_repo} key into the pacman keyring" || return 1
-        log_info "[arch-repos] importing + locally signing the ${_arki_repo} key ${_arki_key} (pacman-key --recv-keys/--lsign-key)..."
-        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --recv-keys "${_arki_id}" \
-           && ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --finger "${_arki_id}" \
+        # Already present + lsigned? Nothing to do (idempotent re-runs).
+        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --finger "${_arki_id}" >/dev/null 2>&1; then
+            log_info "[arch-repos] ${_arki_repo} key ${_arki_key} is already in the pacman keyring; only ensuring the local signature..."
+        else
+            local _arki_ks _arki_recv_ok=0
+            local _arki_ks_list="${ZNH_ARCH_REPOS_KEYSERVERS:-hkps://keyserver.ubuntu.com hkp://keyserver.ubuntu.com hkps://keys.openpgp.org}"
+            for _arki_ks in ${_arki_ks_list}; do
+                log_info "[arch-repos] importing the ${_arki_repo} key ${_arki_key} via ${_arki_ks} (pacman-key --recv-keys)..."
+                # Flush dirmngr's cached failure state between attempts.
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pkill -x dirmngr >/dev/null 2>&1 || true
+                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --keyserver "${_arki_ks}" --recv-keys "${_arki_id}"; then
+                    _arki_recv_ok=1
+                    break
+                fi
+                log_error "[arch-repos] keyserver ${_arki_ks} failed for ${_arki_repo}; trying the next one..."
+            done
+            if [ "${_arki_recv_ok}" -ne 1 ]; then
+                log_error "[arch-repos] pacman-key --recv-keys failed for ${_arki_repo} (${_arki_key}) on ALL keyservers (${_arki_ks_list}). The key may not be published on any keyserver, or your network blocks them (verify manually with: sudo pacman-key --keyserver hkps://keyserver.ubuntu.com --recv-keys ${_arki_id})."
+                return 1
+            fi
+        fi
+        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --finger "${_arki_id}" >/dev/null 2>&1 \
            && ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --lsign-key "${_arki_id}"; then
-            log_success "[arch-repos] ${_arki_repo} key ${_arki_key} imported + locally signed."
+            log_success "[arch-repos] ${_arki_repo} key ${_arki_key} present + locally signed."
             return 0
         fi
-        log_error "[arch-repos] pacman-key import/lsign failed for ${_arki_repo} (${_arki_key})."
+        log_error "[arch-repos] pacman-key --finger/--lsign-key failed for ${_arki_repo} (${_arki_key})."
         return 1
     fi
     if [[ "${_arki_key}" == *"AUR"* ]]; then
