@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 80 - Enterprise Edition: archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 81 - Enterprise Edition: arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -3413,6 +3413,11 @@ DL_TIMER_INTERVAL_MINUTES=60
 NT_TIMER_INTERVAL_MINUTES=60
 VERIFY_TIMER_INTERVAL_MINUTES=30
 
+# Arch repos health watchdog (v81): hours between automatic
+# '--arch-repos health --auto-disable --yes' runs (0 = disabled, the default;
+# Arch-family hosts only — the unit exits cleanly elsewhere).
+ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS=0
+
 # Low-noise diagnostics/live-log caps (count of service logs to follow).
 # Used by the diagnostics follower and interactive live-log fallback paths.
 ZNH_DIAG_MAX_SERVICE_LOGS=6
@@ -4379,6 +4384,7 @@ __znh_write_dashboard_schema_json() {
     "DL_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
     "NT_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "60"},
     "VERIFY_TIMER_INTERVAL_MINUTES": {"type": "interval", "allowed": ["1","5","10","15","30","60"], "default": "30"},
+    "ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS": {"type": "int", "min": 0, "max": 720, "step": 1, "default": "0"},
     "VERIFY_LOW_IMPACT_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_LOW_IMPACT_FAIL_STREAK": {"type": "int", "min": 1, "max": 20, "step": 1, "default": "2"},
     "VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES": {"type": "int", "min": 5, "max": 720, "step": 5, "default": "45"},
@@ -10772,6 +10778,19 @@ NT_TIMER_INTERVAL_MINUTES=60
 # Default: 30 (lower-impact baseline)
 VERIFY_TIMER_INTERVAL_MINUTES=30
 
+# ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS
+# Opt-in watchdog for the unofficial Arch repositories (v81; Arch-family
+# hosts only): when > 0, the installer writes a zypper-arch-repos-health
+# systemd timer that runs:
+#   zypper-auto-helper --arch-repos health --auto-disable --yes
+# on this schedule (one pacman -Sy health pass; faulty repositories are
+# auto-disabled so a broken/dead repository never blocks system updates).
+#   0   = disabled (default — the timer is not installed/started)
+#   1-720 = hours between runs
+# The unit exits cleanly on non-Arch systems (no /etc/pacman.conf -> exit 0),
+# so this setting is safe to leave set on multi-distro fleets.
+ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS=0
+
 # VERIFY_LOW_IMPACT_ENABLED
 # Smart adaptive mode for background verification runs.
 # When true, repeated failing verify cycles become less aggressive:
@@ -11657,6 +11676,9 @@ EOF
     validate_allowed_set NT_TIMER_INTERVAL_MINUTES 60 "1,5,10,15,30,60"
     validate_allowed_set VERIFY_TIMER_INTERVAL_MINUTES 30 "1,5,10,15,30,60"
 
+    # v81 Arch repos health watchdog (hours; 0 = disabled by default)
+    validate_nonneg_int_bounded_optional ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS 0 0 720
+
     # Enums
     validate_allowed_set DOWNLOADER_DOWNLOAD_MODE full "full,detect-only"
     validate_bool_flag DOWNLOADER_INCLUDE_DISTRO_UPGRADE true
@@ -12046,6 +12068,7 @@ EOF
     _mark_missing_key "VERIFY_FAILED_UNITS_CRITICAL_REGEX"
     _mark_missing_key "VERIFY_FAILED_UNITS_NOISE_GLOBS"
     _mark_missing_key "VERIFY_FAILED_UNITS_NOISE_REGEX"
+    _mark_missing_key "ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS"
     _mark_missing_key "AUTO_REPAIR_TRY_REMOUNT_RW"
 
     # Snapper retention optimizer knobs
@@ -12256,6 +12279,9 @@ EOF
                     ;;
                 VERIFY_FAILED_UNITS_NOISE_REGEX)
                     log_info "  - VERIFY_FAILED_UNITS_NOISE_REGEX: case-insensitive regex for additional low-priority/noise failed-unit matches."
+                    ;;
+                ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS)
+                    log_info "  - ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS: opt-in watchdog (hours; 0 = off) that runs '--arch-repos health --auto-disable --yes' on a systemd timer so a dead unofficial Arch repository never blocks pacman -Sy (Arch-family hosts only; the unit exits cleanly elsewhere)."
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
@@ -21504,6 +21530,7 @@ generate_dashboard() {
         { key: 'DL_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Downloader interval (min)' },
         { key: 'NT_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Notifier interval (min)' },
         { key: 'VERIFY_TIMER_INTERVAL_MINUTES', type: 'interval', label: 'Verify interval (min)' },
+        { key: 'ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS', type: 'int', label: 'Arch repos: health watchdog interval (hours, 0 = off)', advanced: true, help: 'Opt-in (0 by default). When > 0, a systemd timer runs --arch-repos health --auto-disable --yes on this schedule so a dead unofficial repository never blocks pacman -Sy. Arch-family hosts only (the unit exits cleanly elsewhere). Applied on the next install/verify run.' },
         { key: 'VERIFY_LOW_IMPACT_ENABLED', type: 'bool', label: 'Verify: smart low-impact mode (background failures)' },
         { key: 'VERIFY_LOW_IMPACT_FAIL_STREAK', type: 'int', label: 'Verify: low-impact activation after consecutive failures' },
         { key: 'VERIFY_LOW_IMPACT_HEAVY_CHECK_COOLDOWN_MINUTES', type: 'int', label: 'Verify: heavy-check cooldown in low-impact mode (minutes)' },
@@ -34991,18 +35018,32 @@ generate_dashboard() {
                     stateHtml = ' <span style="color: var(--accent); font-weight:900;">[ENABLED' + (alhpLevel ? (' ' + alhpLevel) : '') + ']</span>';
                 }
             }
-            // v78 URL-liveness marker: dead hosts (recorded from the
-            // enable/enable-all/health validation outcomes) show red BEFORE a run.
-            if (urlState === 'dead') {
+            // v78/v81 URL-liveness markers: dead hosts (recorded from the
+            // enable/enable-all/health/probe outcomes) show BEFORE a run.
+            // v81 adds the dead-host variant (key trusted, host down — so
+            // re-enable only retries the host) and the http-refused variant
+            // (the catalog URL itself is plain HTTP; the FC2 HTTPS failcheck
+            // refuses it until you supply an https mirror yourself).
+            if (urlState === 'dead-host') {
+                stateHtml = stateHtml + ' <span style="color: rgba(250,204,21,0.95); font-weight:900;">[HOST DOWN — key trusted]</span>';
+            } else if (urlState === 'dead') {
                 stateHtml = stateHtml + ' <span style="color: rgba(239,68,68,0.9); font-weight:900;">[URL DEAD]</span>';
+            } else if (urlState === 'http-refused') {
+                stateHtml = stateHtml + ' <span style="color: rgba(239,68,68,0.9); font-weight:900;">[HTTP-ONLY — FC2 refuses; supply an https mirror]</span>';
             }
             var btn = '';
             if (enabled) {
                 btn = '<button class="pill" type="button" data-ar-disable="' + _znhArchReposEscapeHtml(name) + '" title="Remove this repository section from /etc/pacman.conf (confirmation required)">Disable</button>';
             } else if (name.toUpperCase() === 'ALHP') {
                 btn = '<button class="pill" type="button" data-ar-enable="' + _znhArchReposEscapeHtml(name) + '" title="Enable the ALHP optimised repositories for the detected CPU level (confirmation + CPU level check required)">Enable</button>';
-            } else if (url) {
+            } else if (url && String(url).indexOf('https://') === 0) {
                 btn = '<button class="pill" type="button" data-ar-enable="' + _znhArchReposEscapeHtml(name) + '" title="Add this repository to /etc/pacman.conf (confirmation required; keys are never auto-imported)">Enable</button>';
+            } else if (url) {
+                // v81: non-https catalog URL (the 'ada' case) — a plain Enable
+                // would always be refused by the HTTPS failcheck, so offer the
+                // copy-CLI button that carries the https-mirror placeholder
+                // instead of a dead-end confirmation round.
+                btn = '<button class="pill" type="button" data-ar-copy="' + _znhArchReposEscapeHtml(name) + '" title="The wiki lists an http:// server for this repository — the HTTPS failcheck refuses it. Copy the CLI command and pass an https mirror you verified on the wiki page">Copy CLI</button>';
             } else {
                 btn = '<button class="pill" type="button" data-ar-copy="' + _znhArchReposEscapeHtml(name) + '" title="No stored Server URL for this repository — copy the CLI command and pass the URL you verified on the wiki page">Copy CLI</button>';
             }
@@ -35011,7 +35052,7 @@ generate_dashboard() {
             // the spec-forced PackageOptional); pick another value and click
             // Enable — the confirm dialog then shows your chosen SigLevel.
             var sigSel = '';
-            if (!enabled && (url || name.toUpperCase() === 'ALHP')) {
+            if (!enabled && ((url && String(url).indexOf('https://') === 0) || name.toUpperCase() === 'ALHP')) {
                 var defSig = signed ? 'PackageRequired' : 'PackageOptional';
                 sigSel = '<select data-ar-siglevel="' + _znhArchReposEscapeHtml(name) + '" title="SigLevel written into /etc/pacman.conf for this repository (choice applies when you click Enable)" style="padding:4px 6px;border-radius:10px;border:1px solid var(--border);background:rgba(255,255,255,0.04);color:var(--text);font-size:0.78rem;">'
                     + '<option value="PackageRequired"' + (defSig === 'PackageRequired' ? ' selected' : '') + '>PackageRequired</option>'
@@ -37890,6 +37931,12 @@ CLEANUP_TIMER_FILE="/etc/systemd/system/${CLEANUP_SERVICE_NAME}.timer"
 VERIFY_SERVICE_NAME="zypper-auto-verify"
 VERIFY_SERVICE_FILE="/etc/systemd/system/${VERIFY_SERVICE_NAME}.service"
 VERIFY_TIMER_FILE="/etc/systemd/system/${VERIFY_SERVICE_NAME}.timer"
+
+# Arch repos health watchdog (root; v81) — opt-in via
+# ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS > 0 in /etc/zypper-auto.conf.
+ARCH_HEALTH_SERVICE_NAME="zypper-arch-repos-health"
+ARCH_HEALTH_SERVICE_FILE="/etc/systemd/system/${ARCH_HEALTH_SERVICE_NAME}.service"
+ARCH_HEALTH_TIMER_FILE="/etc/systemd/system/${ARCH_HEALTH_SERVICE_NAME}.timer"
 
 # Diagnostics follower service (root)
 DIAG_SERVICE_NAME="zypper-auto-diag-logs"
@@ -43795,7 +43842,7 @@ run_diag_logs_runner_only() {
         fi
         echo "Config snapshot (${CONFIG_FILE}):"
         if [ -f "${CONFIG_FILE}" ]; then
-            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|CACHE_EXPIRY_MINUTES|SNOOZE_SHORT_HOURS|SNOOZE_MEDIUM_HOURS|SNOOZE_LONG_HOURS|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|INSTALL_CLICK_SUPPRESS_MINUTES|VERIFY_NOTIFY_USER_ENABLED|ZYPPER_AUTO_DEBUG_LEVEL|ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
+            grep -E '^(DOWNLOADER_DOWNLOAD_MODE|DL_TIMER_INTERVAL_MINUTES|NT_TIMER_INTERVAL_MINUTES|VERIFY_TIMER_INTERVAL_MINUTES|ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS|CACHE_EXPIRY_MINUTES|SNOOZE_SHORT_HOURS|SNOOZE_MEDIUM_HOURS|SNOOZE_LONG_HOURS|LOCK_REMINDER_ENABLED|NO_UPDATES_REMINDER_REPEAT_ENABLED|UPDATES_READY_REMINDER_REPEAT_ENABLED|INSTALL_CLICK_SUPPRESS_MINUTES|VERIFY_NOTIFY_USER_ENABLED|ZYPPER_AUTO_DEBUG_LEVEL|ZYPPER_AUTO_GUARDED_LOG_SUCCESS_OUTPUT)=' "${CONFIG_FILE}" 2>/dev/null || echo "  (no matching keys found)"
 
             # Webhook URL is treated as a secret; only log a redacted host.
             wh="$(__znh_conf_peek_value WEBHOOK_URL)"
@@ -50327,6 +50374,8 @@ run_uninstall_helper_only() {
         echo "    zypper-cache-cleanup.service, zypper-cache-cleanup.timer" | tee -a "${LOG_FILE}"
         echo "    zypper-auto-verify.service, zypper-auto-verify.timer" | tee -a "${LOG_FILE}"
         echo "    zypper-auto-diag-logs.service (diagnostics follower)" | tee -a "${LOG_FILE}"
+        echo "    zypper-arch-repos-health.service, zypper-arch-repos-health.timer" | tee -a "${LOG_FILE}"
+        echo "    (Arch repos health watchdog; v81, opt-in — present only when enabled)" | tee -a "${LOG_FILE}"
         echo "  - Cleanup audit reports: ${cleanup_report_dir}" | tee -a "${LOG_FILE}"
         echo "  - Helper backups: ${helper_backup_dir}/boot-entries-* and ${helper_backup_dir}/btrfsmaintenance-*.bak" | tee -a "${LOG_FILE}"
         echo "  - /boot/do_purge_kernels marker (if present)" | tee -a "${LOG_FILE}"
@@ -50401,6 +50450,8 @@ run_uninstall_helper_only() {
     execute_guarded "Disable root downloader timer" systemctl disable --now zypper-autodownload.timer || true
     execute_guarded "Disable cache cleanup timer" systemctl disable --now zypper-cache-cleanup.timer || true
     execute_guarded "Disable verification timer" systemctl disable --now zypper-auto-verify.timer || true
+    # Arch repos health watchdog (v81, opt-in; may not be enabled).
+    execute_guarded "Disable Arch repos health watchdog timer" systemctl disable --now zypper-arch-repos-health.timer || true
 
     # Optional: disable OS-provided maintenance timers (Option 5 automation)
     # IMPORTANT: We only disable them; we never delete the unit files.
@@ -50445,6 +50496,8 @@ run_uninstall_helper_only() {
         /etc/systemd/system/zypper-cache-cleanup.timer \
         /etc/systemd/system/zypper-auto-verify.service \
         /etc/systemd/system/zypper-auto-verify.timer \
+        /etc/systemd/system/zypper-arch-repos-health.service \
+        /etc/systemd/system/zypper-arch-repos-health.timer \
         /etc/systemd/system/zypper-auto-diag-logs.service \
         /etc/systemd/system/zypper-auto-dashboard-api.service \
         /usr/local/bin/zypper-download-with-progress \
@@ -52859,7 +52912,9 @@ for it in items:
 #   disable-all         remove every catalog-listed repo currently enabled
 #   health              pacman -Sy-based health check; --auto-disable removes
 #                       faulty repositories (the WebUI failsafe: auto-disable
-#                       of repos that fail to connect)
+#                       of repos that fail to connect). v81: an opt-in watchdog
+#                       timer can run this on a schedule (see
+#                       ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS in the config).
 #   history             print the enable/disable/auto-disable state log
 # Flags: --dry-run (print exactly what would be written; no prompts, no
 #   changes), --json (list), --level v2|v3|v4 (ALHP level request),
@@ -53090,9 +53145,13 @@ znh_arch_repos_health_state() {
 }
 
 znh_arch_repos_url_log() {
-    # Args: <repo> <ok|dead> — records the last known SERVER URL liveness
-    # (from the enable/enable-all/health validation outcomes) so list + the
-    # WebUI can show dead hosts (the build.kilabit.info class) BEFORE a run.
+    # Args: <repo> <ok|dead|dead-host> — records the last known SERVER URL
+    # liveness (from the enable/enable-all/health/probe outcomes) so list +
+    # the WebUI can show dead hosts (the build.kilabit.info class) BEFORE a
+    # run. v81 adds the 'dead-host' distinction: the repository's KEY is
+    # trusted/imported fine but the HOST/URL is down, so re-enabling only
+    # needs a host retry (vs generic 'dead' = URL unreachable, key state
+    # unknown, e.g. from --probe-urls).
     local _aru_repo="$1" _aru_state="$2"
     local _aru_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-url-state.tsv"
     mkdir -p "${ZNH_ARCH_REPOS_STATE_DIR}" 2>/dev/null || true
@@ -53109,13 +53168,18 @@ znh_arch_repos_url_log() {
 }
 
 znh_arch_repos_url_state() {
-    # Prints the last recorded URL liveness (ok|dead|unknown) per repo.
+    # Prints the last recorded URL liveness per repo:
+    #   ok        — the URL answered the last sync/probe
+    #   dead      — the URL is unreachable (key state unknown; --probe-urls)
+    #   dead-host — v81 state: the KEY is trusted (imported fine) but the
+    #               host/URL failed the sync — re-enable only retries the host
+    #   unknown   — nothing recorded yet
     local _arur_repo="$1" _arur_state
     local _arur_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-url-state.tsv"
     [ -r "${_arur_file}" ] || { printf 'unknown'; return 0; }
     _arur_state="$(tac "${_arur_file}" 2>/dev/null | awk -F'\t' -v r="${_arur_repo}" '$2 == r {print $3; exit}' 2>/dev/null || true)"
     case "${_arur_state}" in
-        ok|dead) printf '%s' "${_arur_state}" ;;
+        ok|dead|dead-host) printf '%s' "${_arur_state}" ;;
         *) printf 'unknown' ;;
     esac
     return 0
@@ -53242,6 +53306,15 @@ znh_arch_repos_list_json() {
             fi
             if [ "${_arj_class}" = "signed" ]; then _arj_class=true; else _arj_class=false; fi
             _arj_url_state="$(znh_arch_repos_url_state "${_arj_name}")"
+            # v81: a non-https catalog URL is ALWAYS refused by the HTTPS
+            # failcheck (FC2), so report the derived state 'http-refused' —
+            # the WebUI then shows why without needing a run to fail first.
+            if [ -n "${_arj_url}" ]; then
+                case "${_arj_url}" in
+                    https://*) : ;;
+                    *) _arj_url_state="http-refused" ;;
+                esac
+            fi
             printf 'R\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n' \
                 "${_arj_name}" "${_arj_class}" "${_arj_url}" "${_arj_key}" "${_arj_note}" \
                 "${_arj_enabled}" "${_arj_health}" "${_arj_level}" "${_arj_url_state}"
@@ -53925,7 +53998,7 @@ run_arch_repos_only() {
         echo "  CPU microarchitecture level: x86-64-v$(znh_arch_repos_cpu_level) (gates the ALHP optimised repositories)" | tee -a "${LOG_FILE}"
         echo "" | tee -a "${LOG_FILE}"
         local _arl_spec _arl_name _arl_class _arl_url _arl_key _arl_note
-        local _arl_enabled _arl_level _arl_state _arl_shown=0
+        local _arl_enabled _arl_level _arl_state _arl_url_state _arl_shown=0
         for _arl_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
             IFS='|' read -r _arl_name _arl_class _arl_url _arl_key _arl_note <<<"${_arl_spec}"
             # Optional single-repo filter for 'list <repo>'.
@@ -53957,11 +54030,27 @@ run_arch_repos_only() {
                     printf '  %s[ENABLED%s]%s' "${_arl_cok}" "${_arl_level:+ (${_arl_level})}" "${_arl_creset}"
                 fi
             fi
-            # v78 URL-liveness marker (recorded from enable/enable-all/health
-            # validation outcomes): dead hosts show BEFORE a run.
-            if [ "$(znh_arch_repos_url_state "${_arl_name}")" = "dead" ]; then
+            # v78/v81 URL-liveness markers (recorded from the enable/enable-all/
+            # health/probe-urls outcomes) so dead hosts show BEFORE a run:
+            #   dead-host — key trusted, host down (re-enable retries the host only)
+            #   dead      — URL unreachable (key state unknown; --probe-urls)
+            # HTTP-ONLY (v81): a non-https catalog URL (the 'ada' case) is always
+            # refused by the HTTPS failcheck (FC2) until you supply an https
+            # mirror yourself — show why instead of letting it surprise you in
+            # a bulk run's failed summary.
+            _arl_url_state="$(znh_arch_repos_url_state "${_arl_name}")"
+            if [ "${_arl_url_state}" = "dead-host" ]; then
+                printf '  %s[HOST DOWN — key trusted (re-enable retries the host only)]%s' "${_arl_cerr}" "${_arl_creset}"
+            elif [ "${_arl_url_state}" = "dead" ]; then
                 printf '  %s[URL DEAD — last sync failed for this host]%s' "${_arl_cerr}" "${_arl_creset}"
             fi
+            case "${_arl_url}" in
+                https://*) : ;;
+                "") : ;;
+                *)
+                    printf '  %s[HTTP-ONLY — refused by the HTTPS failcheck; supply an https mirror yourself]%s' "${_arl_cerr}" "${_arl_creset}"
+                    ;;
+            esac
             echo ""
             printf '     Key: %s' "${_arl_key:-—}"
             if [ "${_arl_name}" = "ALHP" ]; then
@@ -54257,7 +54346,7 @@ run_arch_repos_only() {
         # REMOVING just its section — a backup restore would undo earlier
         # successes in the same run) and the run continues, then a summary
         # lists enabled / skipped / failed with reasons.
-        local -a _area_targets=() _area_nourl=() _area_done=() _area_failed=()
+        local -a _area_targets=() _area_nourl=() _area_refused=() _area_done=() _area_failed=()
         local _area_spec _area_name _area_class _area_url _area_key _area_note
         local _area_ml="${ZNH_ARCH_ALHP_MIRRORLIST:-/etc/pacman.d/alhp-mirrorlist}"
         local _area_alhp_note=""
@@ -54274,7 +54363,17 @@ run_arch_repos_only() {
                 continue
             fi
             if [ -n "${_area_url}" ]; then
-                _area_targets+=("${_area_spec}")
+                # v81: non-https catalog URLs (the 'ada' case — the wiki lists
+                # a plain-HTTP server) are REFUSED by FC2 every single run, so
+                # they are filtered out of the bulk targets up front and
+                # listed as Refused instead of failing in the loop and padding
+                # the failed summary with a known-by-design refusal. They stay
+                # in the catalog as reference; enable manually with an https
+                # mirror via: --arch-repos enable <repo> https://...
+                case "${_area_url}" in
+                    https://*) _area_targets+=("${_area_spec}") ;;
+                    *) _area_refused+=("${_area_name}") ;;
+                esac
             else
                 _area_nourl+=("${_area_name}")
             fi
@@ -54301,6 +54400,9 @@ run_arch_repos_only() {
         done
         if [ "${#_area_nourl[@]}" -gt 0 ]; then
             echo "Skipped (no verified catalog URL — enable individually with the URL from the wiki page): ${_area_nourl[*]}" | tee -a "${LOG_FILE}"
+        fi
+        if [ "${#_area_refused[@]}" -gt 0 ]; then
+            echo "Refused (http-only catalog URL — the HTTPS failcheck refuses them; enable manually with an https mirror you verified on the wiki page): ${_area_refused[*]}" | tee -a "${LOG_FILE}"
         fi
         if [ "${_ar_dry}" -eq 1 ]; then
             if [ "${_ar_import_keys}" -eq 1 ]; then
@@ -54401,7 +54503,9 @@ run_arch_repos_only() {
                 log_info "[arch-repos] [${_area_fname}] already exists in ${ZNH_ARCH_REPOS_PACMAN_CONF}; skipping (idempotent)."
                 continue
             fi
-            # FC2 HTTPS-only (skips http catalog rows like 'ada' — smart skip).
+            # FC2 HTTPS-only. v81: http catalog rows are filtered into the
+            # pre-loop Refused list above, so this is now defense-in-depth for
+            # URLs that reach the loop anyway (e.g. catalog edits).
             if [ "${_area_fname}" != "ALHP" ]; then
                 case "${_area_furl}" in
                     https://*) : ;;
@@ -54548,8 +54652,11 @@ run_arch_repos_only() {
                             znh_arch_repos_remove_section "${_area_dn}" 1 >/dev/null 2>&1 || true
                             znh_arch_repos_remove_section "${_area_dn}" 0 >/dev/null 2>&1 || true
                         fi
-                        znh_arch_repos_url_log "${_area_dn}" "dead"
-                        znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed"
+                        # v81: keys were imported BEFORE the write (a failed
+                        # import never writes), so a named failure here means
+                        # the KEY is trusted and the HOST/URL failed -> dead-host.
+                        znh_arch_repos_url_log "${_area_dn}" "dead-host"
+                        znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed (host down — key trusted)"
                         _area_failed+=("${_area_dn}")
                     else
                         znh_arch_repos_url_log "${_area_dn}" "ok"
@@ -54571,8 +54678,9 @@ run_arch_repos_only() {
                             znh_arch_repos_remove_section "${_area_dn}" 1 >/dev/null 2>&1 || true
                             znh_arch_repos_remove_section "${_area_dn}" 0 >/dev/null 2>&1 || true
                         fi
-                        znh_arch_repos_url_log "${_area_dn}" "dead"
-                        znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed (unattributed)"
+                        # v81: same dead-host reasoning (keys imported first).
+                        znh_arch_repos_url_log "${_area_dn}" "dead-host"
+                        znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed (unattributed; host down — keys trusted)"
                         _area_failed+=("${_area_dn}")
                     done
                     _area_done=()
@@ -54785,7 +54893,15 @@ run_arch_repos_only() {
                 fi
             fi
             znh_arch_repos_health_log "${_arh_name2}" "${_arh_state2}" "health run"
-            znh_arch_repos_url_log "${_arh_name2}" "${_arh_state2}" "health run"
+            # v81 fix: the url TSV uses ok|dead|dead-host, so the health
+            # state 'unreachable' used to fall through to 'unknown' there.
+            # Enabled repos are validated at enable time (key trusted), so an
+            # unreachable sync now means the HOST is down -> dead-host.
+            if [ "${_arh_state2}" = "unreachable" ]; then
+                znh_arch_repos_url_log "${_arh_name2}" "dead-host"
+            else
+                znh_arch_repos_url_log "${_arh_name2}" "${_arh_state2}"
+            fi
             if [ "${_arh_state2}" = "ok" ]; then
                 printf '  %s%-24s OK%s\n' "${_arh_cok}" "${_arh_name2}" "${_arh_creset}" | tee -a "${LOG_FILE}"
             else
@@ -54942,6 +55058,16 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          pacman keyring (present/missing + how to import all missing)."
     echo "  --arch-repos list --probe-urls  Probe every catalog server URL in parallel (4 concurrent, 8s"
     echo "                          timeout each) and refresh the [URL DEAD] liveness markers — read-only."
+    echo "  --arch-repos URL states (v81): [HOST DOWN — key trusted] (the key imported fine but the host"
+    echo "                          is down — re-enable retries the host only), [URL DEAD] (URL unreachable,"
+    echo "                          key state unknown) and [HTTP-ONLY] (the catalog URL is plain http — the"
+    echo "                          'ada' case; the HTTPS failcheck refuses it, so enable manually with an"
+    echo "                          https mirror; enable-all lists these as Refused, not as failures)."
+    echo "  --arch-repos health watchdog: set ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS (hours; 0 = off, the"
+    echo "                          default) in /etc/zypper-auto.conf and reinstall — a systemd timer then"
+    echo "                          runs '--arch-repos health --auto-disable --yes' on that schedule so a"
+    echo "                          dead repository never blocks pacman -Sy (Arch-family only; the unit"
+    echo "                          exits cleanly elsewhere and setting it back to 0 removes it)."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -57870,6 +57996,84 @@ if execute_guarded "Enable + start ${VERIFY_SERVICE_NAME}.timer" systemctl enabl
     log_success "Verification timer enabled and started"
 else
     log_error "Failed to enable verification timer (non-fatal)"
+fi
+
+# --- 6d. Arch repos health watchdog service + timer (v81; opt-in) ---
+# Written ONLY when ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS > 0 (default 0 =
+# off — nothing is installed). When the interval is reset to 0 after an
+# earlier opt-in install, any leftover units are disabled + removed so
+# turning the setting off fully reverts it. The service guards non-Arch
+# hosts itself (no /etc/pacman.conf -> clean exit 0), so the same fleet
+# config is safe on every distro.
+ARCH_HEALTH_ONACTIVE="${ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS}h"
+if [ "${ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS:-0}" -gt 0 ] 2>/dev/null; then
+    log_info ">>> Creating (root) Arch repos health watchdog service: ${ARCH_HEALTH_SERVICE_FILE}"
+    update_status "Creating Arch repos health watchdog..."
+    write_atomic "${ARCH_HEALTH_SERVICE_FILE}" << EOF
+[Unit]
+Description=Zypper auto-helper Arch unofficial repositories health watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Exit cleanly on non-Arch hosts (no pacman.conf -> nothing to check).
+# --auto-disable --yes: a repository that fails the pacman -Sy health pass
+# is removed so a dead repository never blocks system updates.
+ExecStart=/bin/sh -c '[ -f /etc/pacman.conf ] || exit 0; exec /usr/local/bin/zypper-auto-helper --arch-repos health --auto-disable --yes'
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUWeight=20
+IOWeight=20
+MemoryHigh=500M
+MemoryMax=750M
+StandardOutput=append:${LOG_DIR}/service-logs/arch-repos-health.log
+StandardError=append:${LOG_DIR}/service-logs/arch-repos-health-error.log
+
+# Hardening
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=${LOG_DIR} /run /var/run -/var/lib/zypper-auto -/var/cache/pacman/pkg
+EOF
+    log_success "Arch repos health watchdog service file created"
+    chmod 644 "${ARCH_HEALTH_SERVICE_FILE}" 2>/dev/null || true
+    chown root:root "${ARCH_HEALTH_SERVICE_FILE}" 2>/dev/null || true
+
+    log_info ">>> Creating (root) Arch repos health watchdog timer: ${ARCH_HEALTH_TIMER_FILE}"
+    write_atomic "${ARCH_HEALTH_TIMER_FILE}" << EOF
+[Unit]
+Description=Run ${ARCH_HEALTH_SERVICE_NAME}.service every ${ARCH_HEALTH_ONACTIVE} (Arch repos health watchdog)
+
+[Timer]
+OnBootSec=17min
+OnUnitActiveSec=${ARCH_HEALTH_ONACTIVE}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    log_success "Arch repos health watchdog timer file created"
+    chmod 644 "${ARCH_HEALTH_TIMER_FILE}" 2>/dev/null || true
+    chown root:root "${ARCH_HEALTH_TIMER_FILE}" 2>/dev/null || true
+
+    log_info ">>> Enabling (root) Arch repos health watchdog timer: ${ARCH_HEALTH_SERVICE_NAME}.timer"
+    update_status "Enabling Arch repos health watchdog..."
+    execute_guarded "systemd daemon-reload (Arch repos health watchdog)" systemctl daemon-reload
+    if execute_guarded "Enable + start ${ARCH_HEALTH_SERVICE_NAME}.timer" systemctl enable --now "${ARCH_HEALTH_SERVICE_NAME}.timer"; then
+        log_success "Arch repos health watchdog enabled (runs every ${ARCH_HEALTH_ONACTIVE})"
+    else
+        log_error "Failed to enable the Arch repos health watchdog timer (non-fatal)"
+    fi
+elif [ -e "${ARCH_HEALTH_TIMER_FILE}" ] || [ -e "${ARCH_HEALTH_SERVICE_FILE}" ]; then
+    # Watchdog turned off (interval 0) after an earlier opt-in install.
+    log_info ">>> ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS=0: removing the Arch repos health watchdog units..."
+    execute_guarded "Disable + stop ${ARCH_HEALTH_SERVICE_NAME}.timer" systemctl disable --now "${ARCH_HEALTH_SERVICE_NAME}.timer" || true
+    execute_guarded "Remove Arch repos health watchdog units" rm -f "${ARCH_HEALTH_SERVICE_FILE}" "${ARCH_HEALTH_TIMER_FILE}" || true
+    execute_guarded "systemd daemon-reload (Arch repos health watchdog removal)" systemctl daemon-reload || true
+    log_info "Arch repos health watchdog removed (it is opt-in; set ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS > 0 and re-run install to re-enable)."
 fi
 
 # --- 7. Create User Directories ---
