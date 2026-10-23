@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 81 - Enterprise Edition: arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 82 - Enterprise Edition: arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -50352,6 +50352,11 @@ run_uninstall_helper_only() {
     echo "Unofficial Arch repositories enabled via --arch-repos are kept as well"
     echo "(installed packages still depend on them); remove one with:"
     echo "sudo zypper-auto-helper --arch-repos disable <repo> (or 'disable-all')."
+    echo "v82: the repository stanzas live in /etc/pacman.d/zypper-auto-repos.conf (the"
+    echo "helper-owned include file) and pacman.conf only carries ONE managed Include"
+    echo "line for it — BOTH are intentionally kept (packages depend on the repos); for a"
+    echo "fully stock pacman.conf, run 'disable-all' first and then remove the managed"
+    echo "include line + the include file manually."
     echo "The enable/disable state log stays at /var/lib/zypper-auto/arch-repos-state.tsv."
     echo "The enable history stays at /var/lib/zypper-auto/copr-history.tsv"
     echo "(repos this helper enabled + when). To remove ONLY the repos this"
@@ -52875,7 +52880,16 @@ for it in items:
 #        lists 'ada' with an http:// server, so 'enable ada' is refused by
 #        this check unless the user supplies an https mirror URL themselves.
 #   FC3  Duplicate guard: the [section] must not already exist anywhere in
-#        /etc/pacman.conf (managed block or user-added) before it is added.
+#        /etc/pacman.conf or the helper's include file (managed block,
+#        user-added, or v82 include stanza) before it is added.
+#   v82  INCLUDE-FILE HYBRID: every managed repository stanza is written to
+#        /etc/pacman.d/zypper-auto-repos.conf; /etc/pacman.conf only ever
+#        carries ONE managed Include line for it (added once, idempotent).
+#        Pre-v82 managed blocks written directly into pacman.conf are
+#        auto-MIGRATED into the include file on the next enable run
+#        (validated via pacman-conf --repo-list before/after, rolled back
+#        on any mismatch). After that, enable/disable/auto-disable only
+#        ever rewrite the include file — pacman.conf stays stock.
 #   FC4  ALHP microarchitecture: for the ALHP optimised-rebuild repositories
 #        the requested x86-64-v2/v3/v4 level is checked against the CPU's
 #        /proc/cpuinfo feature flags (psABI level sets); a level the CPU
@@ -52928,10 +52942,14 @@ for it in items:
 # ZNH_ARCH_PACMAN_BIN: pacman binary (default pacman)
 # ZNH_ARCH_SUDO_MODE: "never" disables sudo prefixing (fixture files)
 # ZNH_ARCH_ALHP_MIRRORLIST: ALHP mirrorlist path (default /etc/pacman.d/alhp-mirrorlist)
+# ZNH_ARCH_INCLUDE_FILE: v82 include file the managed repo stanzas live in
+#   (default /etc/pacman.d/zypper-auto-repos.conf; pacman.conf only ever
+#   carries ONE managed Include line for it)
 ZNH_ARCH_REPOS_PACMAN_CONF="${ZNH_ARCH_PACMAN_CONF:-/etc/pacman.conf}"
 ZNH_ARCH_REPOS_CPUINFO_FILE="${ZNH_ARCH_CPUINFO_FILE:-/proc/cpuinfo}"
 ZNH_ARCH_REPOS_STATE_DIR="${ZNH_ARCH_STATE_DIR:-/var/lib/zypper-auto}"
 ZNH_ARCH_REPOS_PACMAN_BIN="${ZNH_ARCH_PACMAN_BIN:-pacman}"
+ZNH_ARCH_REPOS_INCLUDE_FILE="${ZNH_ARCH_INCLUDE_FILE:-/etc/pacman.d/zypper-auto-repos.conf}"
 ZNH_ARCH_REPOS_SYNC_TIMEOUT="${ZNH_ARCH_SYNC_TIMEOUT:-90}"
 ZNH_ARCH_REPOS_WIKI_URL="https://wiki.archlinux.org/title/Unofficial_user_repositories"
 # Exact warning text quoted verbatim from the Arch Wiki page (FC5 prints this
@@ -53053,21 +53071,55 @@ znh_arch_repos_catalog_lookup() {
     return 0
 }
 
+znh_arch_repos_grep_any_conf() {
+    # Args: <extended-regex> — returns 0 when the pattern matches the pacman
+    # config OR the v82 include file. Every read probe goes through here so
+    # a repository enabled via the include file is indistinguishable from one
+    # written directly into pacman.conf (and pre-v82 managed blocks that have
+    # not been migrated yet keep working — both locations are always checked).
+    local _argac_pattern="$1" _argac_file
+    [ -n "${_argac_pattern:-}" ] || return 1
+    for _argac_file in "${ZNH_ARCH_REPOS_PACMAN_CONF}" "${ZNH_ARCH_REPOS_INCLUDE_FILE}"; do
+        [ -r "${_argac_file}" ] || continue
+        if grep -Eq "${_argac_pattern}" "${_argac_file}" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+znh_arch_repos_include_wired() {
+    # Returns 0 when pacman.conf carries the managed Include line for the
+    # v82 include file — the single line of pacman.conf footprint, written
+    # once and then never touched again by enable/disable runs.
+    [ -r "${ZNH_ARCH_REPOS_PACMAN_CONF}" ] || return 1
+    grep -Eq "^Include[[:space:]]*=[[:space:]]*${ZNH_ARCH_REPOS_INCLUDE_FILE}[[:space:]]*$" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null
+}
+
 znh_arch_repos_section_exists() {
-    # Returns 0 when a [section] line exists in the pacman.conf (FC3).
+    # Returns 0 when a [section] line exists in the pacman.conf or in the
+    # v82 include file (FC3 duplicate guard — both locations, so a repo can
+    # never be duplicated across them).
     local _are_section="$1" _are_esc
-    local _are_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
-    [ -r "${_are_conf}" ] || return 1
     _are_esc="${_are_section//./\\.}"
-    grep -Eq "^[[:space:]]*\[${_are_esc}\][[:space:]]*$" "${_are_conf}" 2>/dev/null
+    znh_arch_repos_grep_any_conf "^[[:space:]]*\[${_are_esc}\][[:space:]]*$"
 }
 
 znh_arch_repos_alhp_level() {
     # Prints the currently enabled ALHP level (v2|v3|v4) or "" when none.
-    local _ara_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}" _ara_lvl
-    [ -r "${_ara_conf}" ] || { printf ''; return 0; }
-    _ara_lvl="$(grep -Eo '^\[core-x86-64-v[234]\]' "${_ara_conf}" 2>/dev/null | head -n1 | sed -E 's/.*-(v[234])\]/\1/' || true)"
-    printf '%s' "${_ara_lvl}"
+    # v82: the ALHP sections can live in pacman.conf OR the include file —
+    # probe both.
+    local _ara_conf _ara_lvl
+    for _ara_conf in "${ZNH_ARCH_REPOS_PACMAN_CONF}" "${ZNH_ARCH_REPOS_INCLUDE_FILE}"; do
+        [ -r "${_ara_conf}" ] || continue
+        _ara_lvl="$(grep -Eo '^\[core-x86-64-v[234]\]' "${_ara_conf}" 2>/dev/null | head -n1 | sed -E 's/.*-(v[234])\]/\1/' || true)"
+        if [ -n "${_ara_lvl}" ]; then
+            printf '%s' "${_ara_lvl}"
+            return 0
+        fi
+    done
+    printf ''
+    return 0
 }
 
 znh_arch_repos_cpu_level() {
@@ -53364,92 +53416,321 @@ sys.stdout.write(json.dumps(out) + "\n")
 
 znh_arch_repos_remove_section() {
     # Args: <section-name> [managed_only]
-    # Removes a repository section from the pacman.conf. Managed blocks written
-    # by this helper are removed whole (block markers); a plain user-added
-    # [section] is removed with its following key lines up to the next section
-    # header. python3 required (atomic rewrite with a proper section parser).
+    # v82: removes a repository section from BOTH config locations — the
+    # include file (where v82 stanzas live) and pacman.conf (legacy pre-v82
+    # managed blocks + plain user-added sections). Managed blocks whose body
+    # actually CONTAINS the named [section] are removed whole; unrelated
+    # managed blocks are untouched (v82 fix for a pre-v82 latent bug: the old
+    # managed pass dropped EVERY managed block in the file, which would nuke
+    # all other helper-enabled repositories when only one was removed).
+    # python3 required (atomic rewrite with a proper section parser).
     # Exit codes: 0 = changed, 3 = nothing matched, 1 = error.
     local _arrem_section="$1" _arrem_managed="${2:-0}"
     local _arrem_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
-    [ -f "${_arrem_conf}" ] || return 1
+    local _arrem_incl="${ZNH_ARCH_REPOS_INCLUDE_FILE}"
     if ! command -v python3 >/dev/null 2>&1; then
-        log_error "python3 is required to remove a repository section from ${_arrem_conf}."
+        log_error "python3 is required to remove a repository section."
         return 1
     fi
-    znh_arch_repos_need_root "edit ${_arrem_conf}" || return 1
-    ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} python3 - "${_arrem_conf}" "${_arrem_section}" "${_arrem_managed}" <<'PYAR' || return $?
+    znh_arch_repos_need_root "edit the arch-repos config locations" || return 1
+    ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} python3 - "${_arrem_conf}" "${_arrem_incl}" "${_arrem_section}" "${_arrem_managed}" <<'PYAR' || return $?
 import os
 import re
 import sys
 
-path, section, managed = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-try:
-    with open(path, "r", encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-except Exception as e:
-    sys.stderr.write(f"read failed: {e}\n")
-    raise SystemExit(1)
-
-out = []
-i = 0
-n = len(lines)
-changed = False
-begin_re = re.compile(r"^\s*# >>> zypper-auto-helper arch-repos")
-end_re = re.compile(r"^\s*# <<< zypper-auto-helper arch-repos")
+conf_path, incl_path, section, managed = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
 # The caller may pass a bracketed section name such as [core-x86-64-v3]
-# (the ALHP removal path). re.escape would escape those brackets and the
-# regex could then never match the [section] header line — so normalize to
-# the inner section name first and compare the exact bracketed line.
+# (the ALHP removal path) — normalize to the inner section name and compare
+# the exact bracketed line.
 if section.startswith("[") and section.endswith("]"):
     section = section[1:-1]
 sec_line = "[" + section + "]"
 
-while i < n:
-    line = lines[i]
-    if line.strip() == sec_line:
-        # Plain section: drop the header + following non-section lines
-        # (keys up to the next [ section header).
-        i += 1
-        while i < n and not lines[i].lstrip().startswith("["):
+begin_re = re.compile(r"^\s*# >>> zypper-auto-helper arch-repos")
+end_re = re.compile(r"^\s*# <<< zypper-auto-helper arch-repos")
+
+def process(path):
+    # Returns True when the file changed (atomic rewrite). Read failures are
+    # fatal (fail-safe: better to abort than to half-remove a section).
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except Exception as e:
+        sys.stderr.write(f"read failed: {path}: {e}\n")
+        raise SystemExit(1)
+    out = []
+    i = 0
+    n = len(lines)
+    changed = False
+    while i < n:
+        line = lines[i]
+        if line.strip() == sec_line:
+            # Plain section: drop the header + following key lines up to the
+            # next section header or managed marker.
             i += 1
-        changed = True
-        continue
-    if managed and begin_re.match(line):
+            while i < n and not lines[i].lstrip().startswith("[") \
+                    and not begin_re.match(lines[i]) and not end_re.match(lines[i]):
+                i += 1
+            changed = True
+            continue
+        if begin_re.match(line):
+            # Managed block: collect it whole, then drop it ONLY when its
+            # body contains the named [section] (v82 fix — see the bash
+            # comment above) and only in the managed pass.
+            block = [line]
+            i += 1
+            while i < n and not end_re.match(lines[i]):
+                block.append(lines[i])
+                i += 1
+            if i < n:
+                block.append(lines[i])
+                i += 1
+            if managed and any(b.strip() == sec_line for b in block):
+                changed = True
+                continue
+            out.extend(block)
+            continue
+        out.append(line)
         i += 1
-        while i < n and not end_re.match(lines[i]):
+    if changed:
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out).rstrip("\n") + "\n")
+        os.replace(tmp, path)
+    return changed
+
+any_changed = False
+for p in (incl_path, conf_path):
+    if process(p):
+        any_changed = True
+
+raise SystemExit(0 if any_changed else 3)
+PYAR
+}
+
+znh_arch_repos_ensure_include() {
+    # v82 INCLUDE-FILE HYBRID. Called before the first stanza write of a run
+    # (by append_block). Idempotent: a no-op when the include file exists,
+    # the Include line is wired, and no pre-v82 managed repo blocks remain in
+    # pacman.conf. Steps (each fail-safe with full restore on error):
+    #   1. create the include file when missing (a wired Include line pointing
+    #      at a missing file would make pacman fail hard — this also
+    #      self-heals a user-deleted include file)
+    #   2. ONE-TIME MIGRATION: move every pre-v82 managed repo block from
+    #      pacman.conf into the include file (validated: pacman-conf
+    #      --repo-list must be IDENTICAL before/after; any mismatch restores
+    #      both files and aborts the run)
+    #   3. wire the single managed Include line into pacman.conf when missing
+    # Sets globals for the FC9 rollback: ZNH_ARCH_REPOS_MIGRATED (1 when a
+    # migration ran this invocation) + ZNH_ARCH_REPOS_MIG_BAK_CONF/
+    # ZNH_ARCH_REPOS_MIG_BAK_INCL (the pre-change backups to restore).
+    local _arei_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
+    local _arei_incl="${ZNH_ARCH_REPOS_INCLUDE_FILE}"
+    local _arei_stamp _arei_pre_list _arei_post_list _arei_migrc _arei_sections
+    local _arei_mod=0
+    znh_arch_repos_need_root "set up the arch-repos include file" || return 1
+    [ -f "${_arei_conf}" ] || { log_error "${_arei_conf} not found."; return 1; }
+    ZNH_ARCH_REPOS_MIGRATED=0
+    ZNH_ARCH_REPOS_MIG_BAK_CONF=""
+    ZNH_ARCH_REPOS_MIG_BAK_INCL=""
+
+    # --- 1. Create the include file when missing ---
+    if [ ! -f "${_arei_incl}" ]; then
+        {
+            printf '# zypper-auto-helper arch-repos include file (v82).\n'
+            printf '# Every unofficial repository this helper manages lives in this file;\n'
+            printf '# %s only carries ONE managed Include line for it.\n' "${_arei_conf}"
+            printf '# Edit via: zypper-auto-helper --arch-repos enable|disable <repo>\n'
+        } | ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} tee "${_arei_incl}" >/dev/null || return 1
+        ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} chmod 644 "${_arei_incl}" 2>/dev/null || true
+        log_success "[arch-repos] v82 include file created: ${_arei_incl}"
+    fi
+
+    # Migration needed? A managed marker block whose body contains a
+    # [section] header (the include-line block has no section header —
+    # grep -A1 on the marker only matches real repo blocks).
+    if grep -E -A1 '^# >>> zypper-auto-helper arch-repos' "${_arei_conf}" 2>/dev/null | grep -Eq '^\[[A-Za-z0-9._-]+\]'; then
+        _arei_mod=1
+    fi
+    if ! znh_arch_repos_include_wired; then
+        _arei_mod=1
+    fi
+
+    # --- shared pre-change backups (only when something will change) ---
+    if [ "${_arei_mod}" -eq 1 ]; then
+        _arei_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
+        ZNH_ARCH_REPOS_MIG_BAK_CONF="${_arei_conf}.znh-backup-${_arei_stamp}"
+        ZNH_ARCH_REPOS_MIG_BAK_INCL="${_arei_incl}.znh-backup-${_arei_stamp}"
+        ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_arei_conf}" "${ZNH_ARCH_REPOS_MIG_BAK_CONF}" 2>/dev/null || return 1
+        ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_arei_incl}" "${ZNH_ARCH_REPOS_MIG_BAK_INCL}" 2>/dev/null || return 1
+        log_info "[arch-repos] v82 include wiring: backups kept (${ZNH_ARCH_REPOS_MIG_BAK_CONF}, ${ZNH_ARCH_REPOS_MIG_BAK_INCL})."
+    fi
+
+    # --- 2. One-time migration of pre-v82 managed repo blocks ---
+    if [ "${_arei_mod}" -eq 1 ] \
+       && grep -E -A1 '^# >>> zypper-auto-helper arch-repos' "${_arei_conf}" 2>/dev/null | grep -Eq '^\[[A-Za-z0-9._-]+\]'; then
+        # Parser-level before/after validation when pacman-conf is available
+        # (it resolves Include files exactly like pacman does).
+        _arei_pre_list=""
+        if command -v pacman-conf >/dev/null 2>&1; then
+            _arei_pre_list="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-conf --config="${_arei_conf}" --repo-list 2>/dev/null | sort || true)"
+        fi
+        log_info "[arch-repos] v82 migration: moving the managed repository blocks from ${_arei_conf} into ${_arei_incl}..."
+        # The mover prints the migrated [section] names on stdout (captured
+        # via a temp file — a $(...) would swallow the exit code in a
+        # subshell, and a FAILED migration must never look successful).
+        _arei_migrc=0
+        _arei_mig_tmp="$(mktemp)"
+        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} python3 - "${_arei_conf}" "${_arei_incl}" >"${_arei_mig_tmp}" 2>&1 <<'PYMIG'
+import os
+import re
+import sys
+
+conf_path, incl_path = sys.argv[1], sys.argv[2]
+begin_re = re.compile(r"^\s*# >>> zypper-auto-helper arch-repos")
+end_re = re.compile(r"^\s*# <<< zypper-auto-helper arch-repos")
+section_re = re.compile(r"^\[A-Za-z0-9._-]+\]\s*$")
+
+try:
+    with open(conf_path, "r", encoding="utf-8") as fh:
+        conf_lines = fh.read().splitlines()
+except Exception as e:
+    sys.stderr.write(f"read failed: {conf_path}: {e}\n")
+    raise SystemExit(1)
+incl_lines = []
+if os.path.exists(incl_path):
+    try:
+        with open(incl_path, "r", encoding="utf-8") as fh:
+            incl_lines = fh.read().splitlines()
+    except Exception as e:
+        sys.stderr.write(f"read failed: {incl_path}: {e}\n")
+        raise SystemExit(1)
+
+out = []
+blocks = []
+sections = []
+i = 0
+n = len(conf_lines)
+while i < n:
+    line = conf_lines[i]
+    if begin_re.match(line):
+        block = [line]
+        i += 1
+        while i < n and not end_re.match(conf_lines[i]):
+            block.append(conf_lines[i])
             i += 1
         if i < n:
+            block.append(conf_lines[i])
             i += 1
-        changed = True
+        # Migrate only REAL repo blocks: the body must contain a [section]
+        # header. The v82 include-line block (marker "... arch-repos include")
+        # has no section header and stays in pacman.conf untouched. Plain
+        # user-added sections (no markers — e.g. a pre-existing chaotic-aur)
+        # are never touched either.
+        body_sections = [b.strip() for b in block if section_re.match(b.strip())]
+        if body_sections:
+            blocks.append(block)
+            sections.extend(body_sections)
+        else:
+            out.extend(block)
         continue
     out.append(line)
     i += 1
 
-if not changed:
+if not blocks:
     raise SystemExit(3)
 
-tmp = f"{path}.tmp.{os.getpid()}"
-with open(tmp, "w", encoding="utf-8") as fh:
-    fh.write("\n".join(out).rstrip("\n") + "\n")
-os.replace(tmp, path)
+new_incl = list(incl_lines) + [""] + [ln for block in blocks for ln in block]
+
+def write_atomic(p, lines):
+    tmp = f"{p}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines).rstrip("\n") + "\n")
+    os.replace(tmp, p)
+
+write_atomic(conf_path, out)
+write_atomic(incl_path, new_incl)
+sys.stdout.write(" ".join(sections) + "\n")
 raise SystemExit(0)
-PYAR
+PYMIG
+        then
+            _arei_migrc=0
+        else
+            _arei_migrc=$?
+        fi
+        _arei_sections="$(cat "${_arei_mig_tmp}" 2>/dev/null || true)"
+        rm -f "${_arei_mig_tmp}" 2>/dev/null || true
+        case "${_arei_migrc}" in
+            0)
+                ZNH_ARCH_REPOS_MIGRATED=1
+                log_success "[arch-repos] v82 migration complete (${_arei_incl} now holds: ${_arei_sections})."
+                ;;
+            3)
+                # Nothing to migrate (only the include-line block present).
+                ;;
+            *)
+                log_error "[arch-repos] v82 migration FAILED; restoring the pre-migration files (fail-safe)."
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_MIG_BAK_CONF}" "${_arei_conf}" 2>/dev/null || true
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_MIG_BAK_INCL}" "${_arei_incl}" 2>/dev/null || true
+                return 1
+                ;;
+        esac
+    fi
+
+    # --- 3. Wire the single managed Include line into pacman.conf ---
+    if ! znh_arch_repos_include_wired; then
+        {
+            printf '\n'
+            printf '# >>> zypper-auto-helper arch-repos include (managed) >>>\n'
+            printf 'Include = %s\n' "${_arei_incl}"
+            printf '# <<< zypper-auto-helper arch-repos include <<<\n'
+        } | ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} tee -a "${_arei_conf}" >/dev/null || return 1
+        log_success "[arch-repos] v82: single Include line wired into ${_arei_conf} — future enable/disable runs never rewrite pacman.conf again."
+    fi
+
+    # --- 4. Post-migration validation: the effective repository list must be
+    # IDENTICAL after the move (same sections, now resolved via Include). Any
+    # mismatch means pacman can no longer see a repo -> full restore + abort.
+    if [ "${ZNH_ARCH_REPOS_MIGRATED}" -eq 1 ]; then
+        if command -v pacman-conf >/dev/null 2>&1; then
+            _arei_post_list="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-conf --config="${_arei_conf}" --repo-list 2>/dev/null | sort || true)"
+            if [ "${_arei_pre_list}" != "${_arei_post_list}" ]; then
+                log_error "[arch-repos] v82 migration VALIDATION FAILED: the effective repository list changed after the move; restoring the pre-migration files."
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_MIG_BAK_CONF}" "${_arei_conf}" 2>/dev/null || true
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_MIG_BAK_INCL}" "${_arei_incl}" 2>/dev/null || true
+                return 1
+            fi
+            log_success "[arch-repos] v82 migration validated: pacman-conf reports the identical repository list before and after the move."
+        else
+            log_warn "[arch-repos] pacman-conf not available: skipped the parser-level migration validation (the next pacman -Sy validation still guards the config)."
+        fi
+    fi
+    return 0
 }
 
 znh_arch_repos_append_block() {
-    # Args: <block-body> — backs up the pacman.conf (FC9 rollback source) and
-    # appends one managed block containing the body. sudo-aware; fixture mode
-    # (ZNH_ARCH_SUDO_MODE=never) writes directly.
+    # Args: <block-body> — v82: backs up the INCLUDE file and appends one
+    # managed block containing the body to it (never to pacman.conf). Ensures
+    # the include wiring first (create file + one-time migration + single
+    # Include line). sudo-aware; fixture mode (ZNH_ARCH_SUDO_MODE=never)
+    # writes directly.
     local _arab_body="$1" _arab_stamp
     local _arab_conf="${ZNH_ARCH_REPOS_PACMAN_CONF}"
+    local _arab_incl="${ZNH_ARCH_REPOS_INCLUDE_FILE}"
     [ -f "${_arab_conf}" ] || { log_error "${_arab_conf} not found."; return 1; }
-    znh_arch_repos_need_root "edit ${_arab_conf}" || return 1
-    _arab_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
-    if ! ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_arab_conf}" "${_arab_conf}.znh-backup-${_arab_stamp}" 2>/dev/null; then
-        log_error "Failed to back up ${_arab_conf}; refusing to write (fail-safe)."
+    znh_arch_repos_need_root "edit ${_arab_incl}" || return 1
+    if ! znh_arch_repos_ensure_include; then
+        log_error "[arch-repos] failed to set up the include wiring (${_arab_incl}); refusing to write (fail-safe)."
         return 1
     fi
-    log_info "[arch-repos] Backup written: ${_arab_conf}.znh-backup-${_arab_stamp}"
+    _arab_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
+    if ! ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_arab_incl}" "${_arab_incl}.znh-backup-${_arab_stamp}" 2>/dev/null; then
+        log_error "Failed to back up ${_arab_incl}; refusing to write (fail-safe)."
+        return 1
+    fi
+    log_info "[arch-repos] Backup written: ${_arab_incl}.znh-backup-${_arab_stamp}"
     {
         printf '\n'
         printf '# >>> zypper-auto-helper arch-repos (managed; edit via "zypper-auto-helper --arch-repos disable <name>") >>>\n'
@@ -53458,7 +53739,7 @@ znh_arch_repos_append_block() {
         # section-exists regexes (and pacman itself) could never match it.
         printf '%b\n' "${_arab_body}"
         printf '# <<< zypper-auto-helper arch-repos <<<\n'
-    } | ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} tee -a "${_arab_conf}" >/dev/null || return 1
+    } | ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} tee -a "${_arab_incl}" >/dev/null || return 1
     return 0
 }
 
@@ -54168,9 +54449,10 @@ run_arch_repos_only() {
                     return 1
                     ;;
             esac
-            # FC3: duplicate guard across the WHOLE pacman.conf.
+            # FC3: duplicate guard across BOTH config locations (pacman.conf
+            # + the v82 include file).
             if znh_arch_repos_section_exists "${_ar_section}"; then
-                log_error "FAILCHECK (duplicate): [${_ar_section}] already exists in ${ZNH_ARCH_REPOS_PACMAN_CONF}; refusing to add it again."
+                log_error "FAILCHECK (duplicate): [${_ar_section}] already exists in the pacman configuration (${ZNH_ARCH_REPOS_PACMAN_CONF} or ${ZNH_ARCH_REPOS_INCLUDE_FILE}); refusing to add it again."
                 log_error "Disable it first if you want to re-configure it: zypper-auto-helper --arch-repos disable ${_ar_name}"
                 return 1
             fi
@@ -54261,8 +54543,8 @@ run_arch_repos_only() {
 
         if [ "${_ar_dry}" -eq 1 ]; then
             echo "" | tee -a "${LOG_FILE}"
-            echo "[dry-run] Would back up ${ZNH_ARCH_REPOS_PACMAN_CONF} to ${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-<timestamp>" | tee -a "${LOG_FILE}"
-            echo "[dry-run] Would append this managed block to ${ZNH_ARCH_REPOS_PACMAN_CONF}:" | tee -a "${LOG_FILE}"
+            echo "[dry-run] v82 include-file hybrid: the stanza would be appended to ${ZNH_ARCH_REPOS_INCLUDE_FILE} (backed up first); pacman.conf only ever gains ONE managed Include line for it (idempotent), and any pre-v82 managed blocks in pacman.conf would be MIGRATED into the include file (validated via pacman-conf --repo-list, rolled back on any mismatch)." | tee -a "${LOG_FILE}"
+            echo "[dry-run] Would append this managed block to ${ZNH_ARCH_REPOS_INCLUDE_FILE}:" | tee -a "${LOG_FILE}"
             printf '%b\n' "${_ar_body}" | sed 's/^/    /' | tee -a "${LOG_FILE}"
             echo "[dry-run] Would then run: timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy --noconfirm" | tee -a "${LOG_FILE}"
             echo "[dry-run] Would roll the block back if the repository is unreachable or returns an error." | tee -a "${LOG_FILE}"
@@ -54271,13 +54553,13 @@ run_arch_repos_only() {
             return 0
         fi
 
-        # Write the managed block (backup + append).
-        znh_arch_repos_need_root "edit ${ZNH_ARCH_REPOS_PACMAN_CONF}" || return 1
+        # Write the managed block (ensure-include wiring + include-file append).
+        znh_arch_repos_need_root "edit ${ZNH_ARCH_REPOS_INCLUDE_FILE}" || return 1
         if ! znh_arch_repos_append_block "${_ar_body}"; then
-            log_error "Failed to write the ${_ar_name} section to ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+            log_error "Failed to write the ${_ar_name} stanza to ${ZNH_ARCH_REPOS_INCLUDE_FILE}."
             return 1
         fi
-        log_success "[arch-repos] ${_ar_name} section written to ${ZNH_ARCH_REPOS_PACMAN_CONF} (managed block)."
+        log_success "[arch-repos] ${_ar_name} stanza written to ${ZNH_ARCH_REPOS_INCLUDE_FILE} (managed block; pacman.conf only carries the single Include line)."
 
         # FC9: post-add validation with pacman -Sy under a timeout; rollback on
         # any error mentioning the repository or a general sync failure.
@@ -54301,23 +54583,66 @@ run_arch_repos_only() {
             echo "${_ar_sync_out}" | tail -n 20 | tee -a "${LOG_FILE}"
             log_error "FAILCHECK (post-add validation): ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy failed after adding ${_ar_name}; rolling the change back."
             log_error "If you have not imported the repository key yet (signed repos), do that FIRST, then re-run this command."
-            # Rollback: restore the newest pre-write backup (glob + -nt; no ls).
-            local _ar_backup _ar_cand
-            _ar_backup=""
-            for _ar_cand in "${ZNH_ARCH_REPOS_PACMAN_CONF}".znh-backup-*; do
-                [ -e "${_ar_cand}" ] || continue
-                if [ -z "${_ar_backup}" ] || [ "${_ar_cand}" -nt "${_ar_backup}" ]; then
-                    _ar_backup="${_ar_cand}"
+            # v82 rollback: the stanza lives in the include file, so the
+            # primary path is the same per-section removal the bulk mode uses
+            # (removes ONLY this repository's stanza from BOTH config
+            # locations). The old restore-newest-pacman.conf-backup approach
+            # would not remove the stanza from the include file at all (and
+            # could restore an unrelated older run's backup).
+            local _ar_named=0
+            if [ "${_ar_name}" = "ALHP" ]; then
+                if printf '%s' "${_ar_sync_out}" | grep -Eiq "(error|fail).*alhp|alhp.*(error|fail)"; then
+                    _ar_named=1
                 fi
-            done
-            if [ -n "${_ar_backup}" ]; then
-                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_ar_backup}" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null; then
-                    log_info "[arch-repos] Rolled back: ${ZNH_ARCH_REPOS_PACMAN_CONF} restored from ${_ar_backup}."
-                else
-                    log_error "[arch-repos] Rollback FAILED — restore manually from ${_ar_backup}."
-                fi
+            elif printf '%s' "${_ar_sync_out}" | grep -Eiq "(error|fail).*${_ar_sec_esc}|${_ar_sec_esc}.*(error|fail)"; then
+                _ar_named=1
+            fi
+            if [ "${_ar_name}" = "ALHP" ]; then
+                # ALHP: capture the level ONCE, remove the three sections.
+                local _ar_rb_lvl _ar_rb_sec
+                _ar_rb_lvl="$(znh_arch_repos_alhp_level)"
+                [ -n "${_ar_rb_lvl}" ] || _ar_rb_lvl="${_ar_lvl}"
+                for _ar_rb_sec in core extra multilib; do
+                    znh_arch_repos_remove_section "${_ar_rb_sec}-x86-64-${_ar_rb_lvl}" 1 >/dev/null 2>&1 || true
+                    znh_arch_repos_remove_section "${_ar_rb_sec}-x86-64-${_ar_rb_lvl}" 0 >/dev/null 2>&1 || true
+                done
+                log_info "[arch-repos] Rolled back: the ALHP x86-64-${_ar_rb_lvl} sections were removed from the arch-repos config locations."
             else
-                log_error "[arch-repos] No pre-write backup found for rollback."
+                znh_arch_repos_remove_section "${_ar_section}" 1 >/dev/null 2>&1 || true
+                znh_arch_repos_remove_section "${_ar_section}" 0 >/dev/null 2>&1 || true
+                if znh_arch_repos_section_exists "${_ar_section}"; then
+                    # Fallback: section removal failed — restore the newest
+                    # include-file backup and warn loudly.
+                    local _ar_backup _ar_cand
+                    _ar_backup=""
+                    for _ar_cand in "${ZNH_ARCH_REPOS_INCLUDE_FILE}".znh-backup-*; do
+                        [ -e "${_ar_cand}" ] || continue
+                        if [ -z "${_ar_backup}" ] || [ "${_ar_cand}" -nt "${_ar_backup}" ]; then
+                            _ar_backup="${_ar_cand}"
+                        fi
+                    done
+                    if [ -n "${_ar_backup}" ]; then
+                        if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${_ar_backup}" "${ZNH_ARCH_REPOS_INCLUDE_FILE}" 2>/dev/null; then
+                            log_info "[arch-repos] Rolled back: ${ZNH_ARCH_REPOS_INCLUDE_FILE} restored from ${_ar_backup}."
+                        else
+                            log_error "[arch-repos] Rollback FAILED — restore ${ZNH_ARCH_REPOS_INCLUDE_FILE} manually from ${_ar_backup}."
+                        fi
+                    else
+                        log_error "[arch-repos] No include-file backup found for rollback — remove [${_ar_section}] manually."
+                    fi
+                else
+                    log_info "[arch-repos] Rolled back: the [${_ar_section}] stanza was removed from the arch-repos config locations."
+                fi
+            fi
+            # If a v82 include migration ran in THIS run and the failure did
+            # NOT name our repository, the migration itself may be implicated
+            # — conservatively restore the pre-migration pacman.conf + the
+            # pre-migration include file as well.
+            if [ "${ZNH_ARCH_REPOS_MIGRATED:-0}" -eq 1 ] && [ "${_ar_named}" -eq 0 ] \
+               && [ -n "${ZNH_ARCH_REPOS_MIG_BAK_CONF:-}" ]; then
+                log_warn "[arch-repos] the sync failure did not name ${_ar_name} and an include migration ran this run — restoring the pre-migration ${ZNH_ARCH_REPOS_PACMAN_CONF} and ${ZNH_ARCH_REPOS_INCLUDE_FILE} as well (conservative)."
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_MIG_BAK_CONF}" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null || true
+                ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_MIG_BAK_INCL}" "${ZNH_ARCH_REPOS_INCLUDE_FILE}" 2>/dev/null || true
             fi
             znh_arch_repos_url_log "${_ar_name}" "dead"
             znh_arch_repos_state_log "${_ar_name}" "rolled-back" "post-add pacman -Sy validation failed"
@@ -54383,7 +54708,7 @@ run_arch_repos_only() {
             return 0
         fi
         echo "" | tee -a "${LOG_FILE}"
-        echo "BULK ENABLE (enable-all): ${#_area_targets[@]} repositories with verified catalog URLs will be added to ${ZNH_ARCH_REPOS_PACMAN_CONF}, one managed section each." | tee -a "${LOG_FILE}"
+        echo "BULK ENABLE (enable-all): ${#_area_targets[@]} repositories with verified catalog URLs will be added to ${ZNH_ARCH_REPOS_INCLUDE_FILE}, one managed stanza each (v82 include-file hybrid: pacman.conf only carries ONE managed Include line; pre-v82 managed blocks are migrated into the include file first, validated)." | tee -a "${LOG_FILE}"
         echo "WARNING (verbatim from ${ZNH_ARCH_REPOS_WIKI_URL}):" | tee -a "${LOG_FILE}"
         echo "  ${ZNH_ARCH_REPOS_WIKI_WARNING}" | tee -a "${LOG_FILE}"
         if [ "${_ar_import_keys}" -eq 1 ]; then
@@ -54500,7 +54825,7 @@ run_arch_repos_only() {
                 continue
             fi
             if [ "${_area_fname}" != "ALHP" ] && znh_arch_repos_section_exists "${_area_fname}"; then
-                log_info "[arch-repos] [${_area_fname}] already exists in ${ZNH_ARCH_REPOS_PACMAN_CONF}; skipping (idempotent)."
+                log_info "[arch-repos] [${_area_fname}] already exists in the pacman configuration (${ZNH_ARCH_REPOS_PACMAN_CONF} or ${ZNH_ARCH_REPOS_INCLUDE_FILE}); skipping (idempotent)."
                 continue
             fi
             # FC2 HTTPS-only. v81: http catalog rows are filtered into the
@@ -54743,20 +55068,25 @@ run_arch_repos_only() {
             return 0
         fi
         echo "" | tee -a "${LOG_FILE}"
-        echo "The following repositories will be REMOVED from ${ZNH_ARCH_REPOS_PACMAN_CONF}:" | tee -a "${LOG_FILE}"
+        echo "The following repositories will be REMOVED from the arch-repos config locations (${ZNH_ARCH_REPOS_PACMAN_CONF} and ${ZNH_ARCH_REPOS_INCLUDE_FILE}):" | tee -a "${LOG_FILE}"
         local _ardt
         for _ardt in "${_ar_targets[@]}"; do
             echo "  - ${_ardt}" | tee -a "${LOG_FILE}"
-            # Preview the exact section being removed (honesty first).
+            # Preview the exact section being removed (honesty first; BOTH
+            # config locations — the stanza can live in either).
             if [ "${_ardt}" = "ALHP" ]; then
-                grep -E '^\[(core|extra|multilib)-x86-64-v[234]\]' "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null | sed 's/^/      /' | tee -a "${LOG_FILE}" || true
+                { grep -E '^\[(core|extra|multilib)-x86-64-v[234]\]' "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null || true; \
+                  grep -E '^\[(core|extra|multilib)-x86-64-v[234]\]' "${ZNH_ARCH_REPOS_INCLUDE_FILE}" 2>/dev/null || true; \
+                } | sed 's/^/      /' | tee -a "${LOG_FILE}"
             else
-                grep -E "^[[:space:]]*\[${_ardt//./\\.}\][[:space:]]*$" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null | sed 's/^/      /' | tee -a "${LOG_FILE}" || true
+                { grep -E "^[[:space:]]*\[${_ardt//./\\.}\][[:space:]]*$" "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null || true; \
+                  grep -E "^[[:space:]]*\[${_ardt//./\\.}\][[:space:]]*$" "${ZNH_ARCH_REPOS_INCLUDE_FILE}" 2>/dev/null || true; \
+                } | sed 's/^/      /' | tee -a "${LOG_FILE}"
             fi
         done
         echo "Installed packages from these repositories are NOT removed (pacman keeps them; remove them yourself if wanted)." | tee -a "${LOG_FILE}"
         if [ "${_ar_dry}" -eq 1 ]; then
-            echo "[dry-run] Would back up ${ZNH_ARCH_REPOS_PACMAN_CONF} and remove the section(s) above." | tee -a "${LOG_FILE}"
+            echo "[dry-run] Would back up BOTH config locations (${ZNH_ARCH_REPOS_PACMAN_CONF} + ${ZNH_ARCH_REPOS_INCLUDE_FILE}) and remove the section(s) above." | tee -a "${LOG_FILE}"
             log_info "Dry-run mode: nothing was changed."
             return 0
         fi
@@ -54777,15 +55107,19 @@ run_arch_repos_only() {
             fi
             log_info "[arch-repos] non-interactive disable confirmed via --yes."
         fi
-        znh_arch_repos_need_root "edit ${ZNH_ARCH_REPOS_PACMAN_CONF}" || return 1
-        # Backup once for the whole run.
+        znh_arch_repos_need_root "edit the arch-repos config locations" || return 1
+        # Backup once for the whole run — BOTH config locations.
         local _ardb_stamp
         _ardb_stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
         if ! ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_PACMAN_CONF}" "${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-${_ardb_stamp}" 2>/dev/null; then
             log_error "Failed to back up ${ZNH_ARCH_REPOS_PACMAN_CONF}; refusing to remove anything."
             return 1
         fi
-        log_info "[arch-repos] Backup written: ${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-${_ardb_stamp}"
+        if [ -f "${ZNH_ARCH_REPOS_INCLUDE_FILE}" ] && ! ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} cp -a "${ZNH_ARCH_REPOS_INCLUDE_FILE}" "${ZNH_ARCH_REPOS_INCLUDE_FILE}.znh-backup-${_ardb_stamp}" 2>/dev/null; then
+            log_error "Failed to back up ${ZNH_ARCH_REPOS_INCLUDE_FILE}; refusing to remove anything."
+            return 1
+        fi
+        log_info "[arch-repos] Backups written: ${ZNH_ARCH_REPOS_PACMAN_CONF}.znh-backup-${_ardb_stamp} + ${ZNH_ARCH_REPOS_INCLUDE_FILE}.znh-backup-${_ardb_stamp}"
         local _ardn _ardn_rc=0
         for _ardn in "${_ar_targets[@]}"; do
             # ALHP: remove the three level sections; others: managed block then
@@ -54800,8 +55134,8 @@ run_arch_repos_only() {
                 for _ardl in core extra multilib; do
                     znh_arch_repos_remove_section "${_ardl}-x86-64-${_ardl_lvl}" >/dev/null 2>&1 || true
                 done
-                if grep -Eq '^\[(core|extra|multilib)-x86-64-v[234]\]' "${ZNH_ARCH_REPOS_PACMAN_CONF}" 2>/dev/null; then
-                    log_error "[arch-repos] failed to remove some ALHP sections from ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                if znh_arch_repos_grep_any_conf '^\[(core|extra|multilib)-x86-64-v[234]\]'; then
+                    log_error "[arch-repos] failed to remove some ALHP sections from the arch-repos config locations."
                     _ardn_rc=1
                 else
                     znh_arch_repos_state_log "ALHP" "disabled" "level ${_ardl_lvl} sections removed"
@@ -54811,16 +55145,16 @@ run_arch_repos_only() {
                 znh_arch_repos_remove_section "${_ardn}" 1 >/dev/null 2>&1 || true
                 znh_arch_repos_remove_section "${_ardn}" 0 >/dev/null 2>&1 || true
                 if znh_arch_repos_section_exists "${_ardn}"; then
-                    log_error "[arch-repos] failed to remove [${_ardn}] from ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                    log_error "[arch-repos] failed to remove [${_ardn}] from the arch-repos config locations."
                     _ardn_rc=1
                 else
                     znh_arch_repos_state_log "${_ardn}" "disabled" "section removed"
-                    log_success "[arch-repos] [${_ardn}] removed from ${ZNH_ARCH_REPOS_PACMAN_CONF}."
+                    log_success "[arch-repos] [${_ardn}] removed from the arch-repos config locations."
                 fi
             fi
         done
         echo "" | tee -a "${LOG_FILE}"
-        echo "Disabled ${#_ar_targets[@]} repositor$( [ "${#_ar_targets[@]}" -eq 1 ] && printf 'y' || printf 'ies') from ${ZNH_ARCH_REPOS_PACMAN_CONF} (installed packages are NOT removed)." | tee -a "${LOG_FILE}"
+        echo "Disabled ${#_ar_targets[@]} repositor$( [ "${#_ar_targets[@]}" -eq 1 ] && printf 'y' || printf 'ies') from the arch-repos config locations (installed packages are NOT removed; the single Include line in ${ZNH_ARCH_REPOS_PACMAN_CONF} stays for future enables)." | tee -a "${LOG_FILE}"
         if [ "${_ardn_rc}" -eq 0 ]; then
             update_status "SUCCESS: Arch repos disabled (${#_ar_targets[@]})"
         else
@@ -54964,7 +55298,7 @@ run_arch_repos_only() {
                 log_error "[arch-repos] auto-disable FAILED for ${_arfb} (section still present)."
             else
                 znh_arch_repos_state_log "${_arfb}" "auto-disabled" "failed the health check"
-                log_success "[arch-repos] ${_arfb} auto-disabled (removed from ${ZNH_ARCH_REPOS_PACMAN_CONF})."
+                log_success "[arch-repos] ${_arfb} auto-disabled (removed from the arch-repos config locations)."
                 _arfb_ok=$((_arfb_ok + 1))
             fi
         done
@@ -55031,7 +55365,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --arch-repos [list|status|enable <repo> [url]|disable <repo>|disable-all|health|history]"
     echo "                          Manage UNOFFICIAL Arch user repositories (Arch family only) with"
     echo "                          hard safety checks. Every repo is untrusted by default: HTTPS-only"
-    echo "                          server URLs, duplicate guard in /etc/pacman.conf, ALHP CPU level"
+    echo "                          server URLs, duplicate guard across pacman.conf + the include file, ALHP CPU level"
     echo "                          check, the Arch Wiki warning printed verbatim before any change,"
     echo "                          explicit ACCEPT + KEYVERIFIED (signed; you import/sign the key"
     echo "                          yourself — keys are NEVER auto-imported) or UNSIGNOK (unsigned;"
@@ -55039,6 +55373,14 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          run, a post-add pacman -Sy validation with rollback, and full state"
     echo "                          logging. 'health --auto-disable' removes faulty repos (the WebUI"
     echo "                          failsafe); --dry-run prints what would be written."
+    echo "  --arch-repos include-file hybrid (v82): every managed repository stanza is written to"
+    echo "                          /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever"
+    echo "                          carries ONE managed Include line for it (added once, idempotent);"
+    echo "                          pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the"
+    echo "                          include file on the next enable run (validated via pacman-conf"
+    echo "                          --repo-list before/after, fully rolled back on any mismatch) —"
+    echo "                          after that, enable/disable/auto-disable never rewrite pacman.conf"
+    echo "                          again, so it stays stock and survives distro pacnew merges."
     echo "  --arch-repos enable-all [--import-keys] [--level vN] [--siglevel ...]"
     echo "                          Bulk setup (v71): enable EVERY catalog repository with a verified"
     echo "                          https URL in one run. With --import-keys the helper imports +"

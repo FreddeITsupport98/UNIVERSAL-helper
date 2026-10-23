@@ -101,9 +101,23 @@ require_contains "${source_text}" "printf '{\"supported\": false, \"family\": \"
 require_contains "${source_text}" 'FAILCHECK (HTTPS-only): refusing to enable' "Missing the HTTPS-only failcheck refusal"
 require_contains "${source_text}" 'Repositories are never enabled over plain HTTP.' "Missing the plain-HTTP refusal explanation"
 
-# --- 5) FC3: duplicate guard across the whole pacman.conf ---
-require_contains "${source_text}" 'FAILCHECK (duplicate): [${_ar_section}] already exists in ${ZNH_ARCH_REPOS_PACMAN_CONF}' "Missing the duplicate-guard failcheck"
+# --- 5) FC3: duplicate guard across BOTH config locations (pacman.conf + include file) ---
+require_contains "${source_text}" 'FAILCHECK (duplicate): [${_ar_section}] already exists in the pacman configuration' "Missing the duplicate-guard failcheck"
+require_contains "${source_text}" 'already exists in the pacman configuration (${ZNH_ARCH_REPOS_PACMAN_CONF} or ${ZNH_ARCH_REPOS_INCLUDE_FILE})' "Missing the both-locations duplicate-guard wording (v82)"
 require_contains "${source_text}" 'FAILCHECK (duplicate): ALHP repositories are already enabled' "Missing the ALHP duplicate-guard failcheck"
+
+# --- 5b) v82 include-file hybrid: wiring + migration + single Include line ---
+require_contains "${source_text}" 'ZNH_ARCH_REPOS_INCLUDE_FILE="${ZNH_ARCH_INCLUDE_FILE:-/etc/pacman.d/zypper-auto-repos.conf}"' "Missing the v82 include-file override hook + default"
+require_contains "${source_text}" 'znh_arch_repos_ensure_include() {' "Missing the v82 ensure_include wiring function"
+require_contains "${source_text}" 'znh_arch_repos_grep_any_conf() {' "Missing the v82 both-locations grep helper"
+require_contains "${source_text}" 'znh_arch_repos_include_wired() {' "Missing the v82 include-wired probe"
+require_contains "${source_text}" '# >>> zypper-auto-helper arch-repos include (managed) >>>' "Missing the v82 managed Include-line block marker"
+require_contains "${source_text}" 'pacman-conf --config="${_arei_conf}" --repo-list' "Missing the v82 migration validation via pacman-conf --repo-list"
+require_contains "${source_text}" 'v82 migration FAILED; restoring the pre-migration files (fail-safe).' "Missing the v82 migration failure restore"
+require_contains "${source_text}" 'v82 migration VALIDATION FAILED' "Missing the v82 migration validation-failure restore"
+require_contains "${source_text}" 'if managed and any(b.strip() == sec_line for b in block):' "Missing the v82 remove_section body-match fix (managed blocks are only removed when they contain the named section)"
+require_not_contains "${source_text}" 'tee -a "${_arab_conf}"' "v82 drift guard: append_block must append to the INCLUDE file, never to pacman.conf"
+require_contains "${source_text}" 'tee -a "${_arab_incl}"' "Missing the v82 append_block include-file append"
 
 # --- 6) FC4: ALHP microarchitecture level check (exact psABI flag sets) ---
 require_contains "${source_text}" 'FAILCHECK (ALHP CPU level): this CPU supports x86-64-v${_ar_cpu}' "Missing the ALHP CPU-level failcheck"
@@ -132,7 +146,8 @@ require_contains "${source_text}" 'FAILCHECK (one repository per run): refusing 
 require_contains "${source_text}" 'FAILCHECK (post-add validation): ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy failed after adding ${_ar_name}; rolling the change back.' "Missing the post-add validation failcheck"
 require_contains "${source_text}" 'timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm' "Missing the timeout-bounded pacman -Sy post-add validation"
 require_contains "${source_text}" 'ZNH_ARCH_REPOS_SYNC_TIMEOUT="${ZNH_ARCH_SYNC_TIMEOUT:-90}"' "Missing the ZNH_ARCH_REPOS_SYNC_TIMEOUT default (90s)"
-require_contains "${source_text}" 'Rolled back: ${ZNH_ARCH_REPOS_PACMAN_CONF} restored from ${_ar_backup}.' "Missing the rollback restore from the pre-write backup"
+require_contains "${source_text}" 'Rolled back: ${ZNH_ARCH_REPOS_INCLUDE_FILE} restored from ${_ar_backup}.' "Missing the rollback restore from the include-file backup (v82)"
+require_contains "${source_text}" 'Rolled back: the [${_ar_section}] stanza was removed from the arch-repos config locations.' "Missing the v82 per-section rollback message"
 require_contains "${source_text}" 'If you have not imported the repository key yet (signed repos), do that FIRST' "Missing the not-yet-imported-key explanation in the rollback message"
 
 # --- 11) FC10: full action logging (state TSV + health TSV) ---
@@ -162,7 +177,8 @@ require_contains "${source_text}" 'This repository is UNSIGNED; enabling forces 
 
 # --- 14) Subcommands + flags + dry-run + JSON + override hooks ---
 require_contains "${source_text}" 'znh_arch_repos_list_json' "Missing the --json listing function"
-require_contains "${source_text}" '[dry-run] Would append this managed block to ${ZNH_ARCH_REPOS_PACMAN_CONF}:' "Missing the dry-run block preview"
+require_contains "${source_text}" '[dry-run] Would append this managed block to ${ZNH_ARCH_REPOS_INCLUDE_FILE}:' "Missing the dry-run block preview (v82: stanzas go to the include file)"
+require_contains "${source_text}" 'v82 include-file hybrid: the stanza would be appended to ${ZNH_ARCH_REPOS_INCLUDE_FILE}' "Missing the v82 include-file hybrid dry-run explanation"
 require_contains "${source_text}" '[dry-run] Would then run: timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy --noconfirm' "Missing the dry-run validation preview"
 require_contains "${source_text}" 'ZNH_ARCH_REPOS_PACMAN_CONF="${ZNH_ARCH_PACMAN_CONF:-/etc/pacman.conf}"' "Missing the ZNH_ARCH_PACMAN_CONF test override hook"
 require_contains "${source_text}" 'ZNH_ARCH_REPOS_CPUINFO_FILE="${ZNH_ARCH_CPUINFO_FILE:-/proc/cpuinfo}"' "Missing the ZNH_ARCH_CPUINFO_FILE test override hook"
@@ -238,6 +254,7 @@ trap 'rm -rf -- "${_rt_dir}"' EXIT
 _ar_fn_file="${_rt_dir}/arch_fns.sh"
 {
     sed -n '/^znh_arch_repos_catalog_lookup() {/,/^}/p' "${TARGET_FILE}"
+    sed -n '/^znh_arch_repos_grep_any_conf() {/,/^}/p' "${TARGET_FILE}"
     sed -n '/^znh_arch_repos_section_exists() {/,/^}/p' "${TARGET_FILE}"
     sed -n '/^znh_arch_repos_alhp_level() {/,/^}/p' "${TARGET_FILE}"
     sed -n '/^znh_arch_repos_cpu_level() {/,/^}/p' "${TARGET_FILE}"
@@ -278,6 +295,13 @@ else
         printf '[core-x86-64-v3]\nInclude = /etc/pacman.d/alhp-mirrorlist\n\n'
     } >"${_conf}"
 
+    # v82 include-file fixture (a stanza that lives ONLY in the include file).
+    _incl="${_rt_dir}/zypper-auto-repos.conf"
+    {
+        printf '# zypper-auto-helper arch-repos include file (v82) fixture\n'
+        printf '[archzfs]\nSigLevel = PackageRequired\nServer = https://github.com/archzfs/archzfs/releases/download/experimental\n\n'
+    } >"${_incl}"
+
     _state_dir="${_rt_dir}/state"
     mkdir -p "${_state_dir}"
     # Two entries, appended in order: for chaotic-aur the newest (last) entry is
@@ -311,11 +335,13 @@ else
         fi
     done
 
-    # --- FC3 runtime: section existence probe (incl. dotted section names) ---
-    for _probe in "chaotic-aur:0" "archzfs:1" "build.kilabit.info:0" "no-such-repo:1"; do
+    # --- FC3 runtime: section existence probe (dotted names + the v82
+    # include file: archzfs lives ONLY in the include fixture — the probe
+    # must find it there; archlinuxcn exists in neither). ---
+    for _probe in "chaotic-aur:0" "archzfs:0" "build.kilabit.info:0" "archlinuxcn:1" "no-such-repo:1"; do
         _section="${_probe%%:*}"
         _want_fail="${_probe##*:}"
-        ZNH_ARCH_REPOS_PACMAN_CONF="${_conf}" bash -c 'source "${1}"; znh_arch_repos_section_exists "${2}"' _ "${_ar_fn_file}" "${_section}" 2>/dev/null \
+        ZNH_ARCH_REPOS_PACMAN_CONF="${_conf}" ZNH_ARCH_REPOS_INCLUDE_FILE="${_incl}" bash -c 'source "${1}"; znh_arch_repos_section_exists "${2}"' _ "${_ar_fn_file}" "${_section}" 2>/dev/null \
             && _got_fail=0 || _got_fail=1
         if [ "${_got_fail}" != "${_want_fail}" ]; then
             record_failure "FC3 runtime: section_exists '${_section}' returned fail=${_got_fail} (expected fail=${_want_fail})"
@@ -332,10 +358,18 @@ else
         record_failure "Catalog runtime: unknown repo lookup should return empty (got: ${_spec_unknown})"
     fi
 
-    # --- ALHP level detection runtime ---
-    _alhp="$(ZNH_ARCH_REPOS_PACMAN_CONF="${_conf}" bash -c 'source "${1}"; znh_arch_repos_alhp_level' _ "${_ar_fn_file}" 2>/dev/null || true)"
+    # --- ALHP level detection runtime (both config locations; the v3
+    # section lives in the pacman.conf fixture) ---
+    _alhp="$(ZNH_ARCH_REPOS_PACMAN_CONF="${_conf}" ZNH_ARCH_REPOS_INCLUDE_FILE="${_incl}" bash -c 'source "${1}"; znh_arch_repos_alhp_level' _ "${_ar_fn_file}" 2>/dev/null || true)"
     if [ "${_alhp}" != "v3" ]; then
         record_failure "ALHP runtime: alhp_level returned '${_alhp}' for a [core-x86-64-v3] fixture (expected 'v3')"
+    fi
+    # v82: an ALHP section that lives ONLY in the include file is also detected.
+    _incl_alhp="${_rt_dir}/zypper-auto-repos-alhp.conf"
+    printf '[core-x86-64-v2]\nInclude = /etc/pacman.d/alhp-mirrorlist\n' >"${_incl_alhp}"
+    _alhp2="$(ZNH_ARCH_REPOS_PACMAN_CONF="${_rt_dir}/pacman.conf-empty" ZNH_ARCH_REPOS_INCLUDE_FILE="${_incl_alhp}" bash -c 'source "${1}"; znh_arch_repos_alhp_level' _ "${_ar_fn_file}" 2>/dev/null || true)"
+    if [ "${_alhp2}" != "v2" ]; then
+        record_failure "ALHP runtime (v82 include file): alhp_level returned '${_alhp2}' for an include-only [core-x86-64-v2] fixture (expected 'v2')"
     fi
 
     # --- Health state TSV runtime: ok / unreachable / unknown ---
