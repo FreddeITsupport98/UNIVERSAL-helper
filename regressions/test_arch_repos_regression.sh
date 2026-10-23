@@ -119,6 +119,16 @@ require_contains "${source_text}" 'if managed and any(b.strip() == sec_line for 
 require_not_contains "${source_text}" 'tee -a "${_arab_conf}"' "v82 drift guard: append_block must append to the INCLUDE file, never to pacman.conf"
 require_contains "${source_text}" 'tee -a "${_arab_incl}"' "Missing the v82 append_block include-file append"
 
+# --- 5c) v83: key auto-import hardening + key sync + locale-proofing ---
+require_contains "${source_text}" 'archlinuxcn-keyring|blackarch-keyring)' "Missing the v83 generalized keyring-package import case (archlinuxcn + blackarch)"
+require_contains "${source_text}" 'archlinuxcn-keyring|blackarch-keyring) _area_kg_pkg=1 ;;' "Missing the v83 generalized bulk keyring-package detection"
+require_contains "${source_text}" 'v83 KEY SYNC' "Missing the v83 key sync for already-enabled repos (heals rotated signing keys)"
+require_contains "${source_text}" 'key sync for the already-enabled ${_area_fname} failed' "Missing the v83 key-sync warn-only failure message"
+require_contains "${source_text}" 'if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Q "${_arki_key}" >/dev/null 2>&1; then' "Missing the v83 keyring-package idempotency check (pacman -Q skip)"
+require_contains "${source_text}" 'env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1' "Missing the v83 LC_ALL=C locale-proofed sync (Swedish pacman \"fel:\" was invisible to the error|fail greps)"
+require_contains_re "${source_text}" 'env LC_ALL=C timeout "\$\{ZNH_ARCH_REPOS_SYNC_TIMEOUT\}"' "Missing the v83 LC_ALL=C prefix on the module pacman syncs (at least one)"
+require_contains "${source_text}" 'pacman reports the database signer as this 40-char fingerprint' "Missing the v83 coderkun-aur rotated-key note in the catalog"
+
 # --- 6) FC4: ALHP microarchitecture level check (exact psABI flag sets) ---
 require_contains "${source_text}" 'FAILCHECK (ALHP CPU level): this CPU supports x86-64-v${_ar_cpu}' "Missing the ALHP CPU-level failcheck"
 require_contains "${source_text}" '"cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3" "avx avx2 bmi1 bmi2 f16c fma abm movbe xsave" "avx512f avx512bw avx512cd avx512dq avx512vl"' "Missing the exact x86-64 psABI level flag sets"
@@ -164,6 +174,10 @@ require_contains "${source_text}" "'archzfs|signed|https://github.com/archzfs/ar
 require_contains "${source_text}" 'Server = https://mirrors.uni-plovdiv.net/archzfs/experimental' "Missing the archzfs second mirror server line"
 require_contains "${source_text}" "'arch4edu|signed|https://mirrors.tuna.tsinghua.edu.cn/arch4edu/\$arch|7931B6D628C8D3BA|" "Missing the arch4edu catalog row"
 require_contains "${source_text}" "'bioarchlinux|signed|https://repo.bioarchlinux.org/\$arch|B1F96021DB62254D|" "Missing the bioarchlinux catalog row"
+require_contains "${source_text}" "'blackarch|signed|https://blackarch.org/blackarch/blackarch/os/\$arch|blackarch-keyring|" "Missing the blackarch catalog row (v83; verified from the official blackarch.org strap.sh)"
+require_contains "${source_text}" 'BlackArch Linux penetration-testing repository' "Missing the blackarch catalog note"
+require_contains "${source_text}" "'coderkun-aur|signed|https://arch.suruatoel.xyz/\$repo/\$arch/|DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243|" "Missing the coderkun-aur catalog row with the v83 live-verified 40-char signing fingerprint"
+require_not_contains "${source_text}" "'coderkun-aur|signed|https://arch.suruatoel.xyz/\$repo/\$arch/|39E27199A6BEE374|" "v83 drift guard: the stale wiki coderkun-aur key must be gone from the catalog row"
 require_contains "${source_text}" "'ada|signed|http://www.orthanc.site:8080/assets/arch_ada_repo|0xED55AF75B0330A2A3BAA9986B6120CD888A0DFD2|" "Missing the ada catalog row (the http URL the HTTPS failcheck refuses)"
 require_contains "${source_text}" 'The wiki lists a plain-HTTP server, so the HTTPS failcheck refuses this catalog URL' "Missing the ada plain-HTTP note (HTTPS failcheck demo)"
 require_contains "${source_text}" "'ALHP|signed||alhp-keyring (AUR)|" "Missing the ALHP catalog row (special handling, empty URL)"

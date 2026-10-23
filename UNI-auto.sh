@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 82 - Enterprise Edition: arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 83 - Enterprise Edition: arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — every helper pacman -Sy now runs with LC_ALL=C + --noconfirm (locale-proof attribution + the unknown-db-key import prompt auto-answered with its default Y, so keys are auto-imported + locally signed instead of stalling); the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -52890,6 +52890,18 @@ for it in items:
 #        (validated via pacman-conf --repo-list before/after, rolled back
 #        on any mismatch). After that, enable/disable/auto-disable only
 #        ever rewrite the include file — pacman.conf stays stock.
+#   v83  KEY AUTO-IMPORT: every pacman -Sy the helper runs uses LC_ALL=C +
+#        --noconfirm, so an unknown repository db key is auto-imported +
+#        locally signed (pacman's import prompt defaults to Y) instead of
+#        stalling the run, and the failure attribution is locale-proof
+#        (caught live: Swedish pacman prints "fel:" where the old greps
+#        looked for error|fail). enable-all --import-keys also KEY-SYNCs
+#        already-enabled repos whose catalog key is missing (heals rotated
+#        signing keys — coderkun-aur's db signer is a NEW 40-char
+#        fingerprint the stale wiki ID does not cover) and installs
+#        keyring PACKAGES idempotently (archlinuxcn-keyring +
+#        blackarch-keyring; BlackArch added to the catalog, verified from
+#        the official blackarch.org strap.sh).
 #   FC4  ALHP microarchitecture: for the ALHP optimised-rebuild repositories
 #        the requested x86-64-v2/v3/v4 level is checked against the CPU's
 #        /proc/cpuinfo feature flags (psABI level sets); a level the CPU
@@ -52979,10 +52991,11 @@ ZNH_ARCH_REPO_SPECS=(
     'artafinde|signed|https://pkgbuild.com/~artafinde/repo|in the archlinux keyring|Personal repository with AUR and custom packages'
     'avr|signed|https://bouchaud.org/packages/$repo/$arch|157B08346330029C|Kubernetes-related AUR builds plus additional personal packages'
     'bioarchlinux|signed|https://repo.bioarchlinux.org/$arch|B1F96021DB62254D|Biological software repository incl. R CRAN binary packages'
+    'blackarch|signed|https://blackarch.org/blackarch/blackarch/os/$arch|blackarch-keyring|BlackArch Linux penetration-testing repository (2600+ tools; NOT on the wiki list — verified from the official blackarch.org strap.sh 2026-10-23: this direct Server replaces their Include-mirrorlist setup, and the keyring PACKAGE provides the signing keys — same chicken-and-egg as archlinuxcn, so enable-all --import-keys installs it from the freshly added repo; if the db key auto-import fails because it is not on public keyservers, run the official strap.sh first)'
     'blackeagle-pre-community|signed|https://repo.herecura.eu/$repo/$arch|in the archlinux keyring|Testing of packages maintained by a Package Maintainer before they move to extra'
     'build.kilabit.info|signed|https://build.kilabit.info/aur|4A5360B500C9C4F0|AUR builds by shulhan (host observed unreachable 2026-10; the enable-all validation skips it automatically if it is still down)'
     'chaotic-aur|signed|https://geo-mirror.chaotic.cx/$repo/$arch|FBA220DFC880C036|Auto-built AUR packages, updated hourly, several mirrors worldwide, x86_64 only (see also aur.chaotic.cx)'
-    'coderkun-aur|signed|https://arch.suruatoel.xyz/$repo/$arch/|39E27199A6BEE374|AUR packages with random software, package deltas, database signing'
+    'coderkun-aur|signed|https://arch.suruatoel.xyz/$repo/$arch/|DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243|AUR packages with random software, package deltas, database signing. v83: the wiki Key-ID 39E27199A6BEE374 is STALE — caught live 2026-10-23: pacman reports the database signer as this 40-char fingerprint (the maintainer rotated the key), so enabling it with the wiki key stalls pacman -Sy on the unknown-key import prompt; enable-all --import-keys heals it via the key-sync'
     'desolve|signed||see the wiki page|Binary R cran collection (the wiki marks it deprecated; use bioarchlinux)'
     'devkitpro|signed||see the wiki page|Homebrew/devkitPro toolchain packages'
     'enhancedX11|signed||see the wiki page|Xorg server with additional patches'
@@ -53791,20 +53804,34 @@ znh_arch_repos_import_key() {
             log_info "[arch-repos] ${_arki_repo}'s key ships in the official archlinux keyring; nothing to import."
             return 0
             ;;
-        archlinuxcn-keyring)
-            # Per the wiki: once the repository is added, the archlinuxcn-keyring
-            # package must be installed first (it is signed by a developer).
+        archlinuxcn-keyring|blackarch-keyring)
+            # KEYRING-PACKAGE repos (archlinuxcn per the wiki; blackarch per
+            # the official blackarch.org strap.sh — added v83): the keyring
+            # PACKAGE provides the repository's signing keys and comes FROM
+            # the repository itself, so it must be installed once the repo
+            # is added (it is signed by an Arch developer / a
+            # strap.sh-verified BlackArch signer). Idempotent: skip when the
+            # package is already installed (its keys are then present).
             if ! command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
-                log_error "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; cannot install archlinuxcn-keyring."
+                log_error "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; cannot install ${_arki_key}."
                 return 1
             fi
-            log_info "[arch-repos] installing the archlinuxcn-keyring package from the freshly added repository..."
-            znh_arch_repos_need_root "install archlinuxcn-keyring" || return 1
-            if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm archlinuxcn-keyring; then
-                log_success "[arch-repos] archlinuxcn-keyring installed and trusted."
+            if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Q "${_arki_key}" >/dev/null 2>&1; then
+                log_info "[arch-repos] ${_arki_key} is already installed; the ${_arki_repo} signing keys are present."
                 return 0
             fi
-            log_error "[arch-repos] archlinuxcn-keyring installation failed."
+            log_info "[arch-repos] installing the ${_arki_key} package from the (freshly added) ${_arki_repo} repository..."
+            znh_arch_repos_need_root "install ${_arki_key}" || return 1
+            # LC_ALL=C keeps pacman's messages English (deterministic
+            # parsing — caught live: a Swedish-locale pacman prints "fel:"
+            # where the attribution greps look for error|fail). --noconfirm
+            # also auto-answers the unknown-db-key import prompt with its
+            # default (Y), so the keyring install self-heals its db key.
+            if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm "${_arki_key}"; then
+                log_success "[arch-repos] ${_arki_key} installed and trusted."
+                return 0
+            fi
+            log_error "[arch-repos] ${_arki_key} installation failed."
             return 1
             ;;
     esac
@@ -54567,7 +54594,15 @@ run_arch_repos_only() {
         _ar_sec_esc="${_ar_section//./\\.}"
         if command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
             log_info "[arch-repos] Validating with ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
-            _ar_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+            # v83: LC_ALL=C keeps pacman's messages ENGLISH so the failure
+            # attribution greps (error|fail) are deterministic on every locale
+            # (caught live: Swedish pacman prints "fel: coderkun-aur: nyckel
+            # ... är okänd" which the old regexes could not see, so a
+            # broken repo could pass a health check silently). --noconfirm
+            # also auto-answers the unknown-db-key import prompt with its
+            # default (Y) — an untrusted db key is imported + locally signed
+            # automatically instead of stalling the run.
+            _ar_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
             _ar_sync_rc=0
             if printf '%s' "${_ar_sync_out}" | grep -Eiq "failed to synchroni[sz]e"; then
                 _ar_sync_rc=1
@@ -54825,6 +54860,22 @@ run_arch_repos_only() {
                 continue
             fi
             if [ "${_area_fname}" != "ALHP" ] && znh_arch_repos_section_exists "${_area_fname}"; then
+                # v83 KEY SYNC: with --import-keys, an ALREADY-enabled repo
+                # whose catalog key is missing from the pacman keyring gets it
+                # imported now. Heals ROTATED signing keys — caught live
+                # 2026-10-23: coderkun-aur's database is signed by a new
+                # 40-char fingerprint while the wiki still lists the old
+                # short ID, so a plain `pacman -Sy` stalled on the
+                # unknown-key import prompt. Idempotent (pacman-key --finger
+                # / pacman -Q skip inside the importer). Warn-only on
+                # failure: the repo stays enabled — this is a key heal, not
+                # an enable, so it never counts as a failed target.
+                if [ "${_ar_import_keys}" -eq 1 ] \
+                   && [ -n "${_area_fkey}" ] && [ "${_area_fkey}" != "see the wiki page" ]; then
+                    if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}" "${_area_pdir:+${_area_pdir}/${_area_fname}.arm}"; then
+                        log_warn "[arch-repos] key sync for the already-enabled ${_area_fname} failed (its section stays; import the key manually if pacman -Sy prompts about it)."
+                    fi
+                fi
                 log_info "[arch-repos] [${_area_fname}] already exists in the pacman configuration (${ZNH_ARCH_REPOS_PACMAN_CONF} or ${ZNH_ARCH_REPOS_INCLUDE_FILE}); skipping (idempotent)."
                 continue
             fi
@@ -54874,17 +54925,18 @@ run_arch_repos_only() {
                     _area_body="${_area_body}\nServer = https://mirrors.uni-plovdiv.net/archzfs/experimental"
                 fi
             fi
-            # v80 KEYRING-PACKAGE repos (archlinuxcn) are chicken-and-egg: the
-            # keyring package comes FROM the repository itself, so the section
-            # must be written FIRST and a failed keyring install rolls the
-            # freshly written section back. Hex-key repos keep the fast v76
-            # order (import before write — a failed import means NOTHING was
-            # written, no rollback needed). Caught live on the v79 bulk run:
-            # 'target not found: archlinuxcn-keyring' because pacman -Sy could
-            # not see the repo that provides it yet.
+            # v80/v83 KEYRING-PACKAGE repos (archlinuxcn; blackarch added v83)
+            # are chicken-and-egg: the keyring package comes FROM the
+            # repository itself, so the section must be written FIRST and a
+            # failed keyring install rolls the freshly written section back.
+            # Hex-key repos keep the fast v76 order (import before write — a
+            # failed import means NOTHING was written, no rollback needed).
+            # Caught live on the v79 bulk run: 'target not found:
+            # archlinuxcn-keyring' because pacman -Sy could not see the repo
+            # that provides it yet.
             local _area_kg_pkg=0
             case "${_area_fkey}" in
-                archlinuxcn-keyring) _area_kg_pkg=1 ;;
+                archlinuxcn-keyring|blackarch-keyring) _area_kg_pkg=1 ;;
             esac
             if [ "${_ar_import_keys}" -eq 1 ] && [ "${_area_kg_pkg}" -ne 1 ]; then
                 if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}" "${_area_pdir:+${_area_pdir}/${_area_fname}.arm}"; then
@@ -54929,7 +54981,10 @@ run_arch_repos_only() {
             local _area_v_out _area_v_rc
             echo "[webui] stage: arch-repos final validation (1 pacman -Sy)" | tee -a "${LOG_FILE}"
             log_info "[arch-repos] Validating ALL ${#_area_done[@]} newly enabled repos with ONE ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy (timeout ${ZNH_ARCH_REPOS_SYNC_TIMEOUT}s)..."
-            _area_v_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+            # v83: LC_ALL=C (deterministic English error wording for the
+            # attribution below on every locale) + --noconfirm auto-imports
+            # an unknown db key (prompt default Y).
+            _area_v_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
             _area_v_rc=0
             if printf '%s' "${_area_v_out}" | grep -Eiq "failed to synchroni[sz]e"; then
                 _area_v_rc=1
@@ -55188,7 +55243,11 @@ run_arch_repos_only() {
         local _arh_sync_out="" _arh_sync_ok=0
         if command -v "${ZNH_ARCH_REPOS_PACMAN_BIN}" >/dev/null 2>&1; then
             if znh_arch_repos_need_root "run ${ZNH_ARCH_REPOS_PACMAN_BIN} -Sy for the health check"; then
-                _arh_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
+                # v83: LC_ALL=C keeps pacman's messages English so the
+                # per-repo health attribution below works on every locale
+                # (Swedish "fel:" was invisible to the error|fail greps);
+                # --noconfirm auto-imports an unknown db key (default Y).
+                _arh_sync_out="$(${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1 || true)"
                 _arh_sync_ok=1
             fi
         else
@@ -55405,6 +55464,16 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          key state unknown) and [HTTP-ONLY] (the catalog URL is plain http — the"
     echo "                          'ada' case; the HTTPS failcheck refuses it, so enable manually with an"
     echo "                          https mirror; enable-all lists these as Refused, not as failures)."
+    echo "  --arch-repos key auto-import (v83): all helper pacman -Sy runs use LC_ALL=C + --noconfirm, so"
+    echo "                          an unknown repo db key is auto-imported + locally signed (the import"
+    echo "                          prompt defaults to Y) instead of stalling, and failure attribution is"
+    echo "                          locale-proof (Swedish pacman \"fel:\" was invisible to the old error|fail"
+    echo "                          greps). enable-all --import-keys also KEY-SYNCs already-enabled repos"
+    echo "                          whose catalog key is missing (heals rotated signing keys — caught live:"
+    echo "                          coderkun-aur's db is signed by a new 40-char fingerprint while the wiki"
+    echo "                          still lists the old short ID) and installs keyring packages idempotently"
+    echo "                          (archlinuxcn + blackarch). BlackArch (blackarch.org) added to the catalog"
+    echo "                          (keyring-package model, same chicken-and-egg handling as archlinuxcn)."
     echo "  --arch-repos health watchdog: set ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS (hours; 0 = off, the"
     echo "                          default) in /etc/zypper-auto.conf and reinstall — a systemd timer then"
     echo "                          runs '--arch-repos health --auto-disable --yes' on that schedule so a"
