@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 77 - Enterprise Edition: arch-repos key import now REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 78 - Enterprise Edition: arch-repos key-doctor read-only diagnostics (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -34938,6 +34938,7 @@ generate_dashboard() {
             var url = String(r.url || '');
             var key = String(r.key || '');
             var health = String(r.health || 'unknown');
+            var urlState = String(r.url_state || 'unknown');
             var alhpLevel = String(r.alhp_level || '');
             var clsDot = signed ? 'feat-on' : 'feat-off';
             var sigLabel = signed ? 'signed' : 'unsigned';
@@ -34948,6 +34949,11 @@ generate_dashboard() {
                 } else {
                     stateHtml = ' <span style="color: var(--accent); font-weight:900;">[ENABLED' + (alhpLevel ? (' ' + alhpLevel) : '') + ']</span>';
                 }
+            }
+            // v78 URL-liveness marker: dead hosts (recorded from the
+            // enable/enable-all/health validation outcomes) show red BEFORE a run.
+            if (urlState === 'dead') {
+                stateHtml = stateHtml + ' <span style="color: rgba(239,68,68,0.9); font-weight:900;">[URL DEAD]</span>';
             }
             var btn = '';
             if (enabled) {
@@ -53017,6 +53023,38 @@ znh_arch_repos_health_state() {
     return 0
 }
 
+znh_arch_repos_url_log() {
+    # Args: <repo> <ok|dead> — records the last known SERVER URL liveness
+    # (from the enable/enable-all/health validation outcomes) so list + the
+    # WebUI can show dead hosts (the build.kilabit.info class) BEFORE a run.
+    local _aru_repo="$1" _aru_state="$2"
+    local _aru_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-url-state.tsv"
+    mkdir -p "${ZNH_ARCH_REPOS_STATE_DIR}" 2>/dev/null || true
+    if [ "${EUID:-$(id -u)}" -eq 0 ] 2>/dev/null \
+       || [ "${ZNH_ARCH_SUDO_MODE:-auto}" = "never" ]; then
+        printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_aru_repo}" "${_aru_state}" \
+            >>"${_aru_file}" 2>/dev/null || true
+        chmod 644 "${_aru_file}" 2>/dev/null || true
+    elif command -v sudo >/dev/null 2>&1; then
+        printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_aru_repo}" "${_aru_state}" \
+            | sudo tee -a "${_aru_file}" >/dev/null 2>&1 || true
+        sudo chmod 644 "${_aru_file}" 2>/dev/null || true
+    fi
+}
+
+znh_arch_repos_url_state() {
+    # Prints the last recorded URL liveness (ok|dead|unknown) per repo.
+    local _arur_repo="$1" _arur_state
+    local _arur_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-url-state.tsv"
+    [ -r "${_arur_file}" ] || { printf 'unknown'; return 0; }
+    _arur_state="$(tac "${_arur_file}" 2>/dev/null | awk -F'\t' -v r="${_arur_repo}" '$2 == r {print $3; exit}' 2>/dev/null || true)"
+    case "${_arur_state}" in
+        ok|dead) printf '%s' "${_arur_state}" ;;
+        *) printf 'unknown' ;;
+    esac
+    return 0
+}
+
 znh_arch_repos_expand_url() {
     # Args: <url-template> <repo-name> — expands pacman's $repo/$arch vars.
     local _aru_url="$1" _aru_repo="$2" _aru_arch
@@ -53112,7 +53150,7 @@ znh_arch_repos_list_json() {
         return 1
     fi
     local _arj_spec _arj_name _arj_class _arj_url _arj_key _arj_note
-    local _arj_enabled _arj_health _arj_level _arj_family _arj_cpu _arj_supported
+    local _arj_enabled _arj_health _arj_level _arj_family _arj_cpu _arj_supported _arj_url_state
     _arj_family="$(znh_media_repos_detect_family)"
     _arj_cpu="$(znh_arch_repos_cpu_level)"
     if [ "${_arj_family}" = "arch" ]; then _arj_supported=true; else _arj_supported=false; fi
@@ -53137,9 +53175,10 @@ znh_arch_repos_list_json() {
                 _arj_health="$(znh_arch_repos_health_state "${_arj_name}")"
             fi
             if [ "${_arj_class}" = "signed" ]; then _arj_class=true; else _arj_class=false; fi
-            printf 'R\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n' \
+            _arj_url_state="$(znh_arch_repos_url_state "${_arj_name}")"
+            printf 'R\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n' \
                 "${_arj_name}" "${_arj_class}" "${_arj_url}" "${_arj_key}" "${_arj_note}" \
-                "${_arj_enabled}" "${_arj_health}" "${_arj_level}"
+                "${_arj_enabled}" "${_arj_health}" "${_arj_level}" "${_arj_url_state}"
         done
     } | python3 -c '
 import json, sys
@@ -53165,6 +53204,7 @@ for ln in sys.stdin.read().splitlines():
             "enabled": parts[6] == "1",
             "health": parts[7],
             "alhp_level": parts[8],
+            "url_state": parts[9] if len(parts) >= 10 else "unknown",
         })
 try:
     cpu_level = int(str(meta.get("cpu_level", "0") or "0"))
@@ -53320,7 +53360,7 @@ znh_arch_repos_import_key() {
     # never-auto-import policy — it is only reachable via the enable-all bulk
     # mode with --import-keys (or a manual CLI call), never via plain enable.
     # Returns 0 when the key is available + locally signed afterwards.
-    local _arki_repo="$1" _arki_key="$2" _arki_id
+    local _arki_repo="$1" _arki_key="$2" _arki_id _arki_pre="${3:-}"
     if [ -z "${_arki_key}" ] || [ "${_arki_key}" = "see the wiki page" ]; then
         log_error "[arch-repos] no importable Key-ID stored for ${_arki_repo}; import it manually per the wiki page."
         return 1
@@ -53378,6 +53418,16 @@ znh_arch_repos_import_key() {
             log_info "[arch-repos] ${_arki_repo} key ${_arki_key} is already in the pacman keyring; only ensuring the local signature..."
         else
             local _arki_ks _arki_recv_ok=0
+            # v78: batch pre-fetched armored key (from the enable-all parallel
+            # download)? Import it directly — no network needed, import is a
+            # local pacman-key --add.
+            if [ -s "${_arki_pre}" ] && grep -q "BEGIN PGP PUBLIC KEY" "${_arki_pre}" 2>/dev/null; then
+                log_info "[arch-repos] importing the ${_arki_repo} key ${_arki_key} from the batch pre-fetch (already downloaded)..."
+                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --add "${_arki_pre}"; then
+                    _arki_recv_ok=1
+                    znh_arch_repos_repair_keyserver_config || true
+                fi
+            fi
             # v76 WEB-ENDPOINT FIRST (bypasses dirmngr entirely — the proven
             # root cause on the Garuda run: EVERY hkps/hkp pacman-key fetch
             # failed with "Server indicated a failure" while the same
@@ -53386,7 +53436,7 @@ znh_arch_repos_import_key() {
             # the keys and not the keyserver). curl the armored key from
             # https://keyserver.ubuntu.com/pks/lookup?op=get (Hockeypuck;
             # accepts 0x<16-char-long-ID>) and import it with pacman-key --add.
-            if command -v curl >/dev/null 2>&1; then
+            if [ "${_arki_recv_ok}" -ne 1 ] && command -v curl >/dev/null 2>&1; then
                 local _arki_web_tmp _arki_web_arm _arki_web_src
                 _arki_web_tmp="$(mktemp)"
                 _arki_web_arm="${_arki_web_tmp}.arm"
@@ -53498,7 +53548,7 @@ run_arch_repos_only() {
     while [ "$#" -gt 0 ]; do
         _ar_arg="$1"
         case "${_ar_arg}" in
-            list|status|enable|disable|disable-all|health|history)
+            list|status|enable|disable|disable-all|health|history|key-doctor)
                 if [ -z "${_ar_cmd}" ]; then _ar_cmd="${_ar_arg}"; else _ar_extra+=("${_ar_arg}"); fi
                 ;;
             enable-all|setup-all)
@@ -53636,6 +53686,84 @@ run_arch_repos_only() {
         return 0
     fi
 
+    # ======================= key-doctor (read-only diagnostics; v78) =======================
+    if [ "${_ar_cmd}" = "key-doctor" ]; then
+        echo "" | tee -a "${LOG_FILE}"
+        echo "Arch repos key doctor (read-only):" | tee -a "${LOG_FILE}"
+        if command -v pacman-key >/dev/null 2>&1; then
+            echo "  pacman-key binary       : OK" | tee -a "${LOG_FILE}"
+        else
+            echo "  pacman-key binary       : MISSING (keys cannot be imported)" | tee -a "${LOG_FILE}"
+        fi
+        local _arkd_conf _arkd_line _arkd_state
+        for _arkd_conf in /etc/pacman.d/gnupg/gpg.conf /etc/pacman.d/gnupg/dirmngr.conf; do
+            _arkd_state="not present"
+            if [ -f "${_arkd_conf}" ]; then
+                if grep -q "^keyserver hkps://keyserver.ubuntu.com" "${_arkd_conf}" 2>/dev/null; then
+                    _arkd_state="OK (hkps://keyserver.ubuntu.com — the v77 verified default)"
+                else
+                    _arkd_line="$(grep -E '^[[:space:]]*keyserver[[:space:]]' "${_arkd_conf}" 2>/dev/null | head -n1 || true)"
+                    if [ -n "${_arkd_line}" ]; then
+                        _arkd_state="NEEDS REPAIR (${_arkd_line})"
+                    else
+                        _arkd_state="no keyserver set (HKP uses the gpg built-in default)"
+                    fi
+                fi
+            fi
+            printf '  %-34s : %s\n' "${_arkd_conf}" "${_arkd_state}" | tee -a "${LOG_FILE}"
+        done
+        echo "  repair note             : the keyserver config is repaired automatically by the next successful web key import (enable/enable-all with --import-keys)." | tee -a "${LOG_FILE}"
+        if command -v curl >/dev/null 2>&1; then
+            local _arkd_tmp _arkd_code
+            _arkd_tmp="$(mktemp)"
+            _arkd_code="$(curl -s -o "${_arkd_tmp}" -w '%{http_code}' --max-time 20 --connect-timeout 8 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFBA220DFC880C036' 2>/dev/null || echo 000)"
+            if [ "${_arkd_code}" = "200" ] && grep -q "BEGIN PGP PUBLIC KEY" "${_arkd_tmp}" 2>/dev/null; then
+                echo "  WEB#1 keyserver.ubuntu.com : OK (web endpoint answers with keys)" | tee -a "${LOG_FILE}"
+            else
+                echo "  WEB#1 keyserver.ubuntu.com : FAILED (HTTP ${_arkd_code})" | tee -a "${LOG_FILE}"
+            fi
+            _arkd_code="$(curl -s -o "${_arkd_tmp}" -w '%{http_code}' --max-time 20 --connect-timeout 8 'https://keys.openpgp.org/vks/v1/by-fingerprint/3A9917BF0DED5C13F69AC68FABEC0A1208037BE9' 2>/dev/null || echo 000)"
+            if [ "${_arkd_code}" = "200" ]; then
+                echo "  WEB#2 keys.openpgp.org   : OK (VKS answers; 40-char fingerprints only)" | tee -a "${LOG_FILE}"
+            else
+                echo "  WEB#2 keys.openpgp.org   : FAILED (HTTP ${_arkd_code}; only used for 40-char keys)" | tee -a "${LOG_FILE}"
+            fi
+            rm -f "${_arkd_tmp}" 2>/dev/null || true
+        else
+            echo "  WEB endpoint tests       : skipped (curl not available)" | tee -a "${LOG_FILE}"
+        fi
+        if [ -n "${ZNH_ARCH_REPOS_KEYFILES:-}" ]; then
+            echo "  WEB#3 keyfiles           : configured (ZNH_ARCH_REPOS_KEYFILES set)" | tee -a "${LOG_FILE}"
+        else
+            echo "  WEB#3 keyfiles           : not configured (ZNH_ARCH_REPOS_KEYFILES unset)" | tee -a "${LOG_FILE}"
+        fi
+        if command -v pacman-key >/dev/null 2>&1; then
+            znh_arch_repos_need_root "read the pacman keyring (pacman-key --finger)" || return 1
+            local _arkd_spec _arkd_name _arkd_class _arkd_url _arkd_key _arkd_note _arkd_id
+            local _arkd_present=0 _arkd_missing=0
+            local -a _arkd_missing_list=()
+            for _arkd_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+                IFS='|' read -r _arkd_name _arkd_class _arkd_url _arkd_key _arkd_note <<<"${_arkd_spec}"
+                _arkd_id="${_arkd_key#0x}"
+                [[ "${_arkd_id}" =~ ^[0-9A-Fa-f]{8,}$ ]] || continue
+                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --finger "${_arkd_id}" >/dev/null 2>&1; then
+                    _arkd_present=$((_arkd_present + 1))
+                else
+                    _arkd_missing=$((_arkd_missing + 1))
+                    _arkd_missing_list+=("${_arkd_name}")
+                fi
+            done
+            echo "  Catalog keys in keyring : ${_arkd_present} present, ${_arkd_missing} missing" | tee -a "${LOG_FILE}"
+            if [ "${#_arkd_missing_list[@]}" -gt 0 ]; then
+                echo "    Missing: ${_arkd_missing_list[*]}" | tee -a "${LOG_FILE}"
+                echo "    Import all missing: sudo zypper-auto-helper --arch-repos enable-all --import-keys --assume-yes --key-verified" | tee -a "${LOG_FILE}"
+            fi
+        fi
+        echo "" | tee -a "${LOG_FILE}"
+        update_status "SUCCESS: arch-repos key-doctor report printed"
+        return 0
+    fi
+
     # ======================= history =======================
     if [ "${_ar_history}" -eq 1 ]; then
         local _arh_file="${ZNH_ARCH_REPOS_STATE_DIR}/arch-repos-state.tsv"
@@ -53705,6 +53833,11 @@ run_arch_repos_only() {
                 else
                     printf '  %s[ENABLED%s]%s' "${_arl_cok}" "${_arl_level:+ (${_arl_level})}" "${_arl_creset}"
                 fi
+            fi
+            # v78 URL-liveness marker (recorded from enable/enable-all/health
+            # validation outcomes): dead hosts show BEFORE a run.
+            if [ "$(znh_arch_repos_url_state "${_arl_name}")" = "dead" ]; then
+                printf '  %s[URL DEAD — last sync failed for this host]%s' "${_arl_cerr}" "${_arl_creset}"
             fi
             echo ""
             printf '     Key: %s' "${_arl_key:-—}"
@@ -53974,11 +54107,13 @@ run_arch_repos_only() {
             else
                 log_error "[arch-repos] No pre-write backup found for rollback."
             fi
+            znh_arch_repos_url_log "${_ar_name}" "dead"
             znh_arch_repos_state_log "${_ar_name}" "rolled-back" "post-add pacman -Sy validation failed"
             update_status "FAILED: arch-repos enable ${_ar_name} rolled back (validation failed)"
             return 1
         fi
         log_success "[arch-repos] ${_ar_name} validated via pacman -Sy (repository reachable and no errors)."
+        znh_arch_repos_url_log "${_ar_name}" "ok"
         znh_arch_repos_state_log "${_ar_name}" "enabled" "${_ar_class}"
         update_status "SUCCESS: Arch repo ${_ar_name} enabled (validated)"
         echo "" | tee -a "${LOG_FILE}"
@@ -54077,6 +54212,47 @@ run_arch_repos_only() {
             log_info "[arch-repos] non-interactive enable-all confirmed via flags (--assume-yes --key-verified)."
         fi
         znh_arch_repos_need_root "enable-all (edit ${ZNH_ARCH_REPOS_PACMAN_CONF})" || return 1
+        # v78 BATCH PRE-FETCH: download ALL missing keys from the keyserver
+        # web endpoint in parallel (3 concurrent) BEFORE the loop, so the
+        # in-loop import is a local pacman-key --add with zero network wait.
+        local _area_pdir=""
+        if [ "${_ar_import_keys}" -eq 1 ] && command -v curl >/dev/null 2>&1 \
+           && command -v xargs >/dev/null 2>&1; then
+            local -a _area_pfetch=()
+            local _area_pf_name _area_pf_class _area_pf_url _area_pf_key _area_pf_note _area_pf_id
+            for _area_fspec in "${_area_targets[@]}"; do
+                IFS='|' read -r _area_pf_name _area_pf_class _area_pf_url _area_pf_key _area_pf_note <<<"${_area_fspec}"
+                _area_pf_id="${_area_pf_key#0x}"
+                if ! [[ "${_area_pf_id}" =~ ^[0-9A-Fa-f]{8,}$ ]]; then continue; fi
+                case "${#_area_pf_id}" in 8|16|40) ;; *) continue ;; esac
+                # Already in the keyring? Skip (idempotent).
+                if ${_ZNH_AR_AS_ROOT[@]+"${_ZNH_AR_AS_ROOT[@]}"} pacman-key --finger "${_area_pf_id}" >/dev/null 2>&1; then continue; fi
+                _area_pfetch+=("${_area_pf_name}|${_area_pf_id}")
+            done
+            if [ "${#_area_pfetch[@]}" -gt 0 ]; then
+                log_info "[arch-repos] batch pre-fetching ${#_area_pfetch[@]} keys from the keyserver web endpoint (3 concurrent, before the loop)..."
+                _area_pdir="$(mktemp -d)"
+                # shellcheck disable=SC2016  # the inner bash -c script uses its own variables on purpose
+                AREA_PDIR="${_area_pdir}" printf '%s\n' "${_area_pfetch[@]}" \
+                    | AREA_PDIR="${_area_pdir}" xargs -r -P3 -n1 bash -c '
+                        entry=$1; name=${entry%%|*}; id=${entry#*|}
+                        curl -sf --max-time 30 --connect-timeout 10 \
+                            "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${id}" 2>/dev/null \
+                            | sed -n "/-----BEGIN PGP PUBLIC KEY BLOCK-----/,/-----END PGP PUBLIC KEY BLOCK-----/p" \
+                            >"${AREA_PDIR}/${name}.arm" 2>/dev/null || true
+                    ' _
+                local _area_pf_done=0
+                for _area_fspec in "${_area_pfetch[@]}"; do
+                    _area_pf_name="${_area_fspec%%|*}"
+                    if [ -s "${_area_pdir}/${_area_pf_name}.arm" ] \
+                       && grep -q "BEGIN PGP PUBLIC KEY" "${_area_pdir}/${_area_pf_name}.arm" 2>/dev/null; then
+                        _area_pf_done=$((_area_pf_done + 1))
+                    fi
+                done
+                log_info "[arch-repos] batch pre-fetch complete: ${_area_pf_done}/${#_area_pfetch[@]} keys downloaded (misses fall back to the full import chain in-loop)."
+                unset AREA_PDIR 2>/dev/null || true
+            fi
+        fi
         # --- Smart per-repo loop (v76+: import key FIRST -> write section ->
         # --- continue; ONE final pacman -Sy validates the whole run after the
         # --- loop and only failing sections roll back) ---
@@ -54150,7 +54326,7 @@ run_arch_repos_only() {
             # import means the section is NEVER written — no rollback needed,
             # and no wasted pacman.conf churn. Much faster progression.
             if [ "${_ar_import_keys}" -eq 1 ]; then
-                if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}"; then
+                if ! znh_arch_repos_import_key "${_area_fname}" "${_area_fkey}" "${_area_pdir:+${_area_pdir}/${_area_fname}.arm}"; then
                     log_error "[arch-repos] key import for ${_area_fname} failed; skipping WITHOUT writing its section (smart continue)."
                     _area_failed+=("${_area_fname}")
                     continue
@@ -54220,9 +54396,11 @@ run_arch_repos_only() {
                             znh_arch_repos_remove_section "${_area_dn}" 1 >/dev/null 2>&1 || true
                             znh_arch_repos_remove_section "${_area_dn}" 0 >/dev/null 2>&1 || true
                         fi
+                        znh_arch_repos_url_log "${_area_dn}" "dead"
                         znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed"
                         _area_failed+=("${_area_dn}")
                     else
+                        znh_arch_repos_url_log "${_area_dn}" "ok"
                         _area_done_keep+=("${_area_dn}")
                     fi
                 done
@@ -54241,6 +54419,7 @@ run_arch_repos_only() {
                             znh_arch_repos_remove_section "${_area_dn}" 1 >/dev/null 2>&1 || true
                             znh_arch_repos_remove_section "${_area_dn}" 0 >/dev/null 2>&1 || true
                         fi
+                        znh_arch_repos_url_log "${_area_dn}" "dead"
                         znh_arch_repos_state_log "${_area_dn}" "rolled-back" "enable-all final validation failed (unattributed)"
                         _area_failed+=("${_area_dn}")
                     done
@@ -54249,6 +54428,9 @@ run_arch_repos_only() {
             fi
         elif [ "${#_area_done[@]}" -gt 0 ]; then
             log_warn "[arch-repos] ${ZNH_ARCH_REPOS_PACMAN_BIN} not available; skipping the final validation (fixture/test mode)."
+        fi
+        if [ -n "${_area_pdir}" ]; then
+            rm -rf "${_area_pdir}" 2>/dev/null || true
         fi
         # Smart summary.
         echo "" | tee -a "${LOG_FILE}"
@@ -54451,6 +54633,7 @@ run_arch_repos_only() {
                 fi
             fi
             znh_arch_repos_health_log "${_arh_name2}" "${_arh_state2}" "health run"
+            znh_arch_repos_url_log "${_arh_name2}" "${_arh_state2}" "health run"
             if [ "${_arh_state2}" = "ok" ]; then
                 printf '  %s%-24s OK%s\n' "${_arh_cok}" "${_arh_name2}" "${_arh_creset}" | tee -a "${LOG_FILE}"
             else
@@ -54600,6 +54783,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          PackageRequired|PackageOptional|TrustedOnly' picks the SigLevel"
     echo "                          explicitly (default: PackageRequired signed / PackageOptional"
     echo "                          forced for unsigned)."
+    echo "  --arch-repos key-doctor Read-only key/keyserver diagnostics: the pacman gnupg keyserver config"
+    echo "                          state (and whether the v77 auto-repair already fixed it), live WEB#1"
+    echo "                          (keyserver.ubuntu.com) + WEB#2 (keys.openpgp.org VKS) endpoint tests,"
+    echo "                          the keyfile-fallback config, and which catalog keys are already in the"
+    echo "                          pacman keyring (present/missing + how to import all missing)."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
