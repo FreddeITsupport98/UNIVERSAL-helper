@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 78 - Enterprise Edition: arch-repos key-doctor read-only diagnostics (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 79 - Enterprise Edition (FINAL): arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -13290,6 +13290,37 @@ generate_dashboard() {
         feat_arch_repos="N/A"
     fi
 
+    # v79: compact key-health summary for the badge sub-badge (computed only
+    # when the Arch family is supported; degrades gracefully elsewhere).
+    arch_repos_keyserver_state="unknown"
+    arch_repos_keys_present="-1"
+    arch_repos_keys_total="0"
+    if [ "${feat_arch_repos_supported}" -eq 1 ] 2>/dev/null \
+       && declare -f znh_arch_repos_state_probe >/dev/null 2>&1; then
+        local _arkys_spec _arkys_name _arkys_class _arkys_url _arkys_key _arkys_note _arkys_id
+        local _arkys_present=0 _arkys_total=0
+        if grep -q "^keyserver hkps://keyserver.ubuntu.com" /etc/pacman.d/gnupg/gpg.conf 2>/dev/null \
+           || grep -q "^keyserver hkps://keyserver.ubuntu.com" /etc/pacman.d/gnupg/dirmngr.conf 2>/dev/null; then
+            arch_repos_keyserver_state="ok"
+        elif grep -Eq "^[[:space:]]*keyserver[[:space:]]" /etc/pacman.d/gnupg/gpg.conf 2>/dev/null \
+             || grep -Eq "^[[:space:]]*keyserver[[:space:]]" /etc/pacman.d/gnupg/dirmngr.conf 2>/dev/null; then
+            arch_repos_keyserver_state="repair"
+        fi
+        for _arkys_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+            IFS='|' read -r _arkys_name _arkys_class _arkys_url _arkys_key _arkys_note <<<"${_arkys_spec}"
+            _arkys_id="${_arkys_key#0x}"
+            if ! [[ "${_arkys_id}" =~ ^[0-9A-Fa-f]{8,}$ ]]; then continue; fi
+            case "${#_arkys_id}" in 8|16|40) ;; *) continue ;; esac
+            _arkys_total=$((_arkys_total + 1))
+            if command -v pacman-key >/dev/null 2>&1 \
+               && pacman-key --finger "${_arkys_id}" >/dev/null 2>&1; then
+                _arkys_present=$((_arkys_present + 1))
+            fi
+        done
+        arch_repos_keys_total="${_arkys_total}"
+        arch_repos_keys_present="${_arkys_present}"
+    fi
+
     # Service health checks (installed + working = healthy)
     # green = healthy, yellow = installed but service unhealthy, red = missing
     local feat_flatpak_healthy feat_snap_healthy feat_soar_healthy feat_brew_healthy feat_pipx_healthy
@@ -14951,7 +14982,7 @@ generate_dashboard() {
       <div class="stat-label" style="text-transform:none;">Active Modules</div>
       <div class="feat-grid">
         <div class="feat-badge feat-clickable ${feat_media_repos_install_class}" id="feat-media-repos-badge" data-module="media-repos" data-install-cmd="sudo zypper-auto-helper --media-repos" title="Click to set up multimedia/codec repositories (via --media-repos; Fedora & Arch families; idempotent)"><span class="feat-dot ${feat_media_repos_class}" id="feat-media-repos-dot">●</span> Media Repos: <strong id="feat-media-repos-val">${feat_media_repos}</strong></div>
-        <div class="feat-badge feat-clickable ${feat_arch_repos_install_class}" id="feat-arch-repos-badge" data-module="arch-repos" data-install-cmd="sudo zypper-auto-helper --arch-repos list" title="Unofficial Arch user repositories (via --arch-repos; Arch family only; safety-gated: HTTPS-only, explicit confirmations, pacman -Sy validation + rollback, auto-disable failsafe). Click for the catalog + status listing."><span class="feat-dot ${feat_arch_repos_class}" id="feat-arch-repos-dot">●</span> Arch Repos: <strong id="feat-arch-repos-val">${feat_arch_repos}</strong></div>
+        <div class="feat-badge feat-clickable ${feat_arch_repos_install_class}" id="feat-arch-repos-badge" data-module="arch-repos" data-install-cmd="sudo zypper-auto-helper --arch-repos list" title="Unofficial Arch user repositories (via --arch-repos; Arch family only; safety-gated: HTTPS-only, explicit confirmations, pacman -Sy validation + rollback, auto-disable failsafe). Click for the catalog + status listing."><span class="feat-dot ${feat_arch_repos_class}" id="feat-arch-repos-dot">●</span> Arch Repos: <strong id="feat-arch-repos-val">${feat_arch_repos}</strong><span id="feat-arch-repos-keys" style="display:none; font-size:0.72rem; color: var(--muted); margin-left:6px;"></span></div>
         <div class="feat-badge feat-clickable ${feat_flatpak_install_class}" id="feat-flatpak-badge" data-module="flatpak" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Flatpak (via --setup-SF)"><span class="feat-dot ${feat_flatpak_class}" id="feat-flatpak-dot">●</span> Flatpak: <strong id="feat-flatpak-val">${feat_flatpak}</strong></div>
         <div class="feat-badge feat-clickable ${feat_snap_install_class}" id="feat-snap-badge" data-module="snap" data-install-cmd="sudo zypper-auto-helper --setup-SF" title="Click to install/setup Snapd (via --setup-SF)"><span class="feat-dot ${feat_snap_class}" id="feat-snap-dot">●</span> Snap: <strong id="feat-snap-val">${feat_snap}</strong></div>
         <div class="feat-badge feat-clickable ${feat_soar_install_class}" id="feat-soar-badge" data-module="soar" data-install-cmd="sudo zypper-auto-helper --soar" title="Click to install/setup Soar (via --soar)"><span class="feat-dot ${feat_soar_class}" id="feat-soar-dot">●</span> Soar: <strong id="feat-soar-val">${feat_soar}</strong></div>
@@ -14994,6 +15025,16 @@ generate_dashboard() {
           <button class="cmd-btn" type="button" data-qa="arch-repos-health" data-qa-copy="sudo zypper-auto-helper --arch-repos health" title="Run the pacman -Sy based health check of the enabled unofficial repos (read-only)">
             <span class="cmd-label">Check repos health</span>
             <span class="cmd-desc">pacman -Sy based • read-only</span>
+            <div class="cmd-copy-feedback">Running…</div>
+          </button>
+          <button class="cmd-btn" type="button" data-qa="arch-repos-key-doctor" data-qa-copy="sudo zypper-auto-helper --arch-repos key-doctor" title="Read-only key/keyserver diagnostics: keyserver config state, live web endpoint tests, catalog keys present/missing">
+            <span class="cmd-label">Key doctor</span>
+            <span class="cmd-desc">Keyserver + keys report • read-only</span>
+            <div class="cmd-copy-feedback">Running…</div>
+          </button>
+          <button class="cmd-btn" type="button" data-qa="arch-repos-probe-urls" data-qa-copy="sudo zypper-auto-helper --arch-repos list --probe-urls" title="Probe every catalog server URL in parallel (read-only) and refresh the [URL DEAD] markers">
+            <span class="cmd-label">Check host liveness</span>
+            <span class="cmd-desc">Parallel URL probe • read-only</span>
             <div class="cmd-copy-feedback">Running…</div>
           </button>
           <button class="cmd-btn" type="button" data-qa="arch-repos-auto-heal" data-qa-copy="sudo zypper-auto-helper --arch-repos health --auto-disable --yes" data-qa-danger="1" title="Health check + automatically disable (remove) repositories that fail to connect (failsafe; confirmation required)">
@@ -35797,6 +35838,22 @@ generate_dashboard() {
             setText('feat-arch-repos-val', _arSup ? (_arIns ? (_arHea ? 'READY' : 'ATTN') : 'NONE') : 'N/A');
             // v72: badge-click gating — remember the support state.
             window._znhArchReposSupported = _arSup;
+            // v79: compact key-health sub-badge (keys present/total + keyserver
+            // state) — visible at a glance without opening the drawer.
+            var _arKeysEl = document.getElementById('feat-arch-repos-keys');
+            if (_arKeysEl && _arSup) {
+                var _arKp = parseInt(String(d.arch_repos_keys_present != null ? d.arch_repos_keys_present : '-1'), 10);
+                var _arKt = parseInt(String(d.arch_repos_keys_total || '0'), 10);
+                var _arKs = String(d.arch_repos_keyserver_state || 'unknown');
+                if (_arKt > 0 && _arKp >= 0) {
+                    _arKeysEl.textContent = 'keys: ' + _arKp + '/' + _arKt + (_arKs === 'repair' ? ' • keyserver: needs repair' : '');
+                    _arKeysEl.style.display = '';
+                } else {
+                    _arKeysEl.style.display = 'none';
+                }
+            } else if (_arKeysEl) {
+                _arKeysEl.style.display = 'none';
+            }
         } catch (eARv) {}
 
         // Module dot color: green=healthy, yellow=installed but unhealthy, red=missing
@@ -37396,6 +37453,9 @@ JSON_EOF
             JSON_FEAT_ARCH_REPOS_SUPPORTED="${json_feat_arch_repos_supported}" \
             JSON_FEAT_ARCH_REPOS_INSTALLED="${json_feat_arch_repos_installed}" \
             JSON_FEAT_ARCH_REPOS_HEALTHY="${json_feat_arch_repos_healthy}" \
+            JSON_ARCH_REPOS_KEYSERVER_STATE="${arch_repos_keyserver_state}" \
+            JSON_ARCH_REPOS_KEYS_PRESENT="${arch_repos_keys_present}" \
+            JSON_ARCH_REPOS_KEYS_TOTAL="${arch_repos_keys_total}" \
             JSON_DL_TIMER="${dl_timer}" \
             JSON_VERIFY_TIMER="${verify_timer}" \
             JSON_NT_TIMER="${nt_timer}" \
@@ -37468,6 +37528,9 @@ data = {
     "feat_arch_repos_supported": _env_bool("JSON_FEAT_ARCH_REPOS_SUPPORTED", False),
     "feat_arch_repos_installed": _env_bool("JSON_FEAT_ARCH_REPOS_INSTALLED", False),
     "feat_arch_repos_healthy": _env_bool("JSON_FEAT_ARCH_REPOS_HEALTHY", False),
+    "arch_repos_keyserver_state": os.environ.get("JSON_ARCH_REPOS_KEYSERVER_STATE", "unknown"),
+    "arch_repos_keys_present": _env_int("JSON_ARCH_REPOS_KEYS_PRESENT", -1),
+    "arch_repos_keys_total": _env_int("JSON_ARCH_REPOS_KEYS_TOTAL", 0),
     "dl_timer": os.environ.get("JSON_DL_TIMER", ""),
     "verify_timer": os.environ.get("JSON_VERIFY_TIMER", ""),
     "nt_timer": os.environ.get("JSON_NT_TIMER", ""),
@@ -37538,6 +37601,9 @@ PY
   "feat_arch_repos_supported": ${json_feat_arch_repos_supported},
   "feat_arch_repos_installed": ${json_feat_arch_repos_installed},
   "feat_arch_repos_healthy": ${json_feat_arch_repos_healthy},
+  "arch_repos_keyserver_state": "${arch_repos_keyserver_state}",
+  "arch_repos_keys_present": ${arch_repos_keys_present},
+  "arch_repos_keys_total": ${arch_repos_keys_total},
 
   "dl_timer":
   "verify_timer": "$(_json_escape "$verify_timer")",
@@ -53539,7 +53605,7 @@ run_arch_repos_only() {
 
     local rc=0
     local _ar_cmd="" _ar_repo="" _ar_url_arg="" _ar_level_arg="" _ar_siglevel_arg=""
-    local _ar_dry=0 _ar_json=0 _ar_yes=0 _ar_key_verified=0 _ar_unsigned_ok=0 _ar_auto_disable=0 _ar_history=0 _ar_import_keys=0
+    local _ar_dry=0 _ar_json=0 _ar_yes=0 _ar_key_verified=0 _ar_unsigned_ok=0 _ar_auto_disable=0 _ar_history=0 _ar_import_keys=0 _ar_probe_urls=0
     local -a _ar_extra=()
     local _ar_arg
 
@@ -53564,6 +53630,11 @@ run_arch_repos_only() {
                 ;;
             --json)
                 _ar_json=1
+                ;;
+            --probe-urls)
+                # v79: on-demand parallel liveness probe of the catalog server
+                # URLs (read-only) — refreshes the [URL DEAD] markers.
+                _ar_probe_urls=1
                 ;;
             --yes|-y|--assume-yes|--non-interactive)
                 _ar_yes=1
@@ -53610,7 +53681,7 @@ run_arch_repos_only() {
                 ;;
             --*)
                 log_error "Unknown option for --arch-repos: ${_ar_arg}"
-                log_error "Usage: zypper-auto-helper --arch-repos [list|status|enable <repo> [url] [--siglevel ...]|enable-all [--import-keys]|disable <repo>|disable-all|health [--auto-disable]|history] [--dry-run] [--json]"
+                log_error "Usage: zypper-auto-helper --arch-repos [list|status|enable <repo> [url]|enable-all [--import-keys]|disable <repo>|disable-all|health [--auto-disable]|history|key-doctor] [--dry-run] [--json] [--probe-urls]"
                 return 1
                 ;;
             *)
@@ -53783,6 +53854,58 @@ run_arch_repos_only() {
 
     # ======================= list / status =======================
     if [ "${_ar_cmd}" = "list" ] || [ "${_ar_cmd}" = "status" ]; then
+        # v79: on-demand PARALLEL liveness probe (read-only) — refreshes the
+        # url-state TSV before the listing so the [URL DEAD] markers are fresh.
+        if [ "${_ar_probe_urls}" -eq 1 ]; then
+            if command -v curl >/dev/null 2>&1 && command -v xargs >/dev/null 2>&1; then
+                local _arpu_dir _arpu_spec _arpu_name _arpu_class _arpu_url _arpu_key _arpu_note _arpu_n _arpu_s
+                local -a _arpu_list=()
+                local _arpu_ok=0 _arpu_dead=0
+                for _arpu_spec in "${ZNH_ARCH_REPO_SPECS[@]}"; do
+                    IFS='|' read -r _arpu_name _arpu_class _arpu_url _arpu_key _arpu_note <<<"${_arpu_spec}"
+                    [ -n "${_arpu_url}" ] || continue
+                    case "${_arpu_url}" in
+                        https://*) ;;
+                        *) continue ;;  # non-https catalog rows are FC2-refused anyway
+                    esac
+                    _arpu_list+=("${_arpu_name}|${_arpu_url}")
+                done
+                if [ "${#_arpu_list[@]}" -gt 0 ]; then
+                    log_info "[arch-repos] probing ${#_arpu_list[@]} catalog server URLs in parallel (4 concurrent, 8s timeout each)..."
+                    echo "" | tee -a "${LOG_FILE}"
+                    _arpu_dir="$(mktemp -d)"
+                    # shellcheck disable=SC2016  # the inner bash -c uses its own variables on purpose
+                    AREA_PDIR="${_arpu_dir}" printf '%s\n' "${_arpu_list[@]}" \
+                        | AREA_PDIR="${_arpu_dir}" xargs -r -P4 -n1 bash -c '
+                            entry=$1; name=${entry%%|*}; url=${entry#*|}
+                            db="${url%/}/${name}.db"
+                            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 --connect-timeout 5 -L "${db}" 2>/dev/null || echo 000)
+                            case "${code}" in 2*|3*) st=ok ;; *) st=dead ;; esac
+                            printf "%s\t%s\n" "${name}" "${st}" > "${AREA_PDIR}/${name}.state" 2>/dev/null || true
+                        ' _
+                    for _arpu_spec in "${_arpu_list[@]}"; do
+                        _arpu_n="${_arpu_spec%%|*}"
+                        if [ -r "${_arpu_dir}/${_arpu_n}.state" ]; then
+                            _arpu_s="$(cut -f2 "${_arpu_dir}/${_arpu_n}.state" 2>/dev/null || true)"
+                            case "${_arpu_s}" in
+                                ok|dead)
+                                    znh_arch_repos_url_log "${_arpu_n}" "${_arpu_s}"
+                                    if [ "${_arpu_s}" = "ok" ]; then
+                                        _arpu_ok=$((_arpu_ok + 1))
+                                    else
+                                        _arpu_dead=$((_arpu_dead + 1))
+                                    fi
+                                    ;;
+                            esac
+                        fi
+                    done
+                    rm -rf "${_arpu_dir}" 2>/dev/null || true
+                    echo "URL probe complete: ${_arpu_ok} reachable, ${_arpu_dead} dead — the [URL DEAD] markers are now fresh." | tee -a "${LOG_FILE}"
+                fi
+            else
+                log_warn "[arch-repos] --probe-urls needs curl + xargs; skipping the probe."
+            fi
+        fi
         if [ "${_ar_json}" -eq 1 ]; then
             znh_arch_repos_list_json
             return $?
@@ -54788,6 +54911,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          (keyserver.ubuntu.com) + WEB#2 (keys.openpgp.org VKS) endpoint tests,"
     echo "                          the keyfile-fallback config, and which catalog keys are already in the"
     echo "                          pacman keyring (present/missing + how to import all missing)."
+    echo "  --arch-repos list --probe-urls  Probe every catalog server URL in parallel (4 concurrent, 8s"
+    echo "                          timeout each) and refresh the [URL DEAD] liveness markers — read-only."
     echo "  --reset-config          Reset /etc/zypper-auto.conf to documented defaults (with backup)"
     echo "  --stale-module-dirs     Audit/quarantine stale non-bootable /lib/modules dirs (safe helper)"
     echo "  --reset-downloads       Clear cached download/notifier state and restart timers (alias: --reset-state)"
@@ -67460,6 +67585,26 @@ def _arch_repos_quick_actions() -> dict:
         "needs_confirm": False,
         "phrase": "",
         "explain": "Lists the unofficial Arch user repository catalog (the signed/unsigned lists from the Arch Wiki page) with each repository's class (signed/unsigned), Key-ID, stored Server URL and current enablement. Read-only; changes nothing.",
+    }
+
+    # v79: read-only key/keyserver diagnostics (the key-doctor report).
+    out["arch-repos-key-doctor"] = {
+        "title": "Arch Repos: Key doctor",
+        "cmd": [HELPER_BIN, "--arch-repos", "key-doctor"],
+        "timeout_s": 120,
+        "needs_confirm": False,
+        "phrase": "",
+        "explain": "Read-only one-shot diagnostics: the system keyserver config state (gpg.conf + dirmngr.conf; OK / needs repair with the current line quoted), live WEB#1 (keyserver.ubuntu.com) and WEB#2 (keys.openpgp.org VKS) endpoint tests, the keyfile-fallback config, and a catalog-key inventory (present/missing in the pacman keyring + how to import all missing).",
+    }
+
+    # v79: read-only parallel URL liveness probe (refreshes the [URL DEAD] markers).
+    out["arch-repos-probe-urls"] = {
+        "title": "Arch Repos: Check host liveness",
+        "cmd": [HELPER_BIN, "--arch-repos", "list", "--probe-urls"],
+        "timeout_s": 5 * 60,
+        "needs_confirm": False,
+        "phrase": "",
+        "explain": "Probes every catalog server URL in parallel (4 concurrent, 8s timeout each, read-only) and refreshes the [URL DEAD] liveness markers — dead hosts (the build.kilabit.info class) become visible before you try to enable them.",
     }
 
     # Read-only pacman -Sy based health check.
