@@ -137,6 +137,11 @@ require_contains "${source_text}" '__znh_check_service_reachable "https://repos.
 require_contains "${source_text}" '"${_mr_dnf}" --quiet repoquery terra-release-multimedia >/dev/null 2>&1' "Missing terra-release-multimedia availability probe (published for Fedora 43+)"
 require_contains "${source_text}" 'not published for this Fedora release (Fedora 43+ only)' "Missing clean skip when terra-release-multimedia is not published"
 
+# --- 6b) v86: the "fully set up" no-op must require the Terra multimedia subrepo when published ---
+require_contains "${source_text}" 'local _mr_mm_published=1' "Missing the v86 Terra-multimedia publishability flag in the fully-set-up check"
+require_contains "${source_text}" '&& { [ "${ZNH_MEDIA_TERRA_MM_OK}" -eq 1 ] || [ "${_mr_mm_published}" -eq 0 ]; }' "Missing the v86 fixed fully-set-up condition (the Terra multimedia subrepo is required when published for the release — caught live: the probe said MISSING yet the shortcut exited fully-set-up)"
+require_contains "${source_text}" 'Multimedia/codec repositories are already fully set up (RPM Fusion + Terra + multimedia subrepo + codec set present)' "Missing the v86 updated fully-set-up message"
+
 # --- 7) Mesa override: strictly confirm-gated (config key + --mesa-override flag) ---
 require_contains "${source_text}" 'MEDIA_REPOS_MESA_OVERRIDE:-false' "Missing MEDIA_REPOS_MESA_OVERRIDE gate (string form)"
 require_contains "${source_text}" '            --mesa-override)' "Missing --mesa-override dispatcher case arm"
