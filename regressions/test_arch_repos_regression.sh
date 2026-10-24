@@ -132,6 +132,14 @@ require_contains "${source_text}" 'ZNH_ARCH_REPOS_SYNC_RC' "Missing the v84 sync
 require_contains "${source_text}" 'pkill -x dirmngr' "Missing the v84 dirmngr flush on timeout"
 require_contains "${source_text}" 'znh_arch_repos_pacman_sync "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" -Sy --noconfirm' "Missing the v84 helper-routed sync call (at least one site)"
 require_not_contains "${source_text}" 'env LC_ALL=C timeout "${ZNH_ARCH_REPOS_SYNC_TIMEOUT}" "${ZNH_ARCH_REPOS_PACMAN_BIN}" -Sy --noconfirm 2>&1' "v84 drift guard: the old inline pipe-captured sync must be gone (all syncs route through the helper)"
+
+# --- 5d) v85: fail-fast keys + pre-loop key sync ---
+require_contains "${source_text}" '--ask=64' "Missing the v85 --ask=64 fail-fast import refusal on module syncs"
+require_contains "${source_text}" 'bit 6 (1<<6=64) is the' "Missing the v85 --ask=64 semantics comment (verified from pacman alpm.h)"
+require_contains "${source_text}" 'v85 PRE-LOOP KEY SYNC' "Missing the v85 pre-loop key sync pass (all importable keys land before any pacman -Sy)"
+require_contains "${source_text}" 'pre-loop key sync: could not import' "Missing the v85 pre-loop key sync failure summary"
+require_contains "${source_text}" 'timeout 25 pacman-key --keyserver' "Missing the v85 per-attempt cap on the HKP pacman-key loop"
+require_contains "${source_text}" 'keep it DISABLED until the maintainer publishes the key' "Missing the v85 coderkun-aur unobtainable-key note in the catalog"
 require_contains "${source_text}" 'pacman reports the database signer as this 40-char fingerprint' "Missing the v83 coderkun-aur rotated-key note in the catalog"
 
 # --- 6) FC4: ALHP microarchitecture level check (exact psABI flag sets) ---
