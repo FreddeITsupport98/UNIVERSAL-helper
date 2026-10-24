@@ -140,6 +140,13 @@ require_contains "${source_text}" 'v85 PRE-LOOP KEY SYNC' "Missing the v85 pre-l
 require_contains "${source_text}" 'pre-loop key sync: could not import' "Missing the v85 pre-loop key sync failure summary"
 require_contains "${source_text}" 'timeout 25 pacman-key --keyserver' "Missing the v85 per-attempt cap on the HKP pacman-key loop"
 require_contains "${source_text}" 'keep it DISABLED until the maintainer publishes the key' "Missing the v85 coderkun-aur unobtainable-key note in the catalog"
+
+# --- 5e) v87: no duplicate key retries ---
+require_contains "${source_text}" 'v87 pre-loop failure memory' "Missing the v87 pre-loop failure memory comment"
+require_contains "${source_text}" 'case " ${_area_presync_failed[*]:-} " in' "Missing the v87 pre-loop-failure membership check"
+require_contains "${source_text}" 'pre-loop key sync already failed for ${_area_fname}; not retrying the import chain' "Missing the v87 no-retry note for already-enabled repos whose pre-loop sync failed"
+require_contains "${source_text}" 'already failed in the pre-loop sync; skipping WITHOUT writing its section and without a duplicate import retry' "Missing the v87 fail-fast fresh-import guard (no second ~75s doomed chain)"
+require_contains "${source_text}" 'v83 KEY SYNC, reworked v87' "Missing the v87 reworked in-loop key-sync comment (hex-key re-import removed; keyring-package installs stay)"
 require_contains "${source_text}" 'pacman reports the database signer as this 40-char fingerprint' "Missing the v83 coderkun-aur rotated-key note in the catalog"
 
 # --- 6) FC4: ALHP microarchitecture level check (exact psABI flag sets) ---
