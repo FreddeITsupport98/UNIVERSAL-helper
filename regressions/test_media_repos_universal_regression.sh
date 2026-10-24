@@ -142,6 +142,13 @@ require_contains "${source_text}" 'local _mr_mm_published=1' "Missing the v86 Te
 require_contains "${source_text}" '&& { [ "${ZNH_MEDIA_TERRA_MM_OK}" -eq 1 ] || [ "${_mr_mm_published}" -eq 0 ]; }' "Missing the v86 fixed fully-set-up condition (the Terra multimedia subrepo is required when published for the release — caught live: the probe said MISSING yet the shortcut exited fully-set-up)"
 require_contains "${source_text}" 'Multimedia/codec repositories are already fully set up (RPM Fusion + Terra + multimedia subrepo + codec set present)' "Missing the v86 updated fully-set-up message"
 
+# --- 6c) v88: interactive runs offer the optional Mesa prompt; ffmpeg-free label no longer reads like a missing component ---
+require_contains "${source_text}" 'local _mr_proceed_to_prompt=0' "Missing the v88 proceed-to-prompt flag"
+require_contains "${source_text}" 'if [ "${_mr_proceed_to_prompt}" -eq 0 ] \\' "Missing the v88 no-op-shortcut condition (non-interactive only)"
+require_contains "${source_text}" 'NOT PRESENT (expected — the full-codec ffmpeg is in use; ffmpeg-free would REPLACE it)' "Missing the v88 clarifying ffmpeg-free probe label"
+require_contains "${source_text}" 'INSTALLED (will be swapped to the full-codec ffmpeg)' "Missing the v88 ffmpeg-free swap-candidate label"
+require_contains "${source_text}" 'v88: interactive runs also offer the' "Missing the v88 help-text note about interactive runs offering the Mesa prompt"
+
 # --- 7) Mesa override: strictly confirm-gated (config key + --mesa-override flag) ---
 require_contains "${source_text}" 'MEDIA_REPOS_MESA_OVERRIDE:-false' "Missing MEDIA_REPOS_MESA_OVERRIDE gate (string form)"
 require_contains "${source_text}" '            --mesa-override)' "Missing --mesa-override dispatcher case arm"
