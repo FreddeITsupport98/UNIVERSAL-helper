@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 89 - Enterprise Edition: media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 90 - Enterprise Edition: media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -42566,6 +42566,19 @@ if [ "${ZNH_SUPPRESS_VERIFICATION_SUMMARY:-0}" -ne 1 ] 2>/dev/null && [ "$PROBLE
     fi
 fi
 
+    # --- v90: media-repos freeworld complement self-heal (best-effort) ---
+    # The periodic verify run is the natural self-heal schedule for the RPM
+    # Fusion freeworld lag caught live on Fedora 44 (libheif-freeworld pinned
+    # to an older libheif than updates ships): instead of waiting for the
+    # next manual --media-repos run, every verification quietly retries the
+    # missing complement via the shared heal helper. Uncounted best-effort
+    # block: it never fails verification (the skew is an upstream timing
+    # issue, not a system fault) and stays silent when the complement is
+    # already present (quiet mode).
+    if ! verify_should_skip_heavy_check "libheif-freeworld complement heal"; then
+        znh_media_repos_libheif_freeworld_heal quiet || true
+    fi
+
     # Keep the live dashboard data fresh (best-effort): periodic verification
     # runs in the background, so it's a good place to refresh status-data.json.
     if [[ "${DASHBOARD_ENABLED,,}" == "true" ]]; then
@@ -51580,6 +51593,12 @@ run_setup_sf_only() {
 #              HEIC H.264/HEVC complement once RPM Fusion publishes the
 #              matching build (the fully-set-up no-op stays off while that
 #              gap exists).
+#              v90: the libheif-freeworld step is a shared self-heal helper
+#              (znh_media_repos_libheif_freeworld_heal) that ALSO runs from
+#              the periodic verification — with a quiet resolvability
+#              pre-check so the known skew logs only a WARN — and the ffmpeg
+#              swap retries via plain install --allowerasing with the result
+#              verified (rpm -q ffmpeg) afterwards.
 #              Uses dnf5 when that is the default, otherwise dnf.
 #   - arch   : ID=arch or ID_LIKE contains arch. Full-codec packages from the
 #              official Arch repositories (no third-party repository needed).
@@ -51763,6 +51782,93 @@ znh_media_repos_state_probe() {
         fi
     fi
     return 0
+}
+
+znh_media_repos_libheif_freeworld_heal() {
+    # v90: shared best-effort libheif-freeworld installer (the RPM Fusion
+    # complement that gives libheif full HEIC H.264/HEVC codec support —
+    # e.g. iPhone photos). Used by BOTH the --media-repos flow (Step 4b)
+    # and the periodic verification/auto-repair run, so a freeworld build
+    # lagging a few days behind a Fedora libheif update (the recurring
+    # skew that made the whole @multimedia group unresolvable before v89)
+    # self-heals as soon as RPM Fusion publishes the matching build — no
+    # waiting for the next manual --media-repos run.
+    #
+    # Args: [quiet] — suppress the not-applicable/already-present info logs
+    #                 (the periodic verification passes "quiet" so healthy
+    #                 systems stay silent; the media-repos flow passes nothing
+    #                 and keeps its state lines).
+    # Returns: 0 = installed / already present / not applicable / dry-run
+    #          2 = not installable right now (the known skew — non-fatal)
+    #          3 = the guarded install failed (unexpected — non-fatal)
+    local _heal_dnf _heal_probe _heal_quiet="${1:-}"
+    local -a _heal_as_root=()
+
+    # Applicability: Fedora family only, rpm + a dnf binary must exist.
+    # (Quiet by design outside Fedora: the periodic verify runs everywhere.)
+    if [ "$(znh_media_repos_detect_family)" != "fedora" ]; then
+        return 0
+    fi
+    if ! command -v rpm >/dev/null 2>&1; then
+        return 0
+    fi
+    if rpm -q libheif-freeworld >/dev/null 2>&1; then
+        if [ "${_heal_quiet}" != "quiet" ]; then
+            log_success "libheif-freeworld already installed (full HEIC H.264/HEVC support present); skipping."
+        fi
+        return 0
+    fi
+    if ! rpm -q libheif >/dev/null 2>&1; then
+        if [ "${_heal_quiet}" != "quiet" ]; then
+            log_info "libheif itself is not installed; the libheif-freeworld complement is not applicable yet (skipping)."
+        fi
+        return 0
+    fi
+    if command -v dnf5 >/dev/null 2>&1; then
+        _heal_dnf="dnf5"
+    elif command -v dnf >/dev/null 2>&1; then
+        _heal_dnf="dnf"
+    else
+        if [ "${_heal_quiet}" != "quiet" ]; then
+            log_info "Neither dnf5 nor dnf found; the libheif-freeworld complement heal is skipped."
+        fi
+        return 0
+    fi
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        if command -v sudo >/dev/null 2>&1; then
+            _heal_as_root=(sudo)
+        else
+            if [ "${_heal_quiet}" != "quiet" ]; then
+                log_info "The libheif-freeworld heal needs root and sudo is unavailable; skipping (non-fatal)."
+            fi
+            return 0
+        fi
+    fi
+    if [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+        echo "  [dry-run] Would probe resolvability + install libheif-freeworld (HEIC H.264/HEVC complement; best-effort)" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+    # v90 quiet resolvability pre-check: resolve WITHOUT installing (dnf
+    # --assumeno declines the confirm prompt, so nothing is downloaded or
+    # changed; LC_ALL=C pins the wording so the markers are locale-proof on
+    # e.g. a Swedish console). The KNOWN skew state is not an error, so a
+    # resolve failure logs only the friendly WARN below — no scary
+    # EXECUTE_GUARDED FAILURE banner for an expected upstream timing
+    # condition. Anything else (resolvable, or the probe could not decide,
+    # e.g. metadata/network trouble) still goes through the normal guarded
+    # attempt.
+    _heal_probe="$(${_heal_as_root[@]+"${_heal_as_root[@]}"} env LC_ALL=C "${_heal_dnf}" install --assumeno libheif-freeworld 2>&1 || true)"
+    if printf '%s\n' "${_heal_probe}" | grep -qE '^Problem:|Failed to resolve'; then
+        log_warn "libheif-freeworld is not installable right now — usually RPM Fusion lagging a few days behind the Fedora libheif update (a known recurring skew; it made the whole multimedia group unresolvable before v89). Skipping (non-fatal): it is retried on the next --media-repos run and by the periodic verification, or manually with: sudo ${_heal_dnf} install libheif-freeworld"
+        return 2
+    fi
+    if execute_guarded "Install libheif-freeworld (HEIC H.264/HEVC complement; best-effort)" \
+        ${_heal_as_root[@]+"${_heal_as_root[@]}"} "${_heal_dnf}" install -y libheif-freeworld; then
+        log_success "libheif-freeworld installed (full HEIC H.264/HEVC support)."
+        return 0
+    fi
+    log_warn "libheif-freeworld install attempt failed (unexpected — the pre-check thought it resolvable). Skipping (non-fatal); it is retried later. Manual: sudo ${_heal_dnf} install libheif-freeworld"
+    return 3
 }
 
 __znh_media_repos_run_or_dry() {
@@ -52078,33 +52184,45 @@ run_media_repos_only() {
             fi
         fi
 
-        # --- Step 4b (v89): best-effort libheif-freeworld (HEIC H.264/HEVC) ---
-        # libheif-freeworld is the RPM Fusion complement that gives libheif
-        # full HEIC codec support (H.264/HEVC — e.g. iPhone photos); RPM
-        # Fusion pins it to the exact Fedora libheif version and it sometimes
-        # lags a few days behind a Fedora updates push. While the skew exists
-        # (or Step 4's --skip-broken pass skipped it) it is NOT installable
-        # yet — that is expected, NON-FATAL, and retried on every run (the
-        # fully-set-up no-op shortcut above deliberately stays off while this
-        # gap exists, so WebUI quick actions keep healing it).
-        if rpm -q libheif-freeworld >/dev/null 2>&1; then
-            log_success "libheif-freeworld already installed (full HEIC H.264/HEVC support present); skipping."
-        elif ! rpm -q libheif >/dev/null 2>&1; then
-            log_info "libheif itself is not installed; the libheif-freeworld complement is not applicable yet (skipping)."
-        elif __znh_media_repos_run_or_dry "Install libheif-freeworld (HEIC H.264/HEVC complement; best-effort)" \
-            ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y libheif-freeworld; then
-            log_success "libheif-freeworld installed (full HEIC H.264/HEVC support)."
-        else
-            log_warn "libheif-freeworld is not installable right now — usually RPM Fusion lagging a few days behind the Fedora libheif update (a known recurring skew; it made the whole multimedia group unresolvable before v89). Skipping (non-fatal): it is retried on the next --media-repos run, or manually with: sudo ${_mr_dnf} install libheif-freeworld"
-        fi
+        # --- Step 4b (v89/v90): best-effort libheif-freeworld (HEIC H.264/HEVC) ---
+        # v90: the step now lives in the shared znh_media_repos_libheif_freeworld_heal
+        # helper (quiet resolvability pre-check + guarded install) so the SAME
+        # self-heal also runs from the periodic verification — the freeworld
+        # complement lands as soon as RPM Fusion publishes the matching build,
+        # without waiting for the next --media-repos run (and the known-skew
+        # state now logs only a WARN instead of an error banner).
+        znh_media_repos_libheif_freeworld_heal || true
 
         # --- Step 5: swap ffmpeg-free for the full-codec ffmpeg (if needed) ---
         if [ "${ZNH_MEDIA_FFMPEG_FULL}" -eq 1 ]; then
             log_success "Full-codec ffmpeg already installed; skipping the ffmpeg swap."
         elif [ "${ZNH_MEDIA_FFMPEG_FREE}" -eq 1 ]; then
+            local _mr_ff_full=0
             if __znh_media_repos_run_or_dry "Swap ffmpeg-free -> full-codec ffmpeg (RPM Fusion/Terra build)" \
                 ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" swap -y ffmpeg-free ffmpeg --allowerasing; then
-                log_success "Full-codec ffmpeg installed (ffmpeg-free replaced)."
+                _mr_ff_full=1
+            elif __znh_media_repos_run_or_dry "Retry the full-codec ffmpeg install via plain install --allowerasing (skew-resilient; RPM Fusion's ffmpeg replaces ffmpeg-free)" \
+                ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y ffmpeg --allowerasing; then
+                # v90: a swap transaction binds the removal and the install
+                # halves into ONE resolution, so the same RPM Fusion freeworld
+                # lag that skewed the multimedia group can fail the whole
+                # swap. The plain-install retry (the documented alternative
+                # form, verified online) is the SAFE fallback: it never
+                # removes anything by itself — when the full build is
+                # unresolvable it simply fails and the installed ffmpeg-free
+                # stays untouched.
+                log_warn "The ffmpeg swap failed (likely a RPM Fusion/Fedora version skew); the plain-install retry completed and replaced ffmpeg-free."
+                _mr_ff_full=1
+            fi
+            if [ "${_mr_ff_full}" -eq 1 ]; then
+                if [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+                    log_success "Full-codec ffmpeg step completed (dry-run preview; nothing was installed)."
+                elif rpm -q ffmpeg >/dev/null 2>&1; then
+                    log_success "Full-codec ffmpeg installed and verified present (ffmpeg-free replaced)."
+                else
+                    log_error "The ffmpeg transaction finished, but the full-codec ffmpeg is still not installed (the resolver skipped it as unresolvable). Retry later with: sudo zypper-auto-helper --media-repos"
+                    rc=1
+                fi
             else
                 log_error "Failed to swap ffmpeg-free -> ffmpeg. Resolve manually with: sudo ${_mr_dnf} swap ffmpeg-free ffmpeg --allowerasing"
                 rc=1
@@ -52114,7 +52232,14 @@ run_media_repos_only() {
             # full build directly.
             if __znh_media_repos_run_or_dry "Install full-codec ffmpeg" \
                 ${_mr_as_root[@]+"${_mr_as_root[@]}"} "${_mr_dnf}" install -y ffmpeg; then
-                log_success "Full-codec ffmpeg installed."
+                if [ "${MEDIA_REPOS_DRY_RUN:-0}" -eq 1 ] 2>/dev/null; then
+                    log_success "Full-codec ffmpeg step completed (dry-run preview; nothing was installed)."
+                elif rpm -q ffmpeg >/dev/null 2>&1; then
+                    log_success "Full-codec ffmpeg installed."
+                else
+                    log_error "The ffmpeg install finished, but the full-codec ffmpeg is still not present. Retry later with: sudo zypper-auto-helper --media-repos"
+                    rc=1
+                fi
             else
                 log_error "Failed to install ffmpeg. Retry later with: sudo zypper-auto-helper --media-repos"
                 rc=1
@@ -55693,7 +55818,12 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          Fedora update — e.g. libheif-freeworld — and one skewed package used to fail"
     echo "                          the whole group), the freeworld GStreamer set is re-probed to verify it"
     echo "                          landed, and libheif-freeworld (HEIC H.264/HEVC) is retried best-effort on"
-    echo "                          every run until RPM Fusion publishes the matching build."
+    echo "                          every run until RPM Fusion publishes the matching build. v90: the retry"
+    echo "                          also runs from the periodic verification (self-heal without a new"
+    echo "                          --media-repos run), the known-skew case logs only a WARN (a quiet"
+    echo "                          resolvability pre-check replaces the failed-attempt error banner), and"
+    echo "                          a failed ffmpeg swap retries via plain install --allowerasing with the"
+    echo "                          result verified afterwards."
     echo "  --copr-search <query>   Search Fedora Copr (official API v3) for <query>, list every project with its"
     echo "                          title (owner/project) and description, and offer an interactive multi-select"
     echo "                          TUI (numbers/ranges like 3-7, all/none) to enable the chosen repositories via"

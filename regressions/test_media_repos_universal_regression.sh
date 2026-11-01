@@ -27,6 +27,11 @@ Regression guard for the multimedia & codec repository setup module (--media-rep
     libheif-freeworld (HEIC H.264/HEVC) step self-heals once RPM Fusion
     publishes the matching build (the fully-set-up no-op stays off while
     that gap exists)
+  - v90 self-heal + polish: the libheif-freeworld step is a shared heal
+    helper that also runs from the periodic verification (quiet resolvability
+    pre-check — the known skew logs only a WARN, no error banner), and a
+    failed ffmpeg swap retries via plain install --allowerasing with the
+    result verified (rpm -q ffmpeg) afterwards
   - Mesa override strictly confirm-gated (prompt / --mesa-override only)
   - dnf5-default detection, --dry-run offline-friendly mode
   - Arch path (full-codec set from official repos)
@@ -206,7 +211,9 @@ require_contains "${source_text}" 'libheif-freeworld is not installable right no
 # install, and the libheif-freeworld step AFTER the group but BEFORE the
 # ffmpeg swap.
 _ln_skipbrok="$(require_line_number '--exclude=PackageKit-gstreamer-plugin --skip-broken' 'Missing the v89 --skip-broken group retry (ordering check)')"
-_ln_heifinst="$(require_line_number '"Install libheif-freeworld (HEIC H.264/HEVC complement; best-effort)"' 'Missing the v89 libheif-freeworld install step (ordering check)')"
+# v90: the install command now lives in the shared heal helper (defined
+# BEFORE the flow), so the ordering needle tracks the Step 4b CALL site.
+_ln_heifinst="$(require_line_number 'znh_media_repos_libheif_freeworld_heal || true' 'Missing the v90 Step 4b call of the shared libheif-freeworld heal helper (ordering check)')"
 if [ "${_ln_skipbrok}" -gt 0 ] && [ "${_ln_mmgrp}" -gt 0 ] && [ "${_ln_skipbrok}" -lt "${_ln_mmgrp}" ] 2>/dev/null; then
     record_failure "Fedora path order broken: the --skip-broken retry appears BEFORE the primary multimedia group install"
 fi
@@ -215,6 +222,23 @@ if [ "${_ln_heifinst}" -gt 0 ] && [ "${_ln_mmgrp}" -gt 0 ] && [ "${_ln_heifinst}
 fi
 if [ "${_ln_heifinst}" -gt 0 ] && [ "${_ln_ffswap}" -gt 0 ] && [ "${_ln_heifinst}" -gt "${_ln_ffswap}" ] 2>/dev/null; then
     record_failure "Fedora path order broken: the libheif-freeworld step appears AFTER the ffmpeg swap step"
+fi
+
+# --- 9c) v90: shared heal helper + verify-schedule self-heal + skew-resilient ffmpeg swap ---
+require_contains "${source_text}" 'znh_media_repos_libheif_freeworld_heal() {' "Missing the v90 shared libheif-freeworld heal function"
+require_contains "${source_text}" 'znh_media_repos_libheif_freeworld_heal quiet || true' "Missing the v90 verification-schedule self-heal call (quiet mode, inside run_verification_only)"
+require_contains "${source_text}" 'verify_should_skip_heavy_check "libheif-freeworld complement heal"' "Missing the v90 heavy-check gating of the verify-schedule self-heal"
+require_contains "${source_text}" 'install --assumeno libheif-freeworld' "Missing the v90 quiet resolvability pre-check (--assumeno resolves without installing)"
+require_contains "${source_text}" "grep -qE '^Problem:|Failed to resolve'" "Missing the v90 locale-proof resolve-failure markers (LC_ALL=C dnf output)"
+require_contains "${source_text}" 'env LC_ALL=C "${_heal_dnf}" install --assumeno libheif-freeworld' "Missing the v90 locale-pinned pre-check invocation"
+require_contains "${source_text}" 'v90 quiet resolvability pre-check' "Missing the v90 pre-check rationale comment"
+require_contains "${source_text}" '"${_mr_dnf}" install -y ffmpeg --allowerasing' "Missing the v90 skew-resilient ffmpeg retry (documented plain-install form; never removes ffmpeg-free without a replacement)"
+require_contains "${source_text}" 'Retry the full-codec ffmpeg install via plain install --allowerasing' "Missing the v90 ffmpeg retry description"
+require_contains "${source_text}" 'elif rpm -q ffmpeg >/dev/null 2>&1; then' "Missing the v90 post-transaction ffmpeg verification (both Step 5 branches)"
+require_contains "${source_text}" 'the full-codec ffmpeg is still not installed (the resolver skipped it as unresolvable)' "Missing the v90 verified-outcome error when the full ffmpeg did not land"
+_ln_ffretry="$(require_line_number '"${_mr_dnf}" install -y ffmpeg --allowerasing' 'Missing the v90 ffmpeg retry (ordering check)')"
+if [ "${_ln_ffretry}" -gt 0 ] && [ "${_ln_ffswap}" -gt 0 ] && [ "${_ln_ffretry}" -lt "${_ln_ffswap}" ] 2>/dev/null; then
+    record_failure "Fedora path order broken: the plain-install ffmpeg retry appears BEFORE the primary swap"
 fi
 
 # --- 10) Arch path ---

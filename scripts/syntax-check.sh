@@ -26,7 +26,7 @@ Usage: ./scripts/syntax-check.sh [options]
 
 Runs unified syntax/lint checks used by this repository:
   - Bash syntax checks (bash -n)
-  - Shell lint checks (shellcheck, unless skipped)
+  - Shell lint checks (shellcheck at warning severity by default, unless skipped)
   - Python compile checks (python -m py_compile)
   - Optional Node.js syntax checks (node --check) for JS files
 
@@ -44,6 +44,8 @@ Environment:
   SYNTAX_INSTALL_MISSING   1/true/yes enables auto-install behavior (same as --install-missing)
   SYNTAX_PYTHON            Python runtime for py_compile (default: python3)
   SYNTAX_SKIP_SHELLCHECK   1/true/yes to skip shellcheck checks
+  SYNTAX_SHELLCHECK_SEVERITY  shellcheck severity gate for the lint pass (default: warning — the
+                              documented repo standard; set to style to report everything)
   SYNTAX_NODE_TARGETS      Space-separated explicit JS files to check with node --check
   SYNTAX_AUTO_CHMOD        1/true/yes (default) auto-set user executable bit on discovered script targets
 EOF
@@ -341,9 +343,14 @@ SKIP_SHELLCHECK_VALUE="${SYNTAX_SKIP_SHELLCHECK:-0}"
 if is_truthy "${SKIP_SHELLCHECK_VALUE}"; then
     printf '\n==> ShellCheck checks (skipped by SYNTAX_SKIP_SHELLCHECK)\n'
 else
+    # v90: default to the repository's documented lint standard —
+    # --severity=warning (error+warning findings fail the check; style/info
+    # notes like the intentional single-quoted $releasever needles do not).
+    # Override with SYNTAX_SHELLCHECK_SEVERITY (e.g. style) to see everything.
+    SHELLCHECK_SEVERITY="${SYNTAX_SHELLCHECK_SEVERITY:-warning}"
     ensure_command shellcheck shellcheck
-    printf '\n==> ShellCheck checks\n'
-    shellcheck "${TARGET_FILES[@]}"
+    printf '\n==> ShellCheck checks (severity: %s)\n' "${SHELLCHECK_SEVERITY}"
+    shellcheck --severity="${SHELLCHECK_SEVERITY}" "${TARGET_FILES[@]}"
 fi
 
 if [ "${#PYTHON_TARGET_FILES[@]}" -gt 0 ]; then
