@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 90 - Enterprise Edition: media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 91 - Enterprise Edition: DASHBOARD PORT AUTOPILOT (the user's ask: 'create config for port choose i should auto pick free port that has not conflict it should detect that. auto or manually set' + 'it should detect if a app tries use port that dashboard have it should change automatic and give user notification about that'): new DASHBOARD_PORT config key — auto (the default) or a fixed 1024-65535 port, with full wiring (shell default + /etc/zypper-auto.conf template block + dashboard-schema string row with an 'auto' preset + load_config validator that falls back to auto with a config warning on typos + missing-key registration/doc + a Settings drawer row whose Custom... field accepts any port); every dashboard server-start path (the non-root --dash-open fast path, the root run_dash_open_only, and the --dash-bg background service) now resolves the preferred port from the config, and when another application already holds it DETECTS the occupying process (ss -lptnH best-effort pid/name), MOVES to the next free port (foreground 8765-8790; the BG service keeps its own 8791-8800 range), and sends the user a desktop notification with the new URL (notify-send as the desktop user, or sudo -u + the session bus when root) — a taken manual port falls back with a clear warning so a conflict never breaks the launch, and an all-ports-busy range is an explicit warning too; the localhost Settings API's CORS origin gate now accepts ANY localhost port (was the fixed 8765-8790 range — remote origins stay rejected) so a pinned DASHBOARD_PORT can never lock the Settings drawer out; and the WebUI 'Open Live URL' button builds its URL from location.port so it always points at the port the dashboard actually serves on. — v90 media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -2435,6 +2435,84 @@ __znh_pick_free_port() {
     return 1
 }
 
+__znh_dashboard_port_conf_preferred() {
+    # v91: DASHBOARD_PORT config resolution for the foreground live dashboard
+    # server. Prints NOTHING and sets two globals (callers read them AFTER a
+    # plain call — NOT via $(...) command substitution, which would lose the
+    # globals; caught live during the v91 verification):
+    #   ZNH_DASHBOARD_PORT_PREFERRED = the preferred port number
+    #   ZNH_DASHBOARD_PORT_MODE      = auto | manual (callers pick the warning
+    #                                   wording for a taken port based on it)
+    # Resolution order: env DASHBOARD_PORT -> ${CONFIG_FILE:-/etc/zypper-auto.conf}
+    # (peeked directly so this ALSO works in the non-root --dash-open fast path,
+    # which runs before load_config; ZNH_DASHBOARD_CONF_FILE is a test override).
+    # "auto"/unset/invalid -> 8765 (the auto-pick base; a busy port is handled
+    # by the caller via __znh_pick_free_port + a user notification). A valid
+    # manual port (1024-65535) is preferred verbatim.
+    local _dp_conf_file="${ZNH_DASHBOARD_CONF_FILE:-${CONFIG_FILE:-/etc/zypper-auto.conf}}"
+    local _dp="${DASHBOARD_PORT:-}"
+    if [ -z "${_dp}" ] && [ -r "${_dp_conf_file}" ]; then
+        _dp=$(grep -E '^[[:space:]]*DASHBOARD_PORT=' "${_dp_conf_file}" 2>/dev/null \
+            | head -n 1 \
+            | sed -E "s/^[[:space:]]*DASHBOARD_PORT=//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^['\"]//; s/['\"]$//" 2>/dev/null || true)
+    fi
+    _dp="$(printf '%s' "${_dp}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [ -n "${_dp}" ] && [[ "${_dp}" =~ ^[0-9]+$ ]] \
+       && [ "${_dp}" -ge 1024 ] 2>/dev/null && [ "${_dp}" -le 65535 ] 2>/dev/null; then
+        ZNH_DASHBOARD_PORT_MODE="manual"
+        ZNH_DASHBOARD_PORT_PREFERRED="${_dp}"
+        return 0
+    fi
+    ZNH_DASHBOARD_PORT_MODE="auto"
+    ZNH_DASHBOARD_PORT_PREFERRED="8765"
+    return 0
+}
+
+__znh_port_occupant_desc() {
+    # v91: best-effort description of the process LISTENING on a port
+    # ("pid 1234 (python3)"), used in port-conflict warnings/notifications.
+    # Prints "an unknown process" when nothing could be identified (ss only
+    # shows foreign PIDs/names to root — as the desktop user the occupant of a
+    # root process is anonymous, which is still honest and useful).
+    local _po_port="$1" _po_line _po_pid _po_name
+    if command -v ss >/dev/null 2>&1; then
+        _po_line="$(ss -lptnH "sport = :${_po_port}" 2>/dev/null | head -n 1 || true)"
+        if [ -n "${_po_line}" ]; then
+            _po_pid="$(printf '%s' "${_po_line}" | grep -oE 'pid=[0-9]+' | head -n 1 | cut -d= -f2 || true)"
+            _po_name="$(printf '%s' "${_po_line}" | sed -E 's/.*users:\(\("([^"]+)".*/\1/' 2>/dev/null || true)"
+            if [ -n "${_po_pid:-}" ] || [ -n "${_po_name:-}" ]; then
+                printf 'pid %s (%s)\n' "${_po_pid:-?}" "${_po_name:-unknown}"
+                return 0
+            fi
+        fi
+    fi
+    printf '%s\n' "an unknown process"
+    return 0
+}
+
+__znh_dashboard_port_changed_notify() {
+    # v91: best-effort desktop notification for a dashboard port MOVE.
+    # Args: <preferred/old port> <new port> <occupant description>
+    # Sends nothing when notify-send is missing; works both as the desktop
+    # user (plain notify-send) and as root (sudo -u $SUDO_USER + the user
+    # session bus, the established notification pattern).
+    local _pn_old="$1" _pn_new="$2" _pn_occ="$3"
+    local _pn_title="Dashboard port changed"
+    local _pn_body="Port ${_pn_old} is already in use by ${_pn_occ}. The live dashboard moved to: http://127.0.0.1:${_pn_new}/status.html?live=1"
+    command -v notify-send >/dev/null 2>&1 || return 0
+    if [ "${EUID:-$(id -u)}" -ne 0 ] 2>/dev/null; then
+        notify-send -u normal -t 10000 -i "dialog-information" "${_pn_title}" "${_pn_body}" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if [ -n "${SUDO_USER:-}" ]; then
+        local _pn_bus
+        _pn_bus="unix:path=/run/user/$(id -u "${SUDO_USER}" 2>/dev/null)/bus"
+        sudo -u "${SUDO_USER}" DBUS_SESSION_BUS_ADDRESS="${_pn_bus}" \
+            notify-send -u normal -t 10000 -i "dialog-information" "${_pn_title}" "${_pn_body}" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 __znh_detach_cmd() {
     # Run a command fully detached (best-effort) so closing the terminal doesn't kill it.
     # Usage: __znh_detach_cmd cmd arg1 arg2 ...
@@ -2817,7 +2895,11 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
         # - detect port conflicts (pid file is not enough)
         # - capture server startup errors into a log file
         # - verify the server is actually responding before opening browser
-        port=8765
+        # v91: DASHBOARD_PORT config (auto | manual port) picks the preferred
+        # port; a busy preferred port (a foreign application) is DETECTED, the
+        # dashboard MOVES to a free port, and the user gets a notification.
+        __znh_dashboard_port_conf_preferred
+        port="${ZNH_DASHBOARD_PORT_PREFERRED}"
         pid_file="${dash_dir}/dashboard-http.pid"
         port_file="${dash_dir}/dashboard-http.port"
         err_file="${dash_dir}/dashboard-http.err"
@@ -2834,12 +2916,22 @@ if [[ "${1:-}" == "--dash-open" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
             fi
         fi
 
-        # If requested/default port is busy, pick a nearby free port.
+        # If the preferred/default port is busy, DETECT the occupant, move to
+        # a nearby free port and notify the user about the change.
         # IMPORTANT: if the port is in use by *our own validated* server, keep it.
         if __znh_port_listen_in_use "${port}" && [ "${reuse_existing_server}" -ne 1 ] 2>/dev/null; then
+            port_occ="$(__znh_port_occupant_desc "${port}")"
             port_pick="$(__znh_pick_free_port 8765 8790 2>/dev/null || true)"
             if [[ "${port_pick:-}" =~ ^[0-9]+$ ]]; then
+                if [ "${ZNH_DASHBOARD_PORT_MODE:-auto}" = "manual" ]; then
+                    echo "WARNING: configured DASHBOARD_PORT=${port} is already in use by ${port_occ}; moving the live dashboard to port ${port_pick} (set DASHBOARD_PORT=auto or free port ${port} to pin it)." >&2
+                else
+                    echo "INFO: preferred dashboard port ${port} is already in use by ${port_occ}; the live dashboard uses free port ${port_pick} instead." >&2
+                fi
+                __znh_dashboard_port_changed_notify "${port}" "${port_pick}" "${port_occ}"
                 port="${port_pick}"
+            else
+                echo "WARNING: no free port found in the 8765-8790 dashboard range; keeping ${port} (the server may fail to bind — free a port or set DASHBOARD_PORT)." >&2
             fi
         fi
 
@@ -3179,8 +3271,13 @@ if [[ "${1:-}" == "--dash-bg" ]] && [ "${EUID}" -ne 0 ] 2>/dev/null; then
             fi
 
             if __znh_port_listen_in_use "${bg_port}" && [ "${reuse_existing_bg}" -ne 1 ] 2>/dev/null; then
+                # v91: DETECT the occupant of the busy BG port, move to a free
+                # port in the BG range and notify the user about the change.
+                bg_occ="$(__znh_port_occupant_desc "${bg_port}")"
                 bg_pick="$(__znh_pick_free_port 8791 8800 2>/dev/null || true)"
                 if [[ "${bg_pick:-}" =~ ^[0-9]+$ ]]; then
+                    echo "INFO: background dashboard port ${bg_port} is already in use by ${bg_occ}; the background dashboard uses free port ${bg_pick} instead." >&2
+                    __znh_dashboard_port_changed_notify "${bg_port}" "${bg_pick}" "${bg_occ}"
                     bg_port="${bg_pick}"
                 fi
             fi
@@ -3515,6 +3612,9 @@ WEBHOOK_URL=""            # Remote monitoring endpoint (Discord/Slack/ntfy/etc.)
 HOOKS_ENABLED="true"      # Enable /etc/zypper-auto/hooks/{pre,post}.d
 DASHBOARD_ENABLED="true"  # Generate an HTML status page after key operations
 DASHBOARD_BROWSER=""      # Optional browser override for --dash-open (e.g. firefox)
+DASHBOARD_PORT="auto"     # v91: live dashboard port — "auto" (default; prefers 8765 and
+                          # moves to a free nearby port with a user notification when
+                          # another app has it) or a fixed 1024-65535 port to pin it
 # Dashboard auto-fetch interval (minutes) when Live mode is OFF (status-only).
 # Allowed values are constrained by schema/validation.
 WEBUI_AUTO_FETCH_INTERVAL_MINUTES="60"
@@ -4354,6 +4454,7 @@ __znh_write_dashboard_schema_json() {
     "DASHBOARD_ENABLED": {"type": "bool", "default": "true"},
     "DASHBOARD_JS_VERBOSE_DEBUG": {"type": "bool", "default": "false"},
     "DASHBOARD_PERFORMANCE_MODE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
+    "DASHBOARD_PORT": {"type": "string", "max_len": 5, "presets": ["auto"], "default": "auto"},
     "WEBUI_BACKGROUND_DASH_ENABLED": {"type": "bool", "default": "false"},
     "WEBUI_BACKGROUND_DASH_PROFILE": {"type": "enum", "allowed": ["powersaving","balanced","performance"], "default": "powersaving"},
     "ZNH_DIAG_MAX_SERVICE_LOGS": {"type": "int", "min": 1, "max": 30, "step": 1, "default": "6"},
@@ -10555,6 +10656,22 @@ DASHBOARD_ENABLED=true
 # Examples: "firefox", "google-chrome", "chromium"
 DASHBOARD_BROWSER=""
 
+# DASHBOARD_PORT
+# Port used by the foreground live dashboard HTTP server (--dash-open).
+# Allowed values:
+#   - auto (default) : prefer 8765; when another application already has it,
+#                      DETECT the occupying process, move to the next free
+#                      port in 8765-8790, and send a desktop notification
+#                      about the change (the Settings API on 8766 and the
+#                      background dashboard's own 8791-8800 range are
+#                      unaffected).
+#   - 1024..65535    : pin a specific port. If it is busy the dashboard still
+#                      starts — it moves to a free 8765-8790 port with a
+#                      warning + notification, so a conflict never breaks
+#                      the launch.
+# Apply changes by re-running: zypper-auto-helper --dash-open
+DASHBOARD_PORT="auto"
+
 # DASHBOARD_JS_VERBOSE_DEBUG
 # When true, the dashboard Web UI prints extra debug diagnostics (fetch/API details)
 # into DevTools → Console and mirrors key lines into the "🧪 JS health (debug)" panel.
@@ -11648,6 +11765,25 @@ EOF
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
     validate_allowed_set DASHBOARD_PERFORMANCE_MODE powersaving "powersaving,balanced,performance"
+
+    # v91: DASHBOARD_PORT — "auto" (default) or a TCP port 1024-65535. Invalid
+    # values fall back to "auto" with a config warning so a typo can never
+    # break the dashboard launch (auto always finds a free port).
+    local _dp_norm _dp_msg
+    if [ -z "${DASHBOARD_PORT:-}" ]; then
+        DASHBOARD_PORT="auto"
+    else
+        _dp_norm="$(printf '%s' "${DASHBOARD_PORT}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        if [ "${_dp_norm}" = "auto" ] \
+           || { [[ "${_dp_norm}" =~ ^[0-9]+$ ]] && [ "${_dp_norm}" -ge 1024 ] 2>/dev/null && [ "${_dp_norm}" -le 65535 ] 2>/dev/null; }; then
+            DASHBOARD_PORT="${_dp_norm}"
+        else
+            _dp_msg="Invalid DASHBOARD_PORT='${DASHBOARD_PORT}' in ${CONFIG_FILE}, allowed: auto or 1024-65535. Using default auto"
+            log_info "${_dp_msg}"
+            CONFIG_WARNINGS+=("${_dp_msg}")
+            DASHBOARD_PORT="auto"
+        fi
+    fi
     validate_bool_flag WEBUI_BACKGROUND_DASH_ENABLED false
     validate_allowed_set WEBUI_BACKGROUND_DASH_PROFILE powersaving "powersaving,balanced,performance"
     validate_nonneg_int_bounded_optional ZNH_DIAG_MAX_SERVICE_LOGS 6 1 30
@@ -12045,6 +12181,7 @@ EOF
     _mark_missing_key "HOOKS_BASE_DIR"
     _mark_missing_key "DASHBOARD_ENABLED"
     _mark_missing_key "DASHBOARD_BROWSER"
+    _mark_missing_key "DASHBOARD_PORT"
     _mark_missing_key "ZNH_DIAG_MAX_SERVICE_LOGS"
     _mark_missing_key "ZNH_LIVE_LOGS_MAX_SERVICE_LOGS"
     _mark_missing_key "MANAGERS_SERVER_POLL_VISIBLE_MS"
@@ -12210,6 +12347,9 @@ EOF
                     ;;
                 DASHBOARD_BROWSER)
                     log_info "  - DASHBOARD_BROWSER: optional browser override for dashboard opening (e.g. firefox)."
+                    ;;
+                DASHBOARD_PORT)
+                    log_info "  - DASHBOARD_PORT: live dashboard HTTP port — auto (default; prefers 8765 and moves to a free port with a desktop notification when another app has it) or a fixed 1024-65535 port to pin it."
                     ;;
                 LOG_FOLDER_OPENER)
                     log_info "  - LOG_FOLDER_OPENER: optional preferred folder opener command (e.g. dolphin/nautilus) used before xdg-open fallback in debug/log views."
@@ -15185,7 +15325,7 @@ generate_dashboard() {
               <span class="cmd-desc">Recommended: runs --dash-open (ThreadingHTTPServer is preferred automatically)</span>
               <div class="cmd-copy-feedback">Running…</div>
           </button>
-          <button class="cmd-btn" type="button" onclick="znhOpenUrl('http://127.0.0.1:8765/status.html?live=1', this)">
+          <button class="cmd-btn" type="button" onclick="znhOpenUrl('http://127.0.0.1:' + (location.port || '8765') + '/status.html?live=1', this)">
               <span class="cmd-label">Open Live URL</span>
               <span class="cmd-desc">Open served dashboard in browser</span>
               <div class="cmd-copy-feedback">Opening…</div>
@@ -21462,6 +21602,7 @@ generate_dashboard() {
         { key: 'DASHBOARD_ENABLED', type: 'bool', label: 'Dashboard enabled' },
         { key: 'DASHBOARD_JS_VERBOSE_DEBUG', type: 'bool', label: 'Dashboard: verbose JS debug (extra fetch/API diagnostics)', advanced: true, help: 'Shows extra fetch/API debug in DevTools + JS health log.' },
         { key: 'DASHBOARD_PERFORMANCE_MODE', type: 'enum', label: 'Dashboard: performance mode (PowerSaving/Balanced/Performance)', help: 'Controls WebUI polling cadence and dash-open worker intervals. Default is powersaving to avoid CPU/RAM hogging. Tip: after changing this, re-open the dashboard (zypper-auto-helper --dash-open) to restart background workers with the new mode.' },
+        { key: 'DASHBOARD_PORT', type: 'string', label: 'Dashboard: live-server port (auto or 1024-65535)', advanced: true, help: 'auto (default) prefers 8765 and automatically moves to a free nearby port — with a desktop notification — when another application already has it. A fixed number pins that port (a busy port still falls back to a free one with a warning + notification so the dashboard never fails to start). The background service keeps its own 8791-8800 range. Re-open the dashboard (--dash-open) to apply.' },
         { key: 'WEBUI_BACKGROUND_DASH_ENABLED', type: 'bool', label: 'Dashboard: always-on background service (opt-in)', advanced: true, help: 'When true, the always-on background dashboard service can be enabled via systemctl --user (zypper-auto-helper --dash-bg-enable). Keeps WebUI HTTP API + sync/perf workers alive in the background under low-impact systemd resource limits. No browser auto-open.' },
         { key: 'WEBUI_BACKGROUND_DASH_PROFILE', type: 'enum', label: 'Dashboard: background service cadence profile (PowerSaving/Balanced/Performance)', advanced: true, help: 'Independent from foreground performance mode. Lets the BG service stay quiet (powersaving) while interactive sessions use a faster profile. Restart with --dash-bg stop && --dash-bg start (or restart the user service) to apply.' },
         { key: 'ZNH_DIAG_MAX_SERVICE_LOGS', type: 'int', label: 'Diagnostics follower: max service logs tracked', advanced: true, help: 'Cap for the persistent diagnostics follower (--diag-logs-on) source fanout. Lower values reduce long-lived background tail-process churn.' },
@@ -43349,7 +43490,11 @@ run_dash_open_only() {
 
         # Start the live dashboard server (same safeguards as non-sudo fast path).
         local port url pid_file port_file err_file reuse_existing_server
-        port=8765
+        # v91: DASHBOARD_PORT config (auto | manual port) picks the preferred
+        # port; a busy preferred port (a foreign application) is DETECTED, the
+        # dashboard MOVES to a free port, and the user gets a notification.
+        __znh_dashboard_port_conf_preferred
+        port="${ZNH_DASHBOARD_PORT_PREFERRED}"
         pid_file="${dash_dir}/dashboard-http.pid"
         port_file="${dash_dir}/dashboard-http.port"
         err_file="${dash_dir}/dashboard-http.err"
@@ -43371,13 +43516,23 @@ run_dash_open_only() {
             fi
         fi
 
-        # If requested/default port is busy, pick a nearby free port.
+        # If the preferred/default port is busy, DETECT the occupant, move to
+        # a nearby free port and notify the user about the change.
         # IMPORTANT: if the port is in use by *our own validated* server, keep it.
         if __znh_port_listen_in_use "${port}" && [ "${reuse_existing_server}" -ne 1 ] 2>/dev/null; then
-            local port_pick
+            local port_pick port_occ
+            port_occ="$(__znh_port_occupant_desc "${port}")"
             port_pick="$(__znh_pick_free_port 8765 8790 2>/dev/null || true)"
             if [[ "${port_pick:-}" =~ ^[0-9]+$ ]]; then
+                if [ "${ZNH_DASHBOARD_PORT_MODE:-auto}" = "manual" ]; then
+                    log_warn "Configured DASHBOARD_PORT=${port} is already in use by ${port_occ}; moving the live dashboard to port ${port_pick} (set DASHBOARD_PORT=auto or free port ${port} to pin it)."
+                else
+                    log_info "Preferred dashboard port ${port} is already in use by ${port_occ}; the live dashboard uses free port ${port_pick} instead."
+                fi
+                __znh_dashboard_port_changed_notify "${port}" "${port_pick}" "${port_occ}"
                 port="${port_pick}"
+            else
+                log_warn "No free port found in the 8765-8790 dashboard range; keeping ${port} (the server may fail to bind — free a port or set DASHBOARD_PORT)."
             fi
         fi
 
@@ -55916,6 +56071,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "  --test-notify           Send a test desktop notification to verify GUI/DBus wiring"
     echo "  --dashboard             Generate/update a static HTML status page"
     echo "  --dash-open             Generate/refresh and open the dashboard in your browser"
+    echo "                          (v91: the live server honors DASHBOARD_PORT — auto (default) prefers 8765"
+    echo "                          and moves to a free 8765-8790 port with a desktop notification when"
+    echo "                          another app has it; a fixed 1024-65535 value pins the port)"
     echo "  --dash-stop             Stop the local live dashboard server started by --dash-open"
     echo "  --dash-bg [start|stop|status]"
     echo "                          Always-on, low-impact background dashboard runner"
@@ -65739,21 +65897,20 @@ def _allowed_origin(origin: str | None) -> str | None:
     if not origin:
         return None
 
-    # Allow the local dashboard server (dynamic port range).
-    # This prevents CORS lockout when :8765 is busy and the dashboard binds
-    # to a nearby free port (e.g. :8766).
+    # Allow the local dashboard server (localhost only, ANY port).
+    # v91: the port gate used to be the fixed 8765-8790 range, which locked
+    # out manually pinned DASHBOARD_PORT values; the security property we
+    # keep is "local origins only" — remote origins are still rejected.
     try:
         p = urlparse(origin)
         if p.scheme != "http":
             return None
         host = (p.hostname or "").lower()
-        port = p.port
-        if host not in ("127.0.0.1", "localhost"):
+        if host not in ("127.0.0.1", "localhost", "::1"):
             return None
-        if port is None:
+        if p.port is None:
             return None
-        if 8765 <= int(port) <= 8790:
-            return origin
+        return origin
     except Exception:
         return None
 
