@@ -20,6 +20,13 @@ Regression guard for the multimedia & codec repository setup module (--media-rep
   - Fedora path order: RPM Fusion free+nonfree -> Terra (terra-release, then
     terra-release-multimedia when published) -> opt-in Terra Mesa override ->
     multimedia group -> ffmpeg-free swap -> codec refresh
+  - v89 skew resilience: the multimedia group retries with --skip-broken when
+    dnf resolution fails on a RPM Fusion freeworld build lagging behind a
+    Fedora update (the recurring libheif-freeworld skew), the freeworld
+    GStreamer set is re-probed to verify it landed, and a best-effort
+    libheif-freeworld (HEIC H.264/HEVC) step self-heals once RPM Fusion
+    publishes the matching build (the fully-set-up no-op stays off while
+    that gap exists)
   - Mesa override strictly confirm-gated (prompt / --mesa-override only)
   - dnf5-default detection, --dry-run offline-friendly mode
   - Arch path (full-codec set from official repos)
@@ -81,7 +88,7 @@ require_contains "${source_text}" 'ZNH_OS_RELEASE_FILE="${ZNH_OS_RELEASE_FILE:-/
 
 # --- 2) Detection branches (ID + ID_LIKE per spec) ---
 require_contains "${source_text}" 'fedora|nobara)' "Missing ID=fedora/nobara detection branch"
-require_contains "${source_text}" '        arch)' "Missing ID=arch detection branch"
+require_contains "${source_text}" 'arch|archarm|manjaro|endeavouros|garuda|artix|cachyos|parabola|hyperbola|archbang|archcraft|rebornos)' "Missing ID=arch detection branch (v73: the expanded Arch-family ID list)"
 require_contains "${source_text}" '        opensuse*|sles|sled)' "Missing ID=openSUSE detection branch (suse family)"
 require_contains "${source_text}" 'debian|raspbian|devuan|ubuntu|linuxmint|lmde|pop|elementary|neon|kali|zorin)' "Missing ID=debian-family detection branch"
 require_contains "${source_text}" '        *fedora*)' "Missing ID_LIKE contains-fedora detection branch"
@@ -140,11 +147,11 @@ require_contains "${source_text}" 'not published for this Fedora release (Fedora
 # --- 6b) v86: the "fully set up" no-op must require the Terra multimedia subrepo when published ---
 require_contains "${source_text}" 'local _mr_mm_published=1' "Missing the v86 Terra-multimedia publishability flag in the fully-set-up check"
 require_contains "${source_text}" '&& { [ "${ZNH_MEDIA_TERRA_MM_OK}" -eq 1 ] || [ "${_mr_mm_published}" -eq 0 ]; }' "Missing the v86 fixed fully-set-up condition (the Terra multimedia subrepo is required when published for the release — caught live: the probe said MISSING yet the shortcut exited fully-set-up)"
-require_contains "${source_text}" 'Multimedia/codec repositories are already fully set up (RPM Fusion + Terra + multimedia subrepo + codec set present)' "Missing the v86 updated fully-set-up message"
+require_contains "${source_text}" 'Multimedia/codec repositories are already fully set up (RPM Fusion + Terra + multimedia subrepo + codec set present; nothing to do.' "Missing the v86 updated fully-set-up message (v88 extended it with the opt-in paths hint)"
 
 # --- 6c) v88: interactive runs offer the optional Mesa prompt; ffmpeg-free label no longer reads like a missing component ---
 require_contains "${source_text}" 'local _mr_proceed_to_prompt=0' "Missing the v88 proceed-to-prompt flag"
-require_contains "${source_text}" 'if [ "${_mr_proceed_to_prompt}" -eq 0 ] \\' "Missing the v88 no-op-shortcut condition (non-interactive only)"
+require_contains "${source_text}" 'if [ "${_mr_proceed_to_prompt}" -eq 0 ]' "Missing the v88 no-op-shortcut condition (non-interactive only)"
 require_contains "${source_text}" 'NOT PRESENT (expected — the full-codec ffmpeg is in use; ffmpeg-free would REPLACE it)' "Missing the v88 clarifying ffmpeg-free probe label"
 require_contains "${source_text}" 'INSTALLED (will be swapped to the full-codec ffmpeg)' "Missing the v88 ffmpeg-free swap-candidate label"
 require_contains "${source_text}" 'v88: interactive runs also offer the' "Missing the v88 help-text note about interactive runs offering the Mesa prompt"
@@ -176,6 +183,39 @@ require_contains "${source_text}" 'MEDIA_REPOS_DRY_RUN:-0' "Missing MEDIA_REPOS_
 require_contains "${source_text}" '--setopt=install_weak_deps=False --exclude=PackageKit-gstreamer-plugin' "Missing multimedia group setopt/exclude hardening"
 require_contains "${source_text}" 'rpmfusion-free-appstream-data rpmfusion-nonfree-appstream-data' "Missing RPM Fusion AppStream data step"
 require_contains "${source_text}" 'openh264 gstreamer1-plugin-openh264 mozilla-openh264 gstreamer1-plugin-libav' "Missing common codec package step"
+
+# --- 9b) v89: RPM Fusion freeworld-skew resilience ---
+# Live-caught on the user's Fedora 44 host (WebUI quick action): RPM Fusion's
+# libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships
+# libheif/libheif-ffmpeg 1.23.7, so ONE skewed group package made the WHOLE
+# @multimedia transaction unresolvable and the quick action exited rc=1.
+require_contains "${source_text}" 'local _mr_mmgrp_ok=0' "Missing the v89 multimedia-group outcome flag"
+require_contains "${source_text}" '--exclude=PackageKit-gstreamer-plugin --skip-broken' "Missing the v89 --skip-broken group retry (one skewed freeworld package must not fail the whole group)"
+require_contains "${source_text}" 'Retry the multimedia group with --skip-broken (a freeworld build lagging behind a Fedora update is non-fatal)' "Missing the v89 skip-broken retry description"
+require_contains "${source_text}" 'at least one group package was skipped as unresolvable' "Missing the v89 skip-broken warn message"
+require_contains "${source_text}" 'znh_media_repos_state_probe' "Missing the v89 post-group verification re-probe (a --skip-broken pass may skip more than expected)"
+require_contains "${source_text}" 'the freeworld GStreamer plugin set is still missing (the resolver skipped it as unresolvable)' "Missing the v89 post-group verification error path"
+require_contains "${source_text}" 'Multimedia group installed (freeworld GStreamer plugin set verified present).' "Missing the v89 verified-group success message"
+require_contains "${source_text}" 'local _mr_heif_gap=0' "Missing the v89 libheif-freeworld gap flag for the fully-set-up no-op shortcut"
+require_contains "${source_text}" '&& [ "${_mr_heif_gap}" -eq 0 ]' "Missing the v89 gap guard inside the fully-set-up no-op condition (quick actions must keep self-healing the gap)"
+require_contains "${source_text}" 'rpm -q libheif >/dev/null 2>&1' "Missing the v89 libheif presence probe (gap guard + Step 4b)"
+require_contains "${source_text}" '"Install libheif-freeworld (HEIC H.264/HEVC complement; best-effort)"' "Missing the v89 best-effort libheif-freeworld install step"
+require_contains "${source_text}" 'libheif-freeworld is not installable right now' "Missing the v89 libheif-freeworld non-fatal skew warn"
+
+# v89 ordering: the --skip-broken retry must come AFTER the primary group
+# install, and the libheif-freeworld step AFTER the group but BEFORE the
+# ffmpeg swap.
+_ln_skipbrok="$(require_line_number '--exclude=PackageKit-gstreamer-plugin --skip-broken' 'Missing the v89 --skip-broken group retry (ordering check)')"
+_ln_heifinst="$(require_line_number '"Install libheif-freeworld (HEIC H.264/HEVC complement; best-effort)"' 'Missing the v89 libheif-freeworld install step (ordering check)')"
+if [ "${_ln_skipbrok}" -gt 0 ] && [ "${_ln_mmgrp}" -gt 0 ] && [ "${_ln_skipbrok}" -lt "${_ln_mmgrp}" ] 2>/dev/null; then
+    record_failure "Fedora path order broken: the --skip-broken retry appears BEFORE the primary multimedia group install"
+fi
+if [ "${_ln_heifinst}" -gt 0 ] && [ "${_ln_mmgrp}" -gt 0 ] && [ "${_ln_heifinst}" -lt "${_ln_mmgrp}" ] 2>/dev/null; then
+    record_failure "Fedora path order broken: the libheif-freeworld step appears BEFORE the multimedia group step"
+fi
+if [ "${_ln_heifinst}" -gt 0 ] && [ "${_ln_ffswap}" -gt 0 ] && [ "${_ln_heifinst}" -gt "${_ln_ffswap}" ] 2>/dev/null; then
+    record_failure "Fedora path order broken: the libheif-freeworld step appears AFTER the ffmpeg swap step"
+fi
 
 # --- 10) Arch path ---
 require_contains "${source_text}" 'pacman -S --noconfirm --needed' "Missing Arch idempotent codec-set install (--needed)"
