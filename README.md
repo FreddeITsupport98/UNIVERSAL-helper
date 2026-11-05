@@ -15,6 +15,7 @@ This repository provides a robust `systemd` architecture and CLI that:
 - Keeps advanced WebUI panels (`Snapper Manager` + `Recent Activity Log`) hidden by default behind a master `Enable Dev Mode / Logs` toggle while `Service Health` stays visible.
 
 - **Cross-distro resilience:** all generated helper scripts (zypper-run-install, zypper-with-ps, downloader) include inline fallback PM detection so they work on Fedora/Ubuntu/Arch/Debian even when the shared runtime helper is missing.
+- **Universal repo GPG key doctor (`--repo-key-doctor`, v93):** detects + repairs signing-key problems for ANY RPM repo — scans every enabled `gpgcheck=1` repo in `/etc/yum.repos.d` + `/etc/zypp/repos.d`, fetches each `gpgkey` URL, and classifies each repo (OK / ROTATED / RPMDB-DRIFT / MISSING-FILE / UNTRUSTED / UNREACHABLE). Vendor key rotations (e.g. Warp's 2026-11-04 warpdotdev subkey rotation that broke warp-terminal updates and offline upgrades) are auto-repaired with a timestamped backup, a Fedora-version-aware `rpm --import`, a per-repo cache clean, and a makecache/zypper-refresh verification; a key whose PRIMARY fingerprint is not already trusted is never auto-imported (`--import-new` is the explicit opt-in). Subcommands `status|scan|fix [repo-id]|fix-all|rollback` with `--dry-run`/`--yes`. Run: `sudo zypper-auto-helper --repo-key-doctor`
 If you like opinionated, **safety‑first** automation – with clear logs and an easy way back via Snapper – you’re in the right place.
 
 
