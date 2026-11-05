@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 93 - Enterprise Edition: UNIVERSAL REPO KEY DOCTOR (new --repo-key-doctor engine: detects + repairs GPG signing-key problems for ANY RPM repo — scans every enabled gpgcheck=1 repo in /etc/yum.repos.d + /etc/zypp/repos.d, fetches each gpgkey URL, classifies OK / ROTATED (trusted primary, new subkeys — the vendor key-rotation case caught live on Warp's 2026-11-04 warpdotdev subkey rotation that broke warp-terminal transactions and offline upgrades) / RPMDB-DRIFT / MISSING-FILE / UNTRUSTED (a fetched key whose primary is NOT already trusted is refused — never auto-imported; --import-new is the explicit opt-in) / UNREACHABLE; repairs use a timestamped .bak backup, a Fedora-version-aware rpm import, a per-repo cache clean, and a functional makecache / zypper-refresh verification; subcommands status|scan|fix [repo-id]|fix-all|rollback with --dry-run/--yes/--import-new) — v92 DESKTOP SHORTCUT SYNC (the user's ask: 'now make it synch with shortcuts' — the follow-up to the v91 port autopilot): the generated desktop shortcut now embeds X-ZypperAuto-Shortcuts-Version, and the Smart Update check rewrites the shortcut whenever the installed copy's marker differs from the generator's — the marker is the source of truth, so shortcuts always match the deployed helper (actions, DASHBOARD_PORT behavior, translations, icons) instead of relying on the fragile legacy content heuristics (kept as belt-and-braces; pre-marker files always rewrite); the Desktop-surface copy re-syncs whenever its own marker drifts from the master; a rewrite now prints a one-line sync note; and the notification 'Open Dashboard' action's last-resort URL fallback is PORT-AWARE (reads the dashboard-http.port file v91 writes on every server start, 8765 fallback) instead of a hardcoded 8765 URL that would 404 on a moved/pinned port. The main shortcut already launches 'zypper-auto-helper --dash-open' (port-correct by construction), which the regression now pins with a drift guard against hardcoded-URL Exec lines. New focused regression regressions/test_dashboard_shortcut_sync_regression.sh with SANDBOXED runtime fixtures: first call creates the shortcut + Desktop copy with the marker, a drifted marker (90) triggers a resync with the sync note, and an up-to-date call is a no-op. — v91 DASHBOARD PORT AUTOPILOT (the user's ask: 'create config for port choose i should auto pick free port that has not conflict it should detect that. auto or manually set' + 'it should detect if a app tries use port that dashboard have it should change automatic and give user notification about that'): new DASHBOARD_PORT config key — auto (the default) or a fixed 1024-65535 port, with full wiring (shell default + /etc/zypper-auto.conf template block + dashboard-schema string row with an 'auto' preset + load_config validator that falls back to auto with a config warning on typos + missing-key registration/doc + a Settings drawer row whose Custom... field accepts any port); every dashboard server-start path (the non-root --dash-open fast path, the root run_dash_open_only, and the --dash-bg background service) now resolves the preferred port from the config, and when another application already holds it DETECTS the occupying process (ss -lptnH best-effort pid/name), MOVES to the next free port (foreground 8765-8790; the BG service keeps its own 8791-8800 range), and sends the user a desktop notification with the new URL (notify-send as the desktop user, or sudo -u + the session bus when root) — a taken manual port falls back with a clear warning so a conflict never breaks the launch, and an all-ports-busy range is an explicit warning too; the localhost Settings API's CORS origin gate now accepts ANY localhost port (was the fixed 8765-8790 range — remote origins stay rejected) so a pinned DASHBOARD_PORT can never lock the Settings drawer out; and the WebUI 'Open Live URL' button builds its URL from location.port so it always points at the port the dashboard actually serves on. — v90 media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 93 - Enterprise Edition: UNIVERSAL REPO KEY DOCTOR (new --repo-key-doctor engine: detects + repairs GPG signing-key problems for ANY RPM repo — scans every enabled gpgcheck=1 repo in /etc/yum.repos.d + /etc/zypp/repos.d, fetches each gpgkey URL, classifies OK / ROTATED (trusted primary, new subkeys — the vendor key-rotation case caught live on Warp's 2026-11-04 warpdotdev subkey rotation that broke warp-terminal transactions and offline upgrades) / RPMDB-DRIFT / MISSING-FILE / UNTRUSTED (a fetched key whose primary is NOT already trusted is refused — never auto-imported; --import-new is the explicit opt-in) / UNREACHABLE; repairs use a timestamped .bak backup, a Fedora-version-aware rpm import, a per-repo cache clean, and a functional makecache / zypper-refresh verification; subcommands status|scan|fix [repo-id]|fix-all|autoheal|rollback with --dry-run/--json/--yes/--import-new; --json emits machine-readable status and every run persists /var/lib/zypper-auto/repo-key-doctor.json for tooling; file-only-key repos are probed via their repomd.xml signature so vendor rotations are caught even without a gpgkey URL (the new STALE-KEY classification); autoheal is wired in as verification CHECK 54 (TOTAL_CHECKS 53 -> 54) so the periodic zypper-auto-verify.timer auto-detects + self-heals signing-key problems and fails verification on attention states; a Repo Key Doctor copy-to-run quick-action button was added to the WebUI commands section) — v92 DESKTOP SHORTCUT SYNC (the user's ask: 'now make it synch with shortcuts' — the follow-up to the v91 port autopilot): the generated desktop shortcut now embeds X-ZypperAuto-Shortcuts-Version, and the Smart Update check rewrites the shortcut whenever the installed copy's marker differs from the generator's — the marker is the source of truth, so shortcuts always match the deployed helper (actions, DASHBOARD_PORT behavior, translations, icons) instead of relying on the fragile legacy content heuristics (kept as belt-and-braces; pre-marker files always rewrite); the Desktop-surface copy re-syncs whenever its own marker drifts from the master; a rewrite now prints a one-line sync note; and the notification 'Open Dashboard' action's last-resort URL fallback is PORT-AWARE (reads the dashboard-http.port file v91 writes on every server start, 8765 fallback) instead of a hardcoded 8765 URL that would 404 on a moved/pinned port. The main shortcut already launches 'zypper-auto-helper --dash-open' (port-correct by construction), which the regression now pins with a drift guard against hardcoded-URL Exec lines. New focused regression regressions/test_dashboard_shortcut_sync_regression.sh with SANDBOXED runtime fixtures: first call creates the shortcut + Desktop copy with the marker, a drifted marker (90) triggers a resync with the sync note, and an up-to-date call is a no-op. — v91 DASHBOARD PORT AUTOPILOT (the user's ask: 'create config for port choose i should auto pick free port that has not conflict it should detect that. auto or manually set' + 'it should detect if a app tries use port that dashboard have it should change automatic and give user notification about that'): new DASHBOARD_PORT config key — auto (the default) or a fixed 1024-65535 port, with full wiring (shell default + /etc/zypper-auto.conf template block + dashboard-schema string row with an 'auto' preset + load_config validator that falls back to auto with a config warning on typos + missing-key registration/doc + a Settings drawer row whose Custom... field accepts any port); every dashboard server-start path (the non-root --dash-open fast path, the root run_dash_open_only, and the --dash-bg background service) now resolves the preferred port from the config, and when another application already holds it DETECTS the occupying process (ss -lptnH best-effort pid/name), MOVES to the next free port (foreground 8765-8790; the BG service keeps its own 8791-8800 range), and sends the user a desktop notification with the new URL (notify-send as the desktop user, or sudo -u + the session bus when root) — a taken manual port falls back with a clear warning so a conflict never breaks the launch, and an all-ports-busy range is an explicit warning too; the localhost Settings API's CORS origin gate now accepts ANY localhost port (was the fixed 8765-8790 range — remote origins stay rejected) so a pinned DASHBOARD_PORT can never lock the Settings drawer out; and the WebUI 'Open Live URL' button builds its URL from location.port so it always points at the port the dashboard actually serves on. — v90 media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -1588,7 +1588,23 @@ if [[ $# -gt 0 ]]; then
             echo "  - sudo zypper-auto-helper install"
             exit 1
             ;;
-    esac
+esac
+fi
+
+# --repo-key-doctor --json: swap stdout/stderr EARLY (here, before the
+# startup banner at the log-init block) so stdout carries ONLY the final
+# JSON object (printed on the saved fd 3). The runner skips its own late
+# swap when ZNH_RKD_JSON_EARLY=1 (its fd 3 would otherwise copy the already
+# redirected stderr instead of the real stdout).
+if [[ "${1:-}" == "--repo-key-doctor" ]]; then
+    # Top-level context (no 'local' here) — a plain loop variable.
+    for _rkd_early_a in "${@:2}"; do
+        if [[ "${_rkd_early_a}" == "--json" ]]; then
+            exec 3>&1 1>&2
+            ZNH_RKD_JSON_EARLY=1
+            break
+        fi
+    done
 fi
 
 # Allow opening the dashboard WITHOUT sudo.
@@ -15398,6 +15414,11 @@ generate_dashboard() {
           <button class="cmd-btn" data-qa="setup-sf" data-qa-copy="zypper-auto-helper --setup-SF" data-qa-interactive="1" data-qa-danger="1">
               <span class="cmd-label">Setup Snap/Flatpak</span>
               <span class="cmd-desc">Interactive + system changes • copy-only in WebUI</span>
+              <div class="cmd-copy-feedback">Open</div>
+          </button>
+          <button class="cmd-btn" data-qa="repo-key-doctor" data-qa-copy="zypper-auto-helper --repo-key-doctor fix-all" data-qa-interactive="1">
+              <span class="cmd-label">Repo Key Doctor</span>
+              <span class="cmd-desc">Detect + repair RPM repo GPG signing keys (rotations) • copy-only in WebUI</span>
               <div class="cmd-copy-feedback">Open</div>
           </button>
           <button class="cmd-btn" data-qa="debug-menu" data-qa-copy="zypper-auto-helper debug" data-qa-interactive="1">
@@ -39353,7 +39374,7 @@ run_verification_only() {
     # Allow a wrapper to run verification multiple times while preserving a
     # cumulative repair counter across attempts.
     REPAIR_ATTEMPTS=${REPAIR_ATTEMPTS_BASE:-0}
-    local TOTAL_CHECKS=53
+    local TOTAL_CHECKS=54
 
     # Flags used to coordinate "later" repair stages so early checks don't
     # permanently fail verification when follow-up auto-repair can recover.
@@ -42650,6 +42671,56 @@ PROBLEMS_DETECTED=$((REPAIR_ATTEMPTS + VERIFICATION_FAILED))
 
 # Expose a few summary values for wrappers (e.g., retry logic).
 VERIFICATION_LAST_TOTAL_CHECKS=$TOTAL_CHECKS
+# Check 54: RPM repository GPG signing-key health (v93: repo-key-doctor).
+# The universal engine scans every enabled gpgcheck=1 repo, AUTO-REPAIRS the
+# safe classes (vendor signing-subkey ROTATIONS under a trusted primary +
+# rpmdb drift), probes file-only-key repos via their repomd.xml signature
+# (STALE-KEY when it fails — the 2026-11 warpdotdev case), and persists
+# /var/lib/zypper-auto/repo-key-doctor.json for the dashboard. Attention
+# states (UNTRUSTED new primary / STALE-KEY / BAD-KEY / MISSING-FILE) are
+# NEVER auto-imported and FAIL verification so the periodic
+# zypper-auto-verify.timer surfaces them.
+log_debug "[54/${TOTAL_CHECKS}] Checking RPM repo GPG signing-key health (repo-key-doctor)..."
+if [ "${VERIFY_PM_IS_RPM_BASED:-0}" -ne 1 ] 2>/dev/null; then
+    log_info "ℹ Not an RPM-based system; repo signing-key check skipped"
+elif ! declare -f run_repo_key_doctor_only >/dev/null 2>&1; then
+    log_warn "⚠ repo-key-doctor engine unavailable (older embedded copy); skipping"
+else
+    if verify_should_skip_heavy_check "repo signing-key health"; then
+        log_info "ℹ Skipped this cycle (low-impact mode)"
+    else
+        local _vk_rkd_rc=0 _vk_rkd_row _vk_rkd_state _vk_rkd_id _vk_rkd_rest
+        local _vk_rkd_att=0
+        ZNH_NON_INTERACTIVE=1 RKD_ASSUME_YES=1 run_repo_key_doctor_only autoheal || _vk_rkd_rc=$?
+        for _vk_rkd_row in "${_RKD_ROWS[@]}"; do
+            IFS='|' read -r _vk_rkd_state _vk_rkd_id _vk_rkd_rest <<<"${_vk_rkd_row}"
+            case "${_vk_rkd_state}" in
+                UNTRUSTED|STALE-KEY|BAD-KEY|MISSING-FILE)
+                    _vk_rkd_att=$((_vk_rkd_att + 1))
+                    log_error "  ✗ ${_vk_rkd_state}: ${_vk_rkd_id}"
+                    ;;
+            esac
+        done
+        if [ "${_RKD_REPAIRED:-0}" -gt 0 ] 2>/dev/null; then
+            REPAIR_ATTEMPTS=$((REPAIR_ATTEMPTS + _RKD_REPAIRED))
+            PROBLEMS_DETECTED=$((PROBLEMS_DETECTED + _RKD_REPAIRED))
+            PROBLEMS_FIXED=$((PROBLEMS_FIXED + _RKD_REPAIRED))
+        fi
+        if [ "${_vk_rkd_rc}" -eq 0 ] && [ "${_vk_rkd_att}" -eq 0 ]; then
+            log_success "✓ RPM repo signing keys healthy (${#_RKD_ROWS[@]} repos checked)"
+        else
+            if [ "${_vk_rkd_rc}" -eq 1 ]; then
+                log_error "✗ A repo signing-key repair FAILED (see the repo-key-doctor lines above)"
+            fi
+            if [ "${_vk_rkd_att}" -gt 0 ]; then
+                log_error "✗ ${_vk_rkd_att} repo(s) need signing-key attention — run: sudo zypper-auto-helper --repo-key-doctor"
+                PROBLEMS_DETECTED=$((PROBLEMS_DETECTED + 1))
+            fi
+            VERIFICATION_FAILED=1
+        fi
+    fi
+fi
+
 VERIFICATION_LAST_PROBLEMS_FIXED=$PROBLEMS_FIXED
 VERIFICATION_LAST_PROBLEMS_DETECTED=$PROBLEMS_DETECTED
 VERIFICATION_LAST_REMAINING=$VERIFICATION_FAILED
@@ -52109,6 +52180,114 @@ RKD_IMPORT_NEW=0
 # Populated per scan: the lowercased primary fingerprints trusted by the
 # rpmdb (gpg-pubkey VERSION fields) — the engine's trust anchor.
 _RKD_TRUSTED=()
+# Per-run recording (v93+): every classification lands in _RKD_ROWS as
+# "state|repo-id|detail" so --json and the dashboard state file can be
+# emitted without re-parsing the human rows. _RKD_REPAIRED counts successful
+# repairs (consumed by the periodic verification Check 54).
+_RKD_ROWS=()
+_RKD_REPAIRED=0
+RKD_JSON=0
+RKD_QUIET=0
+# Dashboard/tooling state file (the distro-upgrade state-file pattern).
+ZNH_REPO_KEY_STATE_FILE="/var/lib/zypper-auto/repo-key-doctor.json"
+
+znh_repo_key_doctor_row() {
+    # Emit ONE classification row and record it for --json / the state file.
+    # Args: state, repo id, detail. Rows are suppressed in --json mode (the
+    # JSON object is the output) and in quiet/autoheal mode the banners go
+    # away but rows stay visible for the verification log.
+    local _rkrw_state="$1" _rkrw_id="$2" _rkrw_detail="$3"
+    _RKD_ROWS+=("${_rkrw_state}|${_rkrw_id}|${_rkrw_detail}")
+    if [ "${RKD_QUIET}" -eq 0 ] && [ "${RKD_JSON}" -eq 0 ]; then
+        printf '  %-13s %s  (%s)\n' "${_rkrw_state}" "${_rkrw_id}" "${_rkrw_detail}" | tee -a "${LOG_FILE}"
+    fi
+    return 0
+}
+
+znh_repo_key_doctor_render_json() {
+    # Print the machine-readable status object on stdout. Consumed by --json
+    # and by write_state (into /var/lib/zypper-auto/repo-key-doctor.json).
+    # Only repo ids + fixed state words are emitted, so no JSON escaping is
+    # needed (ids are [A-Za-z0-9_-] from repo stanza headers).
+    local _rkj_r _rkj_state _rkj_id _rkj_detail
+    local _rkj_ok=0 _rkj_att=0 _rkj_skip=0 _rkj_first=1
+    for _rkj_r in "${_RKD_ROWS[@]}"; do
+        IFS='|' read -r _rkj_state _rkj_id _rkj_detail <<<"${_rkj_r}"
+        case "${_rkj_state}" in
+            OK) _rkj_ok=$((_rkj_ok + 1)) ;;
+            SKIP|NO-GPGKEY|NO-KEYFILE|UNREACHABLE) _rkj_skip=$((_rkj_skip + 1)) ;;
+            *) _rkj_att=$((_rkj_att + 1)) ;;
+        esac
+    done
+    printf '{"mode":"repo-key-doctor","generated":"%s","total":%d,"repaired":%d,"ok":%d,"attention":%d,"skipped":%d,"repos":[' \
+        "$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')" \
+        "${#_RKD_ROWS[@]}" "${_RKD_REPAIRED}" "${_rkj_ok}" "${_rkj_att}" "${_rkj_skip}"
+    for _rkj_r in "${_RKD_ROWS[@]}"; do
+        IFS='|' read -r _rkj_state _rkj_id _rkj_detail <<<"${_rkj_r}"
+        if [ "${_rkj_first}" -eq 0 ]; then printf ','; fi
+        _rkj_first=0
+        printf '{"repo":"%s","state":"%s"}' "${_rkj_id}" "${_rkj_state}"
+    done
+    printf ']}\n'
+    return 0
+}
+
+znh_repo_key_doctor_write_state() {
+    # Best-effort persistence for the dashboard/tooling (the distro-upgrade
+    # state-file pattern: tmp + mv + chmod 644). Silent when the state dir is
+    # not writable (e.g. a non-root status run) — the CLI output still works.
+    local _rkws_dir _rkws_tmp
+    _rkws_dir="$(dirname "${ZNH_REPO_KEY_STATE_FILE}")"
+    mkdir -p "${_rkws_dir}" 2>/dev/null || return 0
+    _rkws_tmp="$(mktemp "${ZNH_REPO_KEY_STATE_FILE}.tmp.XXXXXX" 2>/dev/null)" || return 0
+    if ! znh_repo_key_doctor_render_json >"${_rkws_tmp}" 2>/dev/null; then
+        rm -f "${_rkws_tmp}" 2>/dev/null || true
+        return 0
+    fi
+    chmod 644 "${_rkws_tmp}" 2>/dev/null || true
+    mv -f "${_rkws_tmp}" "${ZNH_REPO_KEY_STATE_FILE}" 2>/dev/null \
+        || rm -f "${_rkws_tmp}" 2>/dev/null || true
+    return 0
+}
+
+znh_repo_key_doctor_probe_repomd() {
+    # Probe a file://-key repo for a STALE signing key: fetch the repo's
+    # repomd.xml + repomd.xml.asc from $1 and verify the detached signature
+    # with the repo's LOCAL key file $2 in a throwaway GNUPGHOME. This closes
+    # the file-only-key detection gap (the repo has no gpgkey URL to fetch a
+    # rotated key from, but its metadata signature still fails when the
+    # vendor rotated — e.g. the 2026-11 warpdotdev case).
+    # Returns: 0 = signature verifies with the local key
+    #          1 = signature FAILED (stale key — the vendor likely rotated)
+    #          2 = cannot probe (no http baseurl / unsigned metadata /
+    #              unreachable / no gpg)
+    local _rkpp_url="$1" _rkpp_key="$2" _rkpp_gpg=""
+    local _rkpp_home _rkpp_md _rkpp_sig _rkpp_rc=2
+    case "${_rkpp_url}" in
+        http://*|https://*) ;;
+        *) return 2 ;;
+    esac
+    if command -v gpg >/dev/null 2>&1; then _rkpp_gpg="gpg"
+    elif command -v gpg2 >/dev/null 2>&1; then _rkpp_gpg="gpg2"
+    else return 2; fi
+    _rkpp_home="$(mktemp -d /tmp/repo-key-doctor-gnupg.XXXXXX 2>/dev/null)" || return 2
+    _rkpp_md="$(mktemp /tmp/repo-key-doctor-md.XXXXXX 2>/dev/null)" \
+        || { rm -rf "${_rkpp_home}" 2>/dev/null || true; return 2; }
+    _rkpp_sig="${_rkpp_md}.asc"
+    chmod 700 "${_rkpp_home}" 2>/dev/null || true
+    if curl -fsSL --connect-timeout 15 --max-time 30 "${_rkpp_url%/}/repomd.xml" -o "${_rkpp_md}" 2>/dev/null \
+       && curl -fsSL --connect-timeout 15 --max-time 30 "${_rkpp_url%/}/repomd.xml.asc" -o "${_rkpp_sig}" 2>/dev/null \
+       && [ -s "${_rkpp_md}" ] && [ -s "${_rkpp_sig}" ] \
+       && "${_rkpp_gpg}" --batch --homedir "${_rkpp_home}" --import "${_rkpp_key}" >/dev/null 2>&1; then
+        if "${_rkpp_gpg}" --batch --homedir "${_rkpp_home}" --verify "${_rkpp_sig}" "${_rkpp_md}" >/dev/null 2>&1; then
+            _rkpp_rc=0
+        else
+            _rkpp_rc=1
+        fi
+    fi
+    rm -rf "${_rkpp_home}" "${_rkpp_md}" "${_rkpp_sig}" 2>/dev/null || true
+    return "${_rkpp_rc}"
+}
 
 znh_repo_key_doctor_rpmdb_fprs() {
     # Lowercased 40-hex primary fingerprints of every gpg-pubkey in the rpmdb
@@ -52319,6 +52498,7 @@ znh_repo_key_doctor_apply_fix() {
     znh_repo_key_doctor_import_key "${_rka_key}" || return 1
     znh_repo_key_doctor_clean_cache "${_rka_id}"
     znh_repo_key_doctor_verify_repo "${_rka_id}" "${_rka_file}" || return 1
+    _RKD_REPAIRED=$((_RKD_REPAIRED + 1))
     log_success "Repo ${_rka_id} repaired."
     return 0
 }
@@ -52331,19 +52511,20 @@ znh_repo_key_doctor_scan_one() {
     local _rks_mode="$1" _rks_target="$2" _rks_file="$3" _rks_id="$4"
     local _rks_enabled="$5" _rks_gpg="$6" _rks_keys="$7"
     local _rks_k _rks_src _rks_url="" _rks_local="" _rks_tmp="" _rks_f
+    local _rks_base="$8"
     local _rks_primary _rks_state="" _rks_detail=""
     local -a _rks_fprs=() _rks_localfprs=()
 
     if [ "${_rks_enabled}" != "1" ]; then
-        echo "  SKIP          ${_rks_id}  (disabled)" | tee -a "${LOG_FILE}"
+        znh_repo_key_doctor_row "SKIP" "${_rks_id}" "disabled"
         return 0
     fi
     if [ "${_rks_gpg}" != "1" ]; then
-        echo "  SKIP          ${_rks_id}  (gpgcheck off — no key verification)" | tee -a "${LOG_FILE}"
+        znh_repo_key_doctor_row "SKIP" "${_rks_id}" "gpgcheck off — no key verification"
         return 0
     fi
     if [ "${_rks_keys}" = "-" ] || [ -z "${_rks_keys}" ]; then
-        echo "  NO-GPGKEY     ${_rks_id}  (gpgcheck=1 but no gpgkey= — relies on already-imported rpmdb keys; nothing to check)" | tee -a "${LOG_FILE}"
+        znh_repo_key_doctor_row "NO-GPGKEY" "${_rks_id}" "gpgcheck=1 but no gpgkey= — relies on already-imported rpmdb keys; nothing to check"
         return 0
     fi
 
@@ -52359,13 +52540,13 @@ znh_repo_key_doctor_scan_one() {
         _rks_tmp="$(mktemp /tmp/repo-key-doctor.XXXXXX.asc)"
         if ! znh_repo_key_doctor_fetch_key "${_rks_url}" "${_rks_tmp}"; then
             rm -f "${_rks_tmp}"
-            echo "  UNREACHABLE   ${_rks_id}  (could not fetch ${_rks_url} — offline?; no change made)" | tee -a "${LOG_FILE}"
+            znh_repo_key_doctor_row "UNREACHABLE" "${_rks_id}" "could not fetch ${_rks_url} — offline?; no change made"
             return 0
         fi
         mapfile -t _rks_fprs < <(znh_repo_key_doctor_fingerprints "${_rks_tmp}" || true)
         rm -f "${_rks_tmp}"
         if [ "${#_rks_fprs[@]}" -eq 0 ]; then
-            echo "  BAD-KEY       ${_rks_id}  (fetched ${_rks_url} contains no fingerprints; no change made)" | tee -a "${LOG_FILE}"
+            znh_repo_key_doctor_row "BAD-KEY" "${_rks_id}" "fetched ${_rks_url} contains no fingerprints; no change made"
             return 0
         fi
         _rks_primary="${_rks_fprs[0],,}"
@@ -52384,10 +52565,10 @@ znh_repo_key_doctor_scan_one() {
         fi
         if [ "${_rks_trusted}" -eq 0 ]; then
             if [ "${RKD_IMPORT_NEW}" -eq 1 ]; then
-                echo "  NEW-PRIMARY   ${_rks_id}  (fetched key has a primary NOT seen before; --import-new given -> will import)" | tee -a "${LOG_FILE}"
+                znh_repo_key_doctor_row "NEW-PRIMARY" "${_rks_id}" "fetched key has a primary NOT seen before; --import-new given -> will import"
                 _rks_state="fix-new"
             else
-                echo "  UNTRUSTED     ${_rks_id}  (fetched key primary ${_rks_primary} is NOT trusted on this system — REFUSING to auto-import; inspect it, then re-run with --import-new or: sudo rpm --import ${_rks_url})" | tee -a "${LOG_FILE}"
+                znh_repo_key_doctor_row "UNTRUSTED" "${_rks_id}" "fetched key primary ${_rks_primary} is NOT trusted on this system — REFUSING to auto-import; inspect it, then re-run with --import-new or: sudo rpm --import ${_rks_url}"
                 return 0
             fi
         else
@@ -52408,10 +52589,10 @@ znh_repo_key_doctor_scan_one() {
                 [ "${_rks_found}" -eq 0 ] && _rks_missing=1
             done
             if [ "${_rks_missing}" -eq 0 ]; then
-                echo "  OK            ${_rks_id}  (key material current: every fetched fingerprint is already trusted)" | tee -a "${LOG_FILE}"
+                znh_repo_key_doctor_row "OK" "${_rks_id}" "key material current: every fetched fingerprint is already trusted"
                 return 0
             fi
-            echo "  ROTATED       ${_rks_id}  (trusted primary, NEW signing subkey(s) — a vendor key rotation; repairable)" | tee -a "${LOG_FILE}"
+            znh_repo_key_doctor_row "ROTATED" "${_rks_id}" "trusted primary, NEW signing subkey(s) — a vendor key rotation; repairable"
             _rks_state="fix-rotated"
         fi
         if [ "${_rks_mode}" = "fix" ] && { [ -z "${_rks_target}" ] || [ "${_rks_target}" = "${_rks_id}" ]; }; then
@@ -52436,16 +52617,16 @@ znh_repo_key_doctor_scan_one() {
     # file://-only repo: detect rpmdb drift (key file present but never
     # imported). A remote rotation cannot be detected without a URL source.
     if [ -z "${_rks_local}" ]; then
-        echo "  NO-KEYFILE    ${_rks_id}  (gpgkey uses an unsupported scheme; nothing to check)" | tee -a "${LOG_FILE}"
+        znh_repo_key_doctor_row "NO-KEYFILE" "${_rks_id}" "gpgkey uses an unsupported scheme; nothing to check"
         return 0
     fi
     if [ ! -f "${_rks_local}" ]; then
-        echo "  MISSING-FILE  ${_rks_id}  (key file ${_rks_local} does not exist — re-install the repo's release package or fix its gpgkey path)" | tee -a "${LOG_FILE}"
+        znh_repo_key_doctor_row "MISSING-FILE" "${_rks_id}" "key file ${_rks_local} does not exist — re-install the repo's release package or fix its gpgkey path"
         return 0
     fi
     mapfile -t _rks_localfprs < <(znh_repo_key_doctor_fingerprints "${_rks_local}" || true)
     if [ "${#_rks_localfprs[@]}" -eq 0 ]; then
-        echo "  BAD-KEY       ${_rks_id}  (${_rks_local} contains no fingerprints)" | tee -a "${LOG_FILE}"
+        znh_repo_key_doctor_row "BAD-KEY" "${_rks_id}" "${_rks_local} contains no fingerprints"
         return 0
     fi
     local _rks_indb=0
@@ -52453,10 +52634,26 @@ znh_repo_key_doctor_scan_one() {
         [ "${_rks_f}" = "${_rks_localfprs[0],,}" ] && _rks_indb=1
     done
     if [ "${_rks_indb}" -eq 1 ]; then
-        echo "  OK            ${_rks_id}  (local key file imported; no URL key source — a remote rotation cannot be detected)" | tee -a "${LOG_FILE}"
+        # v93+: with no URL key source a remote rotation can still be caught
+        # by probing the repo metadata signature against the LOCAL key file
+        # (repomd.xml.asc verify in a throwaway keyring). 0 = verifies,
+        # 1 = FAILS (stale key — the vendor rotated), 2 = cannot probe.
+        local _rks_probe_rc=0
+        znh_repo_key_doctor_probe_repomd "${_rks_base}" "${_rks_local}" || _rks_probe_rc=$?
+        case "${_rks_probe_rc}" in
+            0)
+                znh_repo_key_doctor_row "OK" "${_rks_id}" "local key imported; repomd.xml signature verifies with the local key"
+                ;;
+            1)
+                znh_repo_key_doctor_row "STALE-KEY" "${_rks_id}" "repo metadata signature FAILS with the local key — the vendor likely ROTATED the signing key and this repo has no gpgkey URL to fetch the new one from; reinstall the repo's release/key package or add its gpgkey URL, then re-run"
+                ;;
+            *)
+                znh_repo_key_doctor_row "OK" "${_rks_id}" "local key file imported; metadata unsigned or not probeable — a remote rotation cannot be detected"
+                ;;
+        esac
         return 0
     fi
-    echo "  RPMDB-DRIFT   ${_rks_id}  (key file present but NOT imported into the rpmdb; repairable)" | tee -a "${LOG_FILE}"
+    znh_repo_key_doctor_row "RPMDB-DRIFT" "${_rks_id}" "key file present but NOT imported into the rpmdb; repairable"
     if [ "${_rks_mode}" = "fix" ] && { [ -z "${_rks_target}" ] || [ "${_rks_target}" = "${_rks_id}" ]; }; then
         if ! znh_repo_key_doctor_confirm; then
             log_info "Skipped the ${_rks_id} repair (declined)."
@@ -52478,6 +52675,8 @@ run_repo_key_doctor_only() {
     RKD_DRY_RUN=0
     RKD_ASSUME_YES=0
     RKD_IMPORT_NEW=0
+    RKD_JSON=0
+    RKD_QUIET=0
     while [ $# -gt 0 ]; do
         case "$1" in
             status|scan)
@@ -52493,11 +52692,27 @@ run_repo_key_doctor_only() {
             fix-all|repair-all)
                 _rkr_sub="fix"
                 ;;
+            autoheal|self-heal)
+                # Periodic self-heal (verification Check 54 + the timer):
+                # fix mode + auto-yes + quiet banners. The SAFETY MODEL is
+                # unchanged — only rotations under a trusted primary and
+                # rpmdb drift are repaired; attention states are reported.
+                _rkr_sub="fix"
+                RKD_ASSUME_YES=1
+                ZNH_NON_INTERACTIVE=1
+                RKD_QUIET=1
+                ;;
             rollback)
                 _rkr_sub="rollback"
                 ;;
             --dry-run)
                 RKD_DRY_RUN=1
+                ;;
+            --json)
+                # Machine-readable status on stdout (rows + logs go to
+                # stderr; the JSON object is printed on the saved fd 3).
+                RKD_JSON=1
+                RKD_QUIET=1
                 ;;
             --yes|-y|--non-interactive)
                 RKD_ASSUME_YES=1
@@ -52508,12 +52723,21 @@ run_repo_key_doctor_only() {
                 ;;
             *)
                 log_error "Unknown option for --repo-key-doctor: $1"
-                echo "Usage: zypper-auto-helper --repo-key-doctor [status|scan|fix [repo-id]|fix-all|rollback] [--dry-run] [--yes] [--import-new]" >&2
+                echo "Usage: zypper-auto-helper --repo-key-doctor [status|scan|fix [repo-id]|fix-all|autoheal|rollback] [--dry-run] [--json] [--yes] [--import-new]" >&2
                 return 1
                 ;;
         esac
         shift
     done
+
+    # --json: keep stdout clean for the JSON object. fd 3 preserves the real
+    # stdout; everything else (rows, logs, banners) goes to stderr for the
+    # duration of the run (the dispatch exits right after this mode). When the
+    # early fast-path swap already ran (ZNH_RKD_JSON_EARLY=1), fd 3 already
+    # holds the real stdout — a second swap here would point fd 3 at stderr.
+    if [ "${RKD_JSON}" -eq 1 ] && [ "${ZNH_RKD_JSON_EARLY:-0}" -ne 1 ]; then
+        exec 3>&1 1>&2
+    fi
 
     log_info ">>> Universal RPM repo GPG key doctor (${_rkr_sub})..."
     update_status "Repo GPG key doctor: ${_rkr_sub}..."
@@ -52532,12 +52756,14 @@ run_repo_key_doctor_only() {
         fi
     fi
 
-    echo "" | tee -a "${LOG_FILE}"
-    echo "==============================================" | tee -a "${LOG_FILE}"
-    echo "  Universal RPM Repo GPG Key Doctor (${_rkr_sub})" | tee -a "${LOG_FILE}"
-    echo "==============================================" | tee -a "${LOG_FILE}"
     local _rkr_dirs="${ZNH_REPO_KEY_DOCTOR_DIRS:-/etc/yum.repos.d:/etc/zypp/repos.d}"
-    echo "Repo dirs: ${_rkr_dirs}" | tee -a "${LOG_FILE}"
+    if [ "${RKD_QUIET}" -eq 0 ]; then
+        echo "" | tee -a "${LOG_FILE}"
+        echo "==============================================" | tee -a "${LOG_FILE}"
+        echo "  Universal RPM Repo GPG Key Doctor (${_rkr_sub})" | tee -a "${LOG_FILE}"
+        echo "==============================================" | tee -a "${LOG_FILE}"
+        echo "Repo dirs: ${_rkr_dirs}" | tee -a "${LOG_FILE}"
+    fi
 
     # Trust anchor: the rpmdb's already-imported primary fingerprints.
     mapfile -t _RKD_TRUSTED < <(znh_repo_key_doctor_rpmdb_fprs || true)
@@ -52605,14 +52831,38 @@ run_repo_key_doctor_only() {
         log_error "Repo id '${_rkr_target}' not found in ${_rkr_dirs}."
         return 1
     fi
-    echo "" | tee -a "${LOG_FILE}"
+    # Persist the scan for the dashboard/tooling (best-effort) and count
+    # the attention states (UNTRUSTED / STALE-KEY / BAD-KEY / MISSING-FILE).
+    znh_repo_key_doctor_write_state
+    local _rkr_att=0 _rkr_row _rkr_s _rkr_i _rkr_d
+    for _rkr_row in "${_RKD_ROWS[@]}"; do
+        IFS='|' read -r _rkr_s _rkr_i _rkr_d <<<"${_rkr_row}"
+        case "${_rkr_s}" in
+            UNTRUSTED|STALE-KEY|BAD-KEY|MISSING-FILE) _rkr_att=$((_rkr_att + 1)) ;;
+        esac
+    done
+    if [ "${RKD_JSON}" -eq 1 ]; then
+        znh_repo_key_doctor_render_json >&3
+    fi
     if [ "${_rkr_failed}" -gt 0 ]; then
-        log_error "Done with ${_rkr_failed} failed repair(s)."
+        if [ "${RKD_QUIET}" -eq 0 ]; then
+            log_error "Done with ${_rkr_failed} failed repair(s)."
+        fi
         return 1
     fi
-    log_success "Repo key doctor ${_rkr_sub} complete."
-    if [ "${_rkr_sub}" = "status" ]; then
-        echo "Tip: re-run with 'fix-all' to repair ROTATED/RPMDB-DRIFT repos: sudo zypper-auto-helper --repo-key-doctor fix-all" | tee -a "${LOG_FILE}"
+    if [ "${_rkr_att}" -gt 0 ]; then
+        # Attention states are never auto-imported by design — surface them
+        # (exit code 2 = attention needed, distinct from a failed repair).
+        if [ "${RKD_QUIET}" -eq 0 ]; then
+            log_warn "${_rkr_att} repo(s) need signing-key attention (UNTRUSTED/STALE-KEY/BAD-KEY/MISSING-FILE) — run: sudo zypper-auto-helper --repo-key-doctor"
+        fi
+        return 2
+    fi
+    if [ "${RKD_QUIET}" -eq 0 ]; then
+        log_success "Repo key doctor ${_rkr_sub} complete."
+        if [ "${_rkr_sub}" = "status" ]; then
+            echo "Tip: re-run with 'fix-all' to repair ROTATED/RPMDB-DRIFT repos: sudo zypper-auto-helper --repo-key-doctor fix-all" | tee -a "${LOG_FILE}"
+        fi
     fi
     return 0
 }
@@ -56570,8 +56820,14 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          in-place; <=42 removes the stale gpg-pubkey first), per-repo cache clean,"
     echo "                          and a functional per-repo verification (dnf makecache / zypper refresh)."
     echo "                          --dry-run prints the verified plan (no root); rollback restores the"
-    echo "                          newest key backups. Arch repos keep their pacman-specific doctor:"
-    echo "                          --arch-repos key-doctor."
+    echo "                          newest key backups. autoheal = the periodic self-heal used by"
+    echo "                          verification Check 54 (zypper-auto-verify.timer): quiet fix of the"
+    echo "                          safe classes; attention states are reported, never auto-imported."
+    echo "                          --json emits machine-readable status (logs to stderr) and every run"
+    echo "                          persists /var/lib/zypper-auto/repo-key-doctor.json for tooling."
+    echo "                          File-only-key repos are probed via their repomd.xml signature —"
+    echo "                          STALE-KEY when it fails (the vendor rotated; no URL key source)."
+    echo "                          Arch repos keep their pacman-specific doctor: --arch-repos key-doctor."
     echo "  --copr-search <query>   Search Fedora Copr (official API v3) for <query>, list every project with its"
     echo "                          title (owner/project) and description, and offer an interactive multi-select"
     echo "                          TUI (numbers/ranges like 3-7, all/none) to enable the chosen repositories via"
