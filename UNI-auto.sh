@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#       VERSION 94 - Enterprise Edition: OPENSUSE/TUMBLEWEED KEY-TRUST FIX (caught live on a Tumbleweed install: every URL-keyed repo classified UNTRUSTED and the installer reported UNHEALTHY because openSUSE/SUSE rpm stores gpg-pubkey VERSION as the 8-hex SHORT key ID while Fedora stores the full 40-hex fingerprint — trust matching now goes through znh_repo_key_doctor_fpr_matches (full 40-hex | 16-hex long ID | 8-hex short ID, case-insensitive), verified live: insync UNTRUSTED->OK and google-chrome UNTRUSTED->ROTATED (a real vendor rotation) ->repaired; UNTRUSTED is now INFORMATIONAL and never fails verification (exit 3 from fix-all, WARN lines + a normal-urgency dedup'd notification, a separate 'untrusted' count in --json/state file, badge tooltip note); and a v94 keys cache archives every key the engine imports so repaired URL-only-key repos re-classify OK on the next scan (the rpmdb ID alone can never match their imported SUBKEYS — google-chrome was repaired yet still ROTATED before this; verified live: total=14 ok=4 attention=0 untrusted=0 after one fix-all) — v93 UNIVERSAL REPO KEY DOCTOR (new --repo-key-doctor engine: detects + repairs GPG signing-key problems for ANY RPM repo — scans every enabled gpgcheck=1 repo in /etc/yum.repos.d + /etc/zypp/repos.d, fetches each gpgkey URL, classifies OK / ROTATED (trusted primary, new subkeys — the vendor key-rotation case caught live on Warp's 2026-11-04 warpdotdev subkey rotation that broke warp-terminal transactions and offline upgrades) / RPMDB-DRIFT / MISSING-FILE / UNTRUSTED (a fetched key whose primary is NOT already trusted is refused — never auto-imported; --import-new is the explicit opt-in) / UNREACHABLE; repairs use a timestamped .bak backup, a Fedora-version-aware rpm import, a per-repo cache clean, and a functional makecache / zypper-refresh verification; subcommands status|scan|fix [repo-id]|fix-all|autoheal|rollback with --dry-run/--json/--yes/--import-new; --json emits machine-readable status and every run persists /var/lib/zypper-auto/repo-key-doctor.json for tooling; file-only-key repos are probed via their repomd.xml signature so vendor rotations are caught even without a gpgkey URL (the new STALE-KEY classification); autoheal is wired in as verification CHECK 54 (TOTAL_CHECKS 53 -> 54) so the periodic zypper-auto-verify.timer auto-detects + self-heals signing-key problems and fails verification on attention states; a Repo Key Doctor copy-to-run quick-action button was added to the WebUI commands section, a Repo Keys health badge (OK/ATTN/UNKNOWN/N/A, fed by the state file, self-updating on every periodic verify cycle) was added to the dashboard feature badges, --json now includes an escaped per-repo detail field, and the STALE-KEY hint names the rpm package that OWNS the key file with the one-command 'sudo dnf reinstall <owner>' fix; the Repo Keys badge is now CLICKABLE like Media Repos (green = info overlay, yellow = opens the fix quick action, gray = opens it too) backed by two new server-side quick actions (repo-key-doctor fix-all with the REPOKEYFIX confirm phrase + repo-key-doctor-status read-only); --flat emits NDJSON (one JSON object per repo, jq-friendly, implies --json); and verification Check 54 now sends a CRITICAL desktop notification naming the affected repos when attention states are found; repo-file variables ($releasever/$basearch/$arch/$contentdir, bare + braced) are now expanded in gpgkey paths and baseurls exactly like dnf — caught live on a Fedora 44 host where every stock Fedora/RPM Fusion/Terra repo classified MISSING-FILE because the engine treated RPM-GPG-KEY-fedora-$releasever-$basearch as a literal filename; the Check 54 attention notification is now DEDUP'd — once per changed repo set + a cooldown reminder + a resolved notice, with VERIFY_REPO_KEY_NOTIFY_ENABLED / _COOLDOWN_HOURS config keys and WebUI Settings rows, fixing a live ~100-popup spam storm from a persistent attention repo on the 30-minute verify timer) — v92 DESKTOP SHORTCUT SYNC (the user's ask: 'now make it synch with shortcuts' — the follow-up to the v91 port autopilot): the generated desktop shortcut now embeds X-ZypperAuto-Shortcuts-Version, and the Smart Update check rewrites the shortcut whenever the installed copy's marker differs from the generator's — the marker is the source of truth, so shortcuts always match the deployed helper (actions, DASHBOARD_PORT behavior, translations, icons) instead of relying on the fragile legacy content heuristics (kept as belt-and-braces; pre-marker files always rewrite); the Desktop-surface copy re-syncs whenever its own marker drifts from the master; a rewrite now prints a one-line sync note; and the notification 'Open Dashboard' action's last-resort URL fallback is PORT-AWARE (reads the dashboard-http.port file v91 writes on every server start, 8765 fallback) instead of a hardcoded 8765 URL that would 404 on a moved/pinned port. The main shortcut already launches 'zypper-auto-helper --dash-open' (port-correct by construction), which the regression now pins with a drift guard against hardcoded-URL Exec lines. New focused regression regressions/test_dashboard_shortcut_sync_regression.sh with SANDBOXED runtime fixtures: first call creates the shortcut + Desktop copy with the marker, a drifted marker (90) triggers a resync with the sync note, and an up-to-date call is a no-op. — v91 DASHBOARD PORT AUTOPILOT (the user's ask: 'create config for port choose i should auto pick free port that has not conflict it should detect that. auto or manually set' + 'it should detect if a app tries use port that dashboard have it should change automatic and give user notification about that'): new DASHBOARD_PORT config key — auto (the default) or a fixed 1024-65535 port, with full wiring (shell default + /etc/zypper-auto.conf template block + dashboard-schema string row with an 'auto' preset + load_config validator that falls back to auto with a config warning on typos + missing-key registration/doc + a Settings drawer row whose Custom... field accepts any port); every dashboard server-start path (the non-root --dash-open fast path, the root run_dash_open_only, and the --dash-bg background service) now resolves the preferred port from the config, and when another application already holds it DETECTS the occupying process (ss -lptnH best-effort pid/name), MOVES to the next free port (foreground 8765-8790; the BG service keeps its own 8791-8800 range), and sends the user a desktop notification with the new URL (notify-send as the desktop user, or sudo -u + the session bus when root) — a taken manual port falls back with a clear warning so a conflict never breaks the launch, and an all-ports-busy range is an explicit warning too; the localhost Settings API's CORS origin gate now accepts ANY localhost port (was the fixed 8765-8790 range — remote origins stay rejected) so a pinned DASHBOARD_PORT can never lock the Settings drawer out; and the WebUI 'Open Live URL' button builds its URL from location.port so it always points at the port the dashboard actually serves on. — v90 media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
+#       VERSION 95 - Enterprise Edition: SUDOEDIT EDITOR CHOICE FOR THE 'sk' ALIAS (--set-sudo-editor / --remove-sudo-editor; the user's ask: 'add this as optional editor chouce menu make also user chooce wich one should picked editor instead of kate' for fish AND bash + 'make button make them chouse what editor tey want to edit files in webb ui or flag with smart editor picker so it is easy for them'): sudoedit now uses a USER-CHOSEN editor instead of a hardcoded one — the interactive menu (run with no argument) lists every INSTALLED editor, GUI editors with a block/wait flag first (kate -b, kwrite, gedit, gnome-text-editor, xed, mousepad, pluma, featherpad, geany, code --wait, code-oss --wait, emacs) then terminal editors (micro, nano, nvim, vim, vi), plus an 'a) auto' smart-pick option (first installed editor from that order); a direct pick accepts any editor command and multi-word commands work even unquoted because the dispatch joins the remaining args (--set-sudo-editor kate -b == --set-sudo-editor "kate -b"); 'auto' goes straight to the smart pick; non-interactive contexts (WebUI quick action, piped runs) fall back config -> auto so nothing hangs. Persistence: new ZNH_SUDO_EDITOR config key with FULL 6-surface wiring (config template block + dashboard-schema string row with presets + both load_config validator passes (max 60 chars) + _mark_missing_key + the missing-key feature description + the debug print) and a WebUI Settings drawer row (advanced, presets + free entry). What gets written (an improvement over the naive echo >> config.fish recipe, which accumulates one duplicate line per run): fish gets a MANAGED conf.d file ~/.config/fish/conf.d/zz-sudo-editor.fish with 'set -gx SUDO_EDITOR "<editor>"' + 'alias sk \'SUDO_EDITOR="<editor>" sudoedit\'' (whole-file rewrite = idempotent); bash gets a MARKED block in ~/.bashrc between '# >>> zypper-auto-helper sudoedit editor (SUDO_EDITOR + sk) >>>' / '<<<' markers holding 'export SUDO_EDITOR="<editor>"' + 'alias sk="SUDO_EDITOR=\"<editor>\" sudoedit"' (the previous managed block is sed-removed first, so re-runs REPLACE it, never append duplicates); both files are syntax-checked after every write (fish -n on the conf.d file, bash -n on .bashrc) and a failed check rolls the write back; under sudo the files are chown'd back to SUDO_USER (SUDO_USER_HOME-aware like the installer). Uninstaller (per the always-update-the-uninstaller rule): --remove-sudo-editor removes the managed fish file, ONLY the marked .bashrc block (nothing else in .bashrc is touched), and the ZNH_SUDO_EDITOR conf key. The install flow applies a configured ZNH_SUDO_EDITOR right after the shell-alias step (or logs a one-line discovery hint). WebUI: two new allowlisted quick actions — 'sudo-editor' (no-arg = config/smart-pick, non-interactive-safe, needs_dash_user_env so the root job writes the DESKTOP user's fish/bash configs instead of root's) and 'sudo-editor-remove' (confirm phrase) — plus two buttons in the Quick Actions grid. Completions: the new flags added to the bash ZNH_CLI_WORDS list, the zsh _znh_cmds array, and the fish complete lines (also backfilled --repo-key-doctor, which had been missing from all three). — v94 OPENSUSE/TUMBLEWEED KEY-TRUST FIX (caught live on a Tumbleweed install: every URL-keyed repo classified UNTRUSTED and the installer reported UNHEALTHY because openSUSE/SUSE rpm stores gpg-pubkey VERSION as the 8-hex SHORT key ID while Fedora stores the full 40-hex fingerprint — trust matching now goes through znh_repo_key_doctor_fpr_matches (full 40-hex | 16-hex long ID | 8-hex short ID, case-insensitive), verified live: insync UNTRUSTED->OK and google-chrome UNTRUSTED->ROTATED (a real vendor rotation) ->repaired; UNTRUSTED is now INFORMATIONAL and never fails verification (exit 3 from fix-all, WARN lines + a normal-urgency dedup'd notification, a separate 'untrusted' count in --json/state file, badge tooltip note); and a v94 keys cache archives every key the engine imports so repaired URL-only-key repos re-classify OK on the next scan (the rpmdb ID alone can never match their imported SUBKEYS — google-chrome was repaired yet still ROTATED before this; verified live: total=14 ok=4 attention=0 untrusted=0 after one fix-all) — v93 UNIVERSAL REPO KEY DOCTOR (new --repo-key-doctor engine: detects + repairs GPG signing-key problems for ANY RPM repo — scans every enabled gpgcheck=1 repo in /etc/yum.repos.d + /etc/zypp/repos.d, fetches each gpgkey URL, classifies OK / ROTATED (trusted primary, new subkeys — the vendor key-rotation case caught live on Warp's 2026-11-04 warpdotdev subkey rotation that broke warp-terminal transactions and offline upgrades) / RPMDB-DRIFT / MISSING-FILE / UNTRUSTED (a fetched key whose primary is NOT already trusted is refused — never auto-imported; --import-new is the explicit opt-in) / UNREACHABLE; repairs use a timestamped .bak backup, a Fedora-version-aware rpm import, a per-repo cache clean, and a functional makecache / zypper-refresh verification; subcommands status|scan|fix [repo-id]|fix-all|autoheal|rollback with --dry-run/--json/--yes/--import-new; --json emits machine-readable status and every run persists /var/lib/zypper-auto/repo-key-doctor.json for tooling; file-only-key repos are probed via their repomd.xml signature so vendor rotations are caught even without a gpgkey URL (the new STALE-KEY classification); autoheal is wired in as verification CHECK 54 (TOTAL_CHECKS 53 -> 54) so the periodic zypper-auto-verify.timer auto-detects + self-heals signing-key problems and fails verification on attention states; a Repo Key Doctor copy-to-run quick-action button was added to the WebUI commands section, a Repo Keys health badge (OK/ATTN/UNKNOWN/N/A, fed by the state file, self-updating on every periodic verify cycle) was added to the dashboard feature badges, --json now includes an escaped per-repo detail field, and the STALE-KEY hint names the rpm package that OWNS the key file with the one-command 'sudo dnf reinstall <owner>' fix; the Repo Keys badge is now CLICKABLE like Media Repos (green = info overlay, yellow = opens the fix quick action, gray = opens it too) backed by two new server-side quick actions (repo-key-doctor fix-all with the REPOKEYFIX confirm phrase + repo-key-doctor-status read-only); --flat emits NDJSON (one JSON object per repo, jq-friendly, implies --json); and verification Check 54 now sends a CRITICAL desktop notification naming the affected repos when attention states are found; repo-file variables ($releasever/$basearch/$arch/$contentdir, bare + braced) are now expanded in gpgkey paths and baseurls exactly like dnf — caught live on a Fedora 44 host where every stock Fedora/RPM Fusion/Terra repo classified MISSING-FILE because the engine treated RPM-GPG-KEY-fedora-$releasever-$basearch as a literal filename; the Check 54 attention notification is now DEDUP'd — once per changed repo set + a cooldown reminder + a resolved notice, with VERIFY_REPO_KEY_NOTIFY_ENABLED / _COOLDOWN_HOURS config keys and WebUI Settings rows, fixing a live ~100-popup spam storm from a persistent attention repo on the 30-minute verify timer) — v92 DESKTOP SHORTCUT SYNC (the user's ask: 'now make it synch with shortcuts' — the follow-up to the v91 port autopilot): the generated desktop shortcut now embeds X-ZypperAuto-Shortcuts-Version, and the Smart Update check rewrites the shortcut whenever the installed copy's marker differs from the generator's — the marker is the source of truth, so shortcuts always match the deployed helper (actions, DASHBOARD_PORT behavior, translations, icons) instead of relying on the fragile legacy content heuristics (kept as belt-and-braces; pre-marker files always rewrite); the Desktop-surface copy re-syncs whenever its own marker drifts from the master; a rewrite now prints a one-line sync note; and the notification 'Open Dashboard' action's last-resort URL fallback is PORT-AWARE (reads the dashboard-http.port file v91 writes on every server start, 8765 fallback) instead of a hardcoded 8765 URL that would 404 on a moved/pinned port. The main shortcut already launches 'zypper-auto-helper --dash-open' (port-correct by construction), which the regression now pins with a drift guard against hardcoded-URL Exec lines. New focused regression regressions/test_dashboard_shortcut_sync_regression.sh with SANDBOXED runtime fixtures: first call creates the shortcut + Desktop copy with the marker, a drifted marker (90) triggers a resync with the sync note, and an up-to-date call is a no-op. — v91 DASHBOARD PORT AUTOPILOT (the user's ask: 'create config for port choose i should auto pick free port that has not conflict it should detect that. auto or manually set' + 'it should detect if a app tries use port that dashboard have it should change automatic and give user notification about that'): new DASHBOARD_PORT config key — auto (the default) or a fixed 1024-65535 port, with full wiring (shell default + /etc/zypper-auto.conf template block + dashboard-schema string row with an 'auto' preset + load_config validator that falls back to auto with a config warning on typos + missing-key registration/doc + a Settings drawer row whose Custom... field accepts any port); every dashboard server-start path (the non-root --dash-open fast path, the root run_dash_open_only, and the --dash-bg background service) now resolves the preferred port from the config, and when another application already holds it DETECTS the occupying process (ss -lptnH best-effort pid/name), MOVES to the next free port (foreground 8765-8790; the BG service keeps its own 8791-8800 range), and sends the user a desktop notification with the new URL (notify-send as the desktop user, or sudo -u + the session bus when root) — a taken manual port falls back with a clear warning so a conflict never breaks the launch, and an all-ports-busy range is an explicit warning too; the localhost Settings API's CORS origin gate now accepts ANY localhost port (was the fixed 8765-8790 range — remote origins stay rejected) so a pinned DASHBOARD_PORT can never lock the Settings drawer out; and the WebUI 'Open Live URL' button builds its URL from location.port so it always points at the port the dashboard actually serves on. — v90 media-repos VERIFY-SCHEDULE SELF-HEAL + QUIET SKEW LOGS + SKEW-RESILIENT FFMPEG SWAP (implements all four v89 follow-up suggestions: the libheif-freeworld best-effort step now lives in the shared znh_media_repos_libheif_freeworld_heal helper that ALSO runs from the periodic verification — so the freeworld complement lands the moment RPM Fusion publishes the matching build, without waiting for the next --media-repos run — and it gained a QUIET resolvability pre-check (dnf install --assumeno under LC_ALL=C, locale-proof markers 'Problem:'/'Failed to resolve') so the known-skew state logs only a friendly WARN instead of a scary EXECUTE_GUARDED FAILURE banner (the user's ask after seeing the v89 log); the ffmpeg swap gained the same skew resilience — a failed swap retries via the documented plain 'install -y ffmpeg --allowerasing' form (verified online: unlike a skewed swap transaction it can NEVER remove ffmpeg-free without installing the replacement) and both Step 5 branches now verify 'rpm -q ffmpeg' afterwards so a skipped-but-successful transaction is an honest error; and scripts/syntax-check.sh now runs shellcheck at the documented repo standard --severity=warning, overridable via SYNTAX_SHELLCHECK_SEVERITY, so the suite preflight is green again instead of failing on the 17 pre-existing style-level notes in untouched legacy regions) — v89 media-repos RPM-FUSION SKEW-PROOF MULTIMEDIA GROUP (live-caught on the user's Fedora 44 host via the WebUI quick action: 'dnf5 install @multimedia' failed as a WHOLE transaction because RPM Fusion's libheif-freeworld-1.23.6 pins libheif = 1.23.6 while Fedora updates ships libheif/libheif-ffmpeg 1.23.7 — the classic recurring freeworld-lag skew, dnf5's own hint being --skip-broken; v89 retries the group with --skip-broken so one skewed package can no longer fail the whole run, RE-PROBES the freeworld GStreamer set to verify it actually landed (rc=1 if the resolver skipped it), adds a best-effort libheif-freeworld step (the HEIC H.264/HEVC complement; non-fatal while RPM Fusion lags, retried on every run until the matching build is published), and keeps the non-interactive fully-set-up no-op OFF while libheif is installed without its freeworld complement so quick actions self-heal the gap) — v88 media-repos INTERACTIVE OFFERS (the user's ask: 'it should ask if i want to enable/install' — caught live on the fully-set-up Fedora 44 host: the run showed 'Terra Mesa override : NOT ENABLED <-- did not ask' and exited with the no-op shortcut, so the OPTIONAL component was never offered; and 'ffmpeg-free (base build) : NOT INSTALLED <-- did not ask' read like a missing component when ffmpeg-free being ABSENT is the CORRECT state whenever the full-codec ffmpeg is in use — installing it would REPLACE the full build) — v88 makes the fully-set-up no-op shortcut apply ONLY to non-interactive runs (WebUI quick actions, scripts, piped stdin keep the fast no-op; the Mesa override stays opt-in only there), so interactive runs (and dry-runs) proceed through the idempotent flow and the optional Terra Mesa prompt is shown/previewed even when the standard set is complete, plus the best-effort final refresh steps; the ffmpeg-free probe line now labels its state honestly (NOT PRESENT — expected, the full-codec ffmpeg is in use / INSTALLED — will be swapped / NOT INSTALLED — the run installs the full-codec ffmpeg directly) + arch-repos NO DUPLICATE KEY RETRIES (the second webui-faster round; live-caught from the user's v85 Garuda run, 7m2s end-to-end: the run re-ran coderkun-aur's doomed ~75s capped-HKP import chain a SECOND time in the loop after the pre-loop sync had already failed it, and re-ran ~15s of redundant gpg finger/lsign calls per already-enabled repo) — v87 adds pre-loop failure memory (a repo whose key the pre-loop sync could not import is never retried in the loop; fresh enables fail fast WITHOUT a duplicate ~75s chain, already-enabled repos log the no-retry note), and the in-loop already-enabled key-sync branch now only installs KEYRING-PACKAGE keyrings (archlinuxcn/blackarch — an already-enabled section resolves their chicken-and-egg) instead of re-running the importer for every hex key the pre-loop pass just verified + media-repos FULLY-SET-UP FIX (live-caught on the user's own Fedora 44 host: running --media-repos printed 'Terra multimedia : MISSING' in the pre-run probe, then the idempotency shortcut declared 'already fully set up (RPM Fusion + Terra + codec set present)' and exited — because the shortcut never required the Terra MULTIMEDIA subrepo, so terra-release-multimedia was never installed on a release that HAS it (verified: dnf repoquery answers terra-release-multimedia-0:44-11.noarch); the fix makes the shortcut require the subrepo WHEN it is published for the release (a repoquery publishability check, same probe Step 2 already used; releases where it is not published keep the honest no-op, and dry-run treats it as possibly-published so the preview lists the 'would probe + enable' step instead of a false no-op) + arch-repos FAIL-FAST KEYS + PRE-LOOP KEY SYNC (the webui-faster round; live-caught from the user's v84 Garuda run: the blackarch keyring install failed rc=124 — its pacman -Sy burned the whole 90s budget on pacman's OWN auto-import of coderkun-aur's unobtainable key over the broken HKP path — because the blackarch install ran at target #8 while the coderkun key sync sat unrun at #14; AND the DB03... key is verified published NOWHERE: keyserver.ubuntu.com + keys.openpgp.org + keys.mailvelope.com all miss it and every upstream keyfile link is a dead 404, so the HKP keyserver loop burned minutes per unobtainable key) — enable-all --import-keys now key-syncs EVERY importable hex-key target BEFORE the loop (local pacman-key --add from the batch pre-fetched .arm files, so no module sync ever needs pacman's keyserver import at all), every HKP pacman-key --recv-keys attempt is capped (timeout 25 per keyserver — the uncapped loop dominated the bulk run's wall-clock), and every module pacman sync adds --ask=64 (verified from pacman's alpm.h: bit 6 = the IMPORT_KEY question and --ask INVERTS the matched default — the import prompt's default Y becomes an instant REFUSAL, so a sync-time import attempt of an unobtainable key — always futile since obtainable keys were already imported by the helper's web chain — fails fast with an attributed 'key unknown' db error instead of stalling for the full timeout window); the coderkun-aur catalog note now documents the live-verified unobtainable-key situation (keep it disabled until the maintainer publishes the key) + arch-repos PROCESS-TREE-SAFE SYNCS (live-caught on the Garuda VM: an enable-all run sat FROZEN at the '[webui] stage: arch-repos archlinuxcn (5/15)' stage line even though the 90s sync timeout had already fired — when timeout SIGTERMs pacman, an orphaned pacman-key/gpg child spawned by pacman's own db-key auto-import over the slow HKP path keeps holding the $(...) command-substitution output PIPE, and the capture waits on that orphan forever; classic orphan-holds-pipe) — new znh_arch_repos_pacman_sync helper routes EVERY module pacman -Sy (single-enable FC9 validation, bulk final validation, health, keyring-package installs) through one hardened path: output captured to a TEMP FILE (orphans cannot hold a file hostage), timeout -k 15 (SIGTERM then SIGKILL follow-up), LC_ALL=C (deterministic English wording for the attribution greps on every locale), --noconfirm (auto-answers the unknown-db-key import prompt with its default Y), rc reporting via ZNH_ARCH_REPOS_SYNC_RC for direct callers, and a dirmngr flush on timeout (rc 124/137) so a pinned keyserver state cannot poison later syncs + arch-repos KEY AUTO-IMPORT + BlackArch (live-caught from the user's Garuda run: a plain sudo pacman -Sy stalled on 'fel: coderkun-aur: nyckel DB03E36F7F2BD6C3EDBF30DDC1A4F1C3A5397243 är okänd / Importera PGP-nyckel?' — the maintainer ROTATED the signing key, the wiki Key-ID is stale, AND the Swedish locale hid the failure from the old error|fail greps) — the coderkun-aur catalog key fixed to the live 40-char fingerprint; enable-all --import-keys KEY-SYNCs already-enabled repos whose catalog key is missing (heals rotated keys; warn-only, the section stays); the keyring-package flow generalized + made idempotent via pacman -Q (archlinuxcn-keyring + blackarch-keyring); BlackArch (blackarch.org, verified from the official strap.sh: direct Server https://blackarch.org/blackarch/blackarch/os/$arch + blackarch-keyring package) added to the catalog with the same chicken-and-egg write-first handling; --ask semantics verified from pacman sources (the import-key question bit is 64 and INVERTS the default, so --noconfirm is the correct auto-import mechanism) + arch-repos INCLUDE-FILE HYBRID (the user's idea) — every managed repository stanza now lives in /etc/pacman.d/zypper-auto-repos.conf and pacman.conf only ever carries ONE managed Include line for it (verified from pacman.conf(5): Include files can contain repositories; written once, idempotently); pre-v82 managed blocks in pacman.conf are auto-MIGRATED into the include file on the next enable run (python mover + pacman-conf --repo-list before/after validation with full restore on any mismatch; plain user-added sections like a pre-existing chaotic-aur are never touched); ALL read probes (section_exists FC3, ALHP level detection, list/badge enablement) check BOTH locations so unmigrated systems keep working; remove_section now removes only the NAMED repository's managed block from BOTH files (fixes a pre-v82 latent bug where the managed pass dropped EVERY managed block — nuking all other helper-enabled repos when one was removed) and the single-enable FC9 rollback switched to the bulk-style per-section removal with migration-aware conservative restore; disable/disable-all/health previews + post-removal checks + backups cover both locations; ZNH_ARCH_INCLUDE_FILE test override hook added; regression script synced (new v82 wiring assertions + include-file runtime fixtures + a drift guard that append_block never writes to pacman.conf again) + arch-repos URL states + health watchdog — dead-host vs URL-dead distinction ([HOST DOWN — key trusted] marker in list/WebUI when the key imported fine but the host is down; enable-all rollbacks log 'host down — key trusted'; health-run bug fixed: 'unreachable' used to fall through to 'unknown' in the url-state TSV) + http-only catalog URLs (the 'ada' case: permanently plain-http server) moved OUT of the enable-all bulk targets into a separate 'Refused (http-only catalog URL)' list so the failed summary only shows genuine surprises, plus [HTTP-ONLY — refused by the HTTPS failcheck] markers in list text / list --json (url_state=http-refused) / WebUI (Copy-CLI button instead of a dead-end Enable) + opt-in ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS watchdog (hours; 0=off default): installs zypper-arch-repos-health.service + .timer running '--arch-repos health --auto-disable --yes' on a schedule (pacman.conf-guarded so non-Arch hosts exit cleanly; setting it back to 0 removes the units; full config wiring: template + schema + validators + missing-key desc + Settings drawer + settings dump; the uninstaller removes the units) + archlinuxcn chicken-and-egg fixed (keyring-package repos write the section FIRST, then install the keyring from the now-existing repo, rolling back on failure — caught live: 'target not found: archlinuxcn-keyring' under import-before-write) + arch-repos WebUI key-doctor + Check-host-liveness toolbar buttons (read-only quick actions), --probe-urls CLI flag (parallel catalog URL probe, 4 concurrent — refreshes [URL DEAD]), and a compact key-health sub-badge on the Arch Repos badge (keys: present/total + keyserver state, via new status-data.json fields) + key-doctor read-only diagnostics, batch parallel key pre-fetch, URL-liveness markers (keyserver config state + repair status, live WEB#1/WEB#2 endpoint tests, keyfile config, catalog keys present/missing in the pacman keyring), batch parallel key pre-fetch (3 concurrent xargs web downloads before the enable-all loop — in-loop imports become local pacman-key --add), and URL-liveness markers ([URL DEAD] in list/WebUI from the enable/enable-all/health validation outcomes — dead hosts visible BEFORE a run) + arch-repos key import REPAIRS the system keyserver config after a web import (gpg.conf/dirmngr.conf -> keyserver hkps://keyserver.ubuntu.com, backup + dirmngr restart, once per run — makes pacman-key --refresh-keys + makepkg/AUR helpers work system-wide again), gains web#2 keys.openpgp.org VKS (40-char fingerprints) + a configurable raw-keyfile fallback (ZNH_ARCH_REPOS_KEYFILES=name=url), and the bulk run emits progressive [webui] stage lines (repo x/N) for live WebUI feedback + key import via keyserver WEB endpoint first (bypasses broken dirmngr), import-before-write, ONE final pacman -Sy (14 syncs -> 1) + nemesis_repo (erikdubois, verified from the upstream README) added to the catalog + arch-repos key import iterates known-good keyservers (pacman-key --keyserver list, dirmngr flush between attempts — kills the dead-SKS "Server indicated a failure" failures; strict 8/16/40-hex key-ID sanity; coderkun-aur catalog Key-ID typo fixed) + ALL Arch-family distros detect as pacman (expanded IDs + /etc/pacman.conf filesystem hint) + arch-repos non-Arch apply attempts are clear errors with distro-aware guidance (CLI rc=1 + WebUI always-visible Arch-only card + badge-click explanation) + enable-all bulk setup (--import-keys auto key import + smart per-repo failure handling) + per-repo SigLevel choices in CLI/WebUI + arch unofficial repo manager with hard safety checks + Arch-only WebUI (enable/disable + health + auto-disable failsafe) + notifier dedupe + stale-cache guard + copr-search TUI + media-repos all-distro + changelog title+message view + universal Flatpak remotes + dashboard + diagnostics + hardened self-update + turbo/rollback hygiene
 # This installer deploys the zypper auto-helper stack (downloader + notifier +
 # verification/auto-repair tooling), with:
 # - a live HTML "Command Center" dashboard (optional)
@@ -1567,7 +1567,7 @@ if [[ $# -gt 0 ]]; then
             exit 2
             ;;
         install|debug|--help|-h|help|--verify|--repair|--diagnose|--check|--self-check|--self-update|--self-update-rollback|--rollback|\
-        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--repo-key-doctor|--copr-search|--uninstall-zypper|--arch-repos|--setup-arch-repos|\
+        --soar|--brew|--pip-package|--pipx|--setup-SF|--media-repos|--setup-media-repos|--repo-key-doctor|--set-sudo-editor|--remove-sudo-editor|--copr-search|--uninstall-zypper|--arch-repos|--setup-arch-repos|\
         --reset-config|--reset-downloads|--reset-state|--stale-module-dirs|--stale-modules|--rm-conflict|\
         --send-webhook|--webhook|--generate-dashboard|--dashboard|--dash-install|--dash-open|--dash-stop|--dash-bg|--dash-bg-enable|--dash-bg-disable|--dash-api-on|--dash-api-off|--dash-api-status|\
         --logs|--log|--live-logs|--diag-logs-on|--diag-logs-off|\
@@ -4510,6 +4510,7 @@ __znh_write_dashboard_schema_json() {
     "VERIFY_NOTIFY_USER_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_REPO_KEY_NOTIFY_ENABLED": {"type": "bool", "default": "true"},
     "VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS": {"type": "int", "min": 0, "max": 720, "step": 1, "default": "24"},
+    "ZNH_SUDO_EDITOR": {"type": "string", "max_len": 60, "presets": ["auto","kate -b","kwrite","gedit","gnome-text-editor","mousepad","nano","micro","vim","nvim"], "default": ""},
     "UPDATES_READY_REMINDER_REPEAT_ENABLED": {"type": "bool", "default": "false"},
     "AUTO_REPAIR_TRY_REMOUNT_RW": {"type": "bool", "default": "false"},
     "SELF_UPDATE_CHANNEL": {"type": "enum", "allowed": ["rolling","stable"], "default": "stable"},
@@ -11587,6 +11588,19 @@ VERIFY_REPO_KEY_NOTIFY_ENABLED=true
 # Valid values: 0-720 (integer). Default: 24.
 VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS=24
 
+# ZNH_SUDO_EDITOR
+# v95: the editor used by sudoedit via the 'sk' alias -- YOUR choice instead of
+# a hardcoded one. Applied by --set-sudo-editor, the install flow, and the
+# WebUI Settings row / quick action. Any editor command works; multi-word
+# commands are allowed (quote them, e.g. "kate -b" or "code --wait").
+# "auto" = smart pick (the first installed editor, GUI-with-block-flag
+# first, then terminal editors). Empty = not configured yet; pick one with:
+#   sudo zypper-auto-helper --set-sudo-editor
+# (interactive menu of installed editors). Remove with --remove-sudo-editor.
+#
+# Valid values: any editor command string (max 60 chars). Default: empty.
+ZNH_SUDO_EDITOR=""
+
 # DOWNLOADER_DOWNLOAD_MODE
 # Controls how the background downloader behaves (value is case-sensitive):
 #   full        - (default) run "zypper dup --download-only" to
@@ -11859,6 +11873,9 @@ EOF
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag VERIFY_REPO_KEY_NOTIFY_ENABLED true
     validate_nonneg_int_bounded_optional VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS 24 0 720
+    # v95: optional editor for sudoedit (SUDO_EDITOR + the 'sk' alias).
+    # Free-form string (max 60 chars); empty = not configured.
+    validate_string_max_len_optional ZNH_SUDO_EDITOR "" 60
     validate_bool_flag AUTO_REPAIR_TRY_REMOUNT_RW false
     validate_bool_flag ZYPPER_TURBO_TUNER_ENABLED false
     validate_bool_flag VERIFY_JOURNAL_AUTO_VACUUM_ENABLED true
@@ -11993,6 +12010,8 @@ EOF
     validate_bool_flag VERIFY_NOTIFY_USER_ENABLED true
     validate_bool_flag VERIFY_REPO_KEY_NOTIFY_ENABLED true
     validate_nonneg_int_bounded_optional VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS 24 0 720
+    # v95: optional editor for sudoedit (SUDO_EDITOR + the 'sk' alias).
+    validate_string_max_len_optional ZNH_SUDO_EDITOR "" 60
     validate_bool_flag HOOKS_ENABLED true
     validate_bool_flag DASHBOARD_ENABLED true
 
@@ -12116,6 +12135,7 @@ EOF
     log_debug "  VERIFY_NOTIFY_USER_ENABLED=${VERIFY_NOTIFY_USER_ENABLED}"
     log_debug "  VERIFY_REPO_KEY_NOTIFY_ENABLED=${VERIFY_REPO_KEY_NOTIFY_ENABLED:-true}"
     log_debug "  VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS=${VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS:-24}"
+    log_debug "  ZNH_SUDO_EDITOR=${ZNH_SUDO_EDITOR:-<unset>}"
     # Use parameter expansion defaults here so set -u does not trip on
     # configs that do not yet define these keys; validation and
     # missing-key handling below will still normalise them.
@@ -12277,6 +12297,7 @@ EOF
     _mark_missing_key "AUTO_REPAIR_TRY_REMOUNT_RW"
     _mark_missing_key "VERIFY_REPO_KEY_NOTIFY_ENABLED"
     _mark_missing_key "VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS"
+    _mark_missing_key "ZNH_SUDO_EDITOR"
 
     # Snapper retention optimizer knobs
     _mark_missing_key "SNAP_RETENTION_OPTIMIZER_ENABLED"
@@ -12492,6 +12513,9 @@ EOF
                     ;;
                 ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS)
                     log_info "  - ZNH_ARCH_REPOS_HEALTH_INTERVAL_HOURS: opt-in watchdog (hours; 0 = off) that runs '--arch-repos health --auto-disable --yes' on a systemd timer so a dead unofficial Arch repository never blocks pacman -Sy (Arch-family hosts only; the unit exits cleanly elsewhere)."
+                    ;;
+                ZNH_SUDO_EDITOR)
+                    log_info "  - ZNH_SUDO_EDITOR: optional editor for sudoedit (SUDO_EDITOR + the 'sk' alias), applied by --set-sudo-editor / the install flow / the WebUI; empty default, 'auto' = smart pick."
                     ;;
                 SNAP_RETENTION_OPTIMIZER_ENABLED)
                     log_info "  - SNAP_RETENTION_OPTIMIZER_ENABLED: when true, enabling snapper timers also caps overly aggressive retention limits in /etc/snapper/configs/* to safer maxima."
@@ -15538,6 +15562,16 @@ generate_dashboard() {
               <span class="cmd-label">Repo Key Doctor</span>
               <span class="cmd-desc">Detect + repair RPM repo GPG signing keys (rotations) • copy-only in WebUI</span>
               <div class="cmd-copy-feedback">Open</div>
+          </button>
+          <button class="cmd-btn" data-qa="sudo-editor" data-qa-copy="zypper-auto-helper --set-sudo-editor">
+              <span class="cmd-label">Set sudoedit editor</span>
+              <span class="cmd-desc">Apply Settings choice or smart-pick the best installed editor (SUDO_EDITOR + sk)</span>
+              <div class="cmd-copy-feedback">Running…</div>
+          </button>
+          <button class="cmd-btn" data-qa="sudo-editor-remove" data-qa-copy="zypper-auto-helper --remove-sudo-editor" data-qa-danger="1">
+              <span class="cmd-label">Remove sudoedit editor</span>
+              <span class="cmd-desc">Remove the managed fish + .bashrc editor block (confirmation required)</span>
+              <div class="cmd-copy-feedback">Running…</div>
           </button>
           <button class="cmd-btn" data-qa="debug-menu" data-qa-copy="zypper-auto-helper debug" data-qa-interactive="1">
               <span class="cmd-label">Debug Menu</span>
@@ -21781,6 +21815,7 @@ generate_dashboard() {
         { key: 'VERIFY_NOTIFY_USER_ENABLED', type: 'bool', label: 'Notify on auto-repair' },
         { key: 'VERIFY_REPO_KEY_NOTIFY_ENABLED', type: 'bool', label: 'Notify: repo signing-key attention', help: 'Dedup\'d: fires once when the set of repos needing signing-key attention changes, at most one reminder per cooldown while it persists, and one resolved notice. Turn off here to silence it entirely.' },
         { key: 'VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS', type: 'int', label: 'Repo-key notify reminder cooldown (hours; 0 = only on change)', advanced: true, help: 'While the SAME set of repos needs signing-key attention, re-remind at most every N hours. 0 = only notify when the set changes (no reminders).' },
+        { key: 'ZNH_SUDO_EDITOR', type: 'string', label: 'sudoedit editor (SUDO_EDITOR + the sk alias)', advanced: true, help: 'The editor sudoedit uses via the sk alias — pick a preset (auto = smart pick: first installed editor, GUI-with-block-flag first) or type any installed editor command (quote multi-word ones, e.g. "kate -b" or "code --wait"). Applied immediately by the sudo-editor quick action / --set-sudo-editor, and on the next install run. Remove with --remove-sudo-editor.' },
         { key: 'UPDATES_READY_REMINDER_REPEAT_ENABLED', type: 'bool', label: 'Notifier: repeat identical "Updates ready" popups', help: 'When ON, the notifier re-shows the identical persistent "Updates Ready to Install" popup on every hourly check while the same update set is pending. Default OFF since the popup is persistent (stays visible until you act) and KDE Plasma stacks re-shows as duplicates instead of replacing.' },
         { key: 'AUTO_REPAIR_TRY_REMOUNT_RW', type: 'bool', label: 'DANGEROUS: try remounting read-only filesystem as read-write (auto-repair / Snapper)', danger: true, danger_phrase: 'REMOUNT', advanced: true, help: 'Advanced recovery option. Requires unlocking danger zone + typing REMOUNT on change.' },
         { key: 'SELF_UPDATE_CHANNEL', type: 'enum', label: 'Self-update channel (rolling/stable)' },
@@ -53374,6 +53409,335 @@ run_repo_key_doctor_only() {
     return 0
 }
 
+# ---------------------------------------------------------------------
+# sudoedit editor picker (--set-sudo-editor / --remove-sudo-editor)
+# ---------------------------------------------------------------------
+# v95: optional EDITOR CHOICE for sudoedit (the 'sk' alias) — the user picks
+# ANY installed editor (kate -b, kwrite, gedit, nano, vim, ...) instead of a
+# hardcoded one, via:
+#   - the interactive menu  (sudo zypper-auto-helper --set-sudo-editor)
+#   - a direct pick         (sudo zypper-auto-helper --set-sudo-editor "kate -b")
+#   - the config key / WebUI Settings drawer row (ZNH_SUDO_EDITOR)
+#   - a smart auto-pick that scans installed editors (GUI-with-block-flag
+#     first, then TUI) for non-interactive contexts (WebUI quick action).
+# Writes a MANAGED fish conf.d file + a marked .bashrc block (idempotent:
+# re-runs REPLACE the block instead of appending duplicate lines — the naive
+# `echo ... >> ~/.bashrc` pattern accumulates one line per run).
+# --remove-sudo-editor removes both (the uninstaller for this feature) and
+# clears the ZNH_SUDO_EDITOR conf key.
+SUDO_EDITOR_FISH_FILE_NAME="zz-sudo-editor.fish"
+SUDO_EDITOR_BASHRC_BEGIN="# >>> zypper-auto-helper sudoedit editor (SUDO_EDITOR + sk) >>>"
+SUDO_EDITOR_BASHRC_END="# <<< zypper-auto-helper sudoedit editor <<<"
+
+znh_sudo_editor_home() {
+    # The desktop user's home directory, resolved in priority order:
+    #   1. SUDO_USER_HOME — set by the installer flow / the WebUI quick-action
+    #      job (needs_dash_user_env injects it), the most explicit source;
+    #   2. getent on SUDO_USER — a plain `sudo zypper-auto-helper
+    #      --set-sudo-editor` CLI run sets SUDO_USER but NOT SUDO_USER_HOME,
+    #      and sudo's env_reset can point $HOME at /root, so the home is
+    #      re-derived from the passwd database (the user's REAL home);
+    #   3. $HOME — a plain unprivileged run (the user's own shell).
+    local _se_h=""
+    if [ -n "${SUDO_USER_HOME:-}" ]; then
+        _se_h="${SUDO_USER_HOME}"
+    elif [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] \
+         && command -v getent >/dev/null 2>&1; then
+        _se_h="$(getent passwd "${SUDO_USER}" 2>/dev/null | head -n1 | cut -d: -f6)"
+    fi
+    if [ -z "${_se_h}" ] || [ ! -d "${_se_h}" ]; then
+        _se_h="${HOME:-/root}"
+    fi
+    printf '%s' "${_se_h}"
+}
+
+znh_sudo_editor_candidates() {
+    # Emit "editor command|description" for every KNOWN editor actually
+    # installed. GUI editors come first (they get a block flag so sudoedit
+    # waits for the editor window to close before saving), then TUI editors.
+    local -a _se_specs=(
+        "kate -b|Kate (KDE advanced editor, GUI; -b blocks until closed)"
+        "kwrite|KWrite (KDE simple editor, GUI)"
+        "gedit|gedit (GNOME editor, GUI)"
+        "gnome-text-editor|GNOME Text Editor (GNOME, GUI)"
+        "xed|xed (Linux Mint editor, GUI)"
+        "mousepad|Mousepad (Xfce editor, GUI)"
+        "pluma|Pluma (MATE editor, GUI)"
+        "featherpad|Featherpad (Qt lightweight, GUI)"
+        "geany|Geany (GUI)"
+        "code --wait|VS Code (GUI; --wait blocks until closed)"
+        "code-oss --wait|VS Code OSS (GUI; --wait blocks until closed)"
+        "emacs|Emacs (GUI/terminal)"
+        "micro|micro (terminal, easy keys)"
+        "nano|nano (terminal, beginner-friendly)"
+        "nvim|Neovim (terminal)"
+        "vim|vim (terminal)"
+        "vi|vi (terminal fallback)"
+    )
+    local _se_spec _se_cmd _se_first
+    for _se_spec in "${_se_specs[@]}"; do
+        _se_cmd="${_se_spec%%|*}"
+        _se_first="${_se_cmd%% *}"
+        [ -n "${_se_first}" ] || continue
+        command -v "${_se_first}" >/dev/null 2>&1 || continue
+        printf '%s|%s\n' "${_se_cmd}" "${_se_spec#*|}"
+    done
+}
+
+znh_sudo_editor_autopick() {
+    # Smart pick: the FIRST installed editor from the candidates order
+    # (GUI editors with a block flag first, then TUI). Prints the command
+    # (empty when no known editor is installed).
+    znh_sudo_editor_candidates 2>/dev/null | head -n1 | cut -d'|' -f1
+}
+
+znh_sudo_editor_installed_ok() {
+    # True when the FIRST word of the editor command is an installed command
+    # (multi-word commands like 'kate -b' / 'code --wait' are allowed).
+    local _se_first="${1%% *}"
+    [ -n "${_se_first}" ] && command -v "${_se_first}" >/dev/null 2>&1
+}
+
+znh_sudo_editor_current() {
+    # Print the currently configured editor command (from the managed fish
+    # file; the .bashrc block mirrors it), or empty when not configured.
+    local _se_f
+    _se_f="$(znh_sudo_editor_home)/.config/fish/conf.d/${SUDO_EDITOR_FISH_FILE_NAME}"
+    [ -r "${_se_f}" ] || return 0
+    sed -n 's/^set -gx SUDO_EDITOR "\(.*\)"$/\1/p' "${_se_f}" 2>/dev/null | head -n1
+}
+
+znh_sudo_editor_write_fish() {
+    # Write the MANAGED fish conf.d file for $1 (the editor command).
+    # Prints the file path on success. The file is a dedicated conf.d
+    # snippet (auto-sourced by fish) so re-runs overwrite instead of
+    # appending to config.fish.
+    local _se_ed="$1" _se_home _se_dir _se_file
+    _se_home="$(znh_sudo_editor_home)"
+    _se_dir="${_se_home}/.config/fish/conf.d"
+    _se_file="${_se_dir}/${SUDO_EDITOR_FISH_FILE_NAME}"
+    mkdir -p "${_se_dir}" 2>/dev/null || return 1
+    {
+        echo "# Managed by zypper-auto-helper (--set-sudo-editor). Change it with that flag; removed by --remove-sudo-editor."
+        echo "set -gx SUDO_EDITOR \"${_se_ed}\""
+        echo "alias sk 'SUDO_EDITOR=\"${_se_ed}\" sudoedit'"
+    } >"${_se_file}" || return 1
+    if [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        chown "${SUDO_USER}:${SUDO_USER}" "${_se_file}" 2>/dev/null || true
+    fi
+    chmod 644 "${_se_file}" 2>/dev/null || true
+    # v95: also remove LEGACY manually-appended recipe lines from config.fish
+    # (the old `echo 'set -gx SUDO_EDITOR ...' >> config.fish` pattern): fish
+    # sources config.fish AFTER conf.d, so a stale manual line would override
+    # the managed file. The `.` in the alias pattern matches either quote
+    # style. The managed conf.d file is the single source of truth now.
+    local _se_cfg="${_se_home}/.config/fish/config.fish"
+    if [ -f "${_se_cfg}" ] \
+       && grep -qE '^(set -gx SUDO_EDITOR |alias sk .SUDO_EDITOR=.*sudoedit.$)' "${_se_cfg}" 2>/dev/null; then
+        sed -i -e '/^set -gx SUDO_EDITOR /d' -e '/^alias sk .SUDO_EDITOR=.*sudoedit.$/d' "${_se_cfg}" 2>/dev/null || true
+    fi
+    printf '%s' "${_se_file}"
+}
+
+znh_sudo_editor_write_bash() {
+    # Write the MANAGED marked block into ~/.bashrc for $1 (the editor
+    # command). Idempotent: the previous managed block is removed first, so
+    # re-runs replace it instead of appending duplicate lines. No-op when
+    # the user has no .bashrc (fish-only setups).
+    local _se_ed="$1" _se_home _se_rc
+    _se_home="$(znh_sudo_editor_home)"
+    _se_rc="${_se_home}/.bashrc"
+    [ -f "${_se_rc}" ] || return 0
+    sed -i "/^${SUDO_EDITOR_BASHRC_BEGIN}\$/,/^${SUDO_EDITOR_BASHRC_END}\$/d" "${_se_rc}" 2>/dev/null || true
+    # v95: also remove LEGACY manually-appended recipe lines OUTSIDE the
+    # managed block (the old `echo 'export SUDO_EDITOR=...' >> ~/.bashrc` /
+    # `echo 'alias sk=...' >> ~/.bashrc` pattern — it accumulates one
+    # duplicate per run AND a stale manual line after the block would
+    # override the managed choice). Runs after the block removal above, so
+    # it can never touch the managed block itself.
+    sed -i -e '/^export SUDO_EDITOR=/d' -e '/^alias sk=.SUDO_EDITOR=.*sudoedit.$/d' "${_se_rc}" 2>/dev/null || true
+    {
+        echo ""
+        echo "${SUDO_EDITOR_BASHRC_BEGIN}"
+        echo "export SUDO_EDITOR=\"${_se_ed}\""
+        echo "alias sk=\"SUDO_EDITOR=\\\"${_se_ed}\\\" sudoedit\""
+        echo "${SUDO_EDITOR_BASHRC_END}"
+    } >>"${_se_rc}"
+    if [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+        chown "${SUDO_USER}:${SUDO_USER}" "${_se_rc}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+znh_sudo_editor_persist_conf() {
+    # Persist $1 to the ZNH_SUDO_EDITOR config key (root + writable config
+    # only; best-effort) so future installs and the WebUI keep the choice.
+    local _se_ed="$1"
+    [ "${EUID:-$(id -u)}" -eq 0 ] || return 0
+    [ -n "${CONFIG_FILE:-}" ] || return 0
+    if declare -f rewrite_conf_key >/dev/null 2>&1 && [ -r "${CONFIG_FILE}" ]; then
+        rewrite_conf_key ZNH_SUDO_EDITOR "${_se_ed}" || true
+    elif [ -w "$(dirname "${CONFIG_FILE}")" ]; then
+        sed -i "/^ZNH_SUDO_EDITOR=/d" "${CONFIG_FILE}" 2>/dev/null || true
+        echo "ZNH_SUDO_EDITOR=\"${_se_ed}\"" >>"${CONFIG_FILE}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+znh_sudo_editor_menu_pick() {
+    # Interactive numbered menu over the INSTALLED editors + an auto option.
+    # STDOUT CONTRACT: stdout carries ONLY the chosen editor command — the
+    # caller captures stdout with $(...), so every display line below is
+    # written to the TTY (_se_out), NEVER to stdout (v95 fix: the render
+    # lines used to go to stdout and got captured INTO the choice string,
+    # which then failed the installed-editor validation with the whole menu
+    # as the "editor" name).
+    local -a _se_cmds=() _se_descs=()
+    local _se_spec _se_cmd _se_desc _se_i _se_in _se_out _se_ans
+    while IFS='|' read -r _se_cmd _se_desc; do
+        [ -n "${_se_cmd}" ] || continue
+        _se_cmds+=("${_se_cmd}")
+        _se_descs+=("${_se_desc}")
+    done < <(znh_sudo_editor_candidates)
+    [ "${#_se_cmds[@]}" -gt 0 ] || return 1
+    _se_in="/dev/stdin"
+    _se_out="/dev/stderr"
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        _se_in="/dev/tty"
+        _se_out="/dev/tty"
+    fi
+    {
+        printf '\n'
+        printf '%s\n' "Choose the editor for sudoedit (SUDO_EDITOR + the 'sk' alias):"
+        _se_i=1
+        while [ "${_se_i}" -le "${#_se_cmds[@]}" ]; do
+            printf '  %2d) %-20s — %s\n' "${_se_i}" "${_se_cmds[$((_se_i-1))]}" "${_se_descs[$((_se_i-1))]}"
+            _se_i=$((_se_i + 1))
+        done
+        printf '%s\n' "   a) auto                 — smart pick (first installed editor from the list above)"
+        if [ -n "${ZNH_SUDO_EDITOR:-}" ]; then
+            printf '%s\n' "   (currently configured: ${ZNH_SUDO_EDITOR} — picking a different entry changes it)"
+        fi
+    } >"${_se_out}"
+    printf 'Editor [1-%d/a]: ' "${#_se_cmds[@]}" >"${_se_out}"
+    read -r _se_ans <"${_se_in}" 2>/dev/null || _se_ans=""
+    case "${_se_ans}" in
+        a|A|auto|AUTO)
+            znh_sudo_editor_autopick
+            return 0
+            ;;
+        *[!0-9]*)
+            return 1
+            ;;
+        *)
+            if [ "${_se_ans}" -ge 1 ] 2>/dev/null && [ "${_se_ans}" -le "${#_se_cmds[@]}" ] 2>/dev/null; then
+                printf '%s\n' "${_se_cmds[$((_se_ans-1))]}"
+                return 0
+            fi
+            return 1
+            ;;
+    esac
+}
+
+set_sudo_editor() {
+    # Args: optional editor command ("" = menu/auto, "auto" = smart pick).
+    local _se_choice="${1:-}"
+    if [ -z "${_se_choice}" ]; then
+        if [ -t 0 ] && [ -r /dev/tty ] 2>/dev/null; then
+            # Interactive run: the user wants to PICK, so ALWAYS show the menu
+            # — a previously persisted ZNH_SUDO_EDITOR is shown as context in
+            # the menu, never silently applied (v95 fix: the config used to
+            # win here, which made `--set-sudo-editor` with no argument a
+            # no-op menu-skip on any machine that already had it configured).
+            if ! _se_choice="$(znh_sudo_editor_menu_pick)"; then
+                log_error "No editor chosen; nothing changed."
+                return 1
+            fi
+        elif [ -n "${ZNH_SUDO_EDITOR:-}" ] && [ "${ZNH_SUDO_EDITOR,,}" != "auto" ]; then
+            # Non-interactive (WebUI quick action / piped run): the persisted
+            # config choice wins; 'auto' falls through to the smart pick.
+            _se_choice="${ZNH_SUDO_EDITOR}"
+        else
+            _se_choice="$(znh_sudo_editor_autopick)"
+        fi
+    fi
+    if [ "${_se_choice,,}" = "auto" ]; then
+        _se_choice="$(znh_sudo_editor_autopick)"
+    fi
+    if [ -z "${_se_choice}" ]; then
+        log_error "No known editor found installed (kate/kwrite/gedit/nano/vim/...). Install one, then re-run --set-sudo-editor."
+        return 1
+    fi
+    if ! znh_sudo_editor_installed_ok "${_se_choice}"; then
+        log_error "Editor not installed: ${_se_choice} (the first word must be an installed command). Nothing changed."
+        return 1
+    fi
+    local _se_prev=""
+    _se_prev="$(znh_sudo_editor_current)"
+    log_info "Setting sudoedit editor to: ${_se_choice}"
+    local _se_fish_file=""
+    _se_fish_file="$(znh_sudo_editor_write_fish "${_se_choice}")" \
+        || { log_error "Failed to write the fish conf.d file."; return 1; }
+    znh_sudo_editor_write_bash "${_se_choice}"
+    znh_sudo_editor_persist_conf "${_se_choice}"
+    # Rule: always syntax-check generated shell config before declaring done.
+    if command -v fish >/dev/null 2>&1; then
+        if fish -n "${_se_fish_file}" 2>/dev/null; then
+            log_success "fish syntax OK (${_se_fish_file})"
+        else
+            log_error "fish -n FAILED for ${_se_fish_file}; removing the broken file."
+            rm -f "${_se_fish_file}"
+            return 1
+        fi
+    fi
+    local _se_rc=""
+    _se_rc="$(znh_sudo_editor_home)/.bashrc"
+    if [ -f "${_se_rc}" ]; then
+        if bash -n "${_se_rc}" 2>/dev/null; then
+            log_success "bash syntax OK (${_se_rc})"
+        else
+            log_error "bash -n FAILED for ${_se_rc}; removing the managed block."
+            sed -i "/^${SUDO_EDITOR_BASHRC_BEGIN}\$/,/^${SUDO_EDITOR_BASHRC_END}\$/d" "${_se_rc}" 2>/dev/null || true
+            return 1
+        fi
+    fi
+    if [ -n "${_se_prev}" ] && [ "${_se_prev}" != "${_se_choice}" ]; then
+        log_success "Changed sudoedit editor: ${_se_prev} -> ${_se_choice}"
+    else
+        log_success "sudoedit editor configured: ${_se_choice}"
+    fi
+    log_info "Usage: sk <file>   (sudoedit with SUDO_EDITOR=${_se_choice})"
+    log_info "Activate it: restart the shell, or run 'source ~/.config/fish/config.fish' (fish) / 'source ~/.bashrc' (bash)."
+    return 0
+}
+
+remove_sudo_editor() {
+    # The uninstaller for --set-sudo-editor: removes the managed fish conf.d
+    # file, the marked .bashrc block (ONLY the managed block — nothing else
+    # in .bashrc is touched), and the ZNH_SUDO_EDITOR conf key (root only).
+    local _se_home _se_fish _se_rc _se_removed=0
+    _se_home="$(znh_sudo_editor_home)"
+    _se_fish="${_se_home}/.config/fish/conf.d/${SUDO_EDITOR_FISH_FILE_NAME}"
+    if [ -f "${_se_fish}" ]; then
+        rm -f "${_se_fish}"
+        _se_removed=1
+    fi
+    _se_rc="${_se_home}/.bashrc"
+    if [ -f "${_se_rc}" ] && grep -qF "${SUDO_EDITOR_BASHRC_BEGIN}" "${_se_rc}" 2>/dev/null; then
+        sed -i "/^${SUDO_EDITOR_BASHRC_BEGIN}\$/,/^${SUDO_EDITOR_BASHRC_END}\$/d" "${_se_rc}" 2>/dev/null || true
+        _se_removed=1
+    fi
+    if [ "${EUID:-$(id -u)}" -eq 0 ] && [ -n "${CONFIG_FILE:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+        sed -i "/^ZNH_SUDO_EDITOR=/d" "${CONFIG_FILE}" 2>/dev/null || true
+    fi
+    if [ "${_se_removed}" -eq 1 ]; then
+        log_success "Removed the sudoedit editor config (fish + .bashrc managed block + conf key)."
+    else
+        log_info "No sudoedit editor config found; nothing to remove."
+    fi
+    return 0
+}
+
 run_media_repos_only() {
     log_info ">>> Multimedia & codec repository setup helper mode..."
     update_status "Running multimedia/codec repository setup..."
@@ -57342,6 +57706,16 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" \
     echo "                          repo set + a cooldown reminder + a resolved notice (snooze/off:"
     echo "                          VERIFY_REPO_KEY_NOTIFY_COOLDOWN_HOURS / _ENABLED in the config)."
     echo "                          Arch repos keep their pacman-specific doctor: --arch-repos key-doctor."
+    echo "  --set-sudo-editor [editor]"
+    echo "                          Pick the editor used by sudoedit (the 'sk' alias) — YOUR choice, not"
+    echo "                          hardcoded: interactive menu of installed editors when run with no"
+    echo "                          argument (kate -b, kwrite, gedit, nano, vim, ...); pass a specific"
+    echo "                          editor to set it directly (quote multi-word commands, e.g."
+    echo "                          --set-sudo-editor \"kate -b\"); 'auto' = smart pick (first installed"
+    echo "                          editor, GUI-with-block-flag first). Writes SUDO_EDITOR + the sk"
+    echo "                          alias to fish (conf.d) AND bash (.bashrc, idempotent managed"
+    echo "                          block) + the ZNH_SUDO_EDITOR conf key / WebUI Settings row."
+    echo "  --remove-sudo-editor   Remove the sudoedit editor config (fish + .bashrc managed block + conf key)."
     echo "  --copr-search <query>   Search Fedora Copr (official API v3) for <query>, list every project with its"
     echo "                          title (owner/project) and description, and offer an interactive multi-select"
     echo "                          TUI (numbers/ranges like 3-7, all/none) to enable the chosen repositories via"
@@ -57646,6 +58020,28 @@ elif [[ "${1:-}" == "--repo-key-doctor" ]]; then
     rc=$?
     set -e
     exit $rc
+elif [[ "${1:-}" == "--set-sudo-editor" ]]; then
+    log_info "sudoedit editor picker requested"
+    # Join the remaining args so unquoted multi-word editors work too:
+    #   --set-sudo-editor kate -b   ==   --set-sudo-editor "kate -b"
+    # Like --repo-key-doctor: a deliberate non-zero exit (e.g. the editor-not-
+    # installed guard or a declined menu) must reach the caller, so disable
+    # set -e + the ERR trap while running and propagate the rc directly.
+    shift || true
+    trap - ERR
+    set +e
+    set_sudo_editor "$*"
+    _se_rc=$?
+    set -e
+    exit ${_se_rc}
+elif [[ "${1:-}" == "--remove-sudo-editor" ]]; then
+    log_info "Removing the sudoedit editor configuration"
+    trap - ERR
+    set +e
+    remove_sudo_editor
+    _se_rc=$?
+    set -e
+    exit ${_se_rc}
 elif [[ "${1:-}" == "--copr-search" ]]; then
     log_info "Copr search + multi-select enable helper-only mode requested"
     shift || true
@@ -61956,6 +62352,15 @@ fi
 
 log_success "Shell aliases configured. Restart your shell or run 'source ~/.bashrc' (or equivalent) to activate."
 
+# v95: apply the configured sudoedit editor (ZNH_SUDO_EDITOR) right after the
+# shell aliases so a config/WebUI choice takes effect on the next install;
+# otherwise one hint line so users discover --set-sudo-editor.
+if [ -n "${ZNH_SUDO_EDITOR:-}" ]; then
+    set_sudo_editor "${ZNH_SUDO_EDITOR}" || true
+else
+    log_info "Tip: pick your sudoedit editor (SUDO_EDITOR + the 'sk' alias) with: sudo zypper-auto-helper --set-sudo-editor"
+fi
+
 # --- 7c. Add zypper-auto-helper command alias to shells ---
 log_info ">>> Adding zypper-auto-helper command alias to shell configurations..."
 update_status "Configuring zypper-auto-helper aliases..."
@@ -62043,7 +62448,7 @@ install_shell_completions() {
     local ZNH_CLI_WORDS
     # Keep this as a single line so the generated completion scripts are
     # syntactically robust across distros/shells.
-ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --stale-module-dirs --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --uninstall-zypper --debug --help -h help"
+ZNH_CLI_WORDS="install debug snapper scrub-ghost --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --soar --brew --pip-package --pipx --setup-SF --reset-config --stale-module-dirs --reset-downloads --reset-state --rm-conflict --logs --log --live-logs --analyze --health --test-notify --status --dashboard --generate-dashboard --dash-open --dash-stop --dash-install --dash-api-on --dash-api-off --dash-api-status --send-webhook --webhook --diag-logs-on --diag-logs-off --snapshot-state --diag-bundle --diag-logs-runner --show-logs --show-loggs --set-sudo-editor --remove-sudo-editor --repo-key-doctor --uninstall-zypper --debug --help -h help"
 
     # Snapper submenu
     local ZNH_SNAPPER_SUB
@@ -62154,6 +62559,7 @@ _znh_cmds=(
   install debug snapper scrub-ghost
   --verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback
   --soar --brew --pip-package --pipx --setup-SF
+  --repo-key-doctor --set-sudo-editor --remove-sudo-editor
   --stale-module-dirs
   --reset-config --reset-downloads --reset-state --rm-conflict
   --logs --log --live-logs --analyze --health
@@ -62285,6 +62691,7 @@ complete -c zypper-auto-helper -n '__fish_seen_subcommand_from scrub-ghost' -f -
 # common option-like commands
 complete -c zypper-auto-helper -f -a "--verify --repair --diagnose --check --self-check --self-update --self-update-rollback --rollback --debug"
 complete -c zypper-auto-helper -f -a "--soar --brew --pip-package --pipx --setup-SF"
+complete -c zypper-auto-helper -f -a "--repo-key-doctor --set-sudo-editor --remove-sudo-editor"
 complete -c zypper-auto-helper -f -a "--stale-module-dirs"
 complete -c zypper-auto-helper -f -a "--reset-config --reset-downloads --reset-state --rm-conflict"
 complete -c zypper-auto-helper -f -a "--logs --log --live-logs --analyze --health"
@@ -70583,6 +70990,30 @@ def _quick_action_table() -> dict:
             "needs_confirm": False,
             "phrase": "",
             "explain": "Read-only scan of every enabled gpgcheck=1 RPM repository: classifies each as OK / ROTATED / RPMDB-DRIFT / STALE-KEY / UNTRUSTED / MISSING-FILE / UNREACHABLE and writes /var/lib/zypper-auto/repo-key-doctor.json for the dashboard Repo Keys badge.",
+        },
+        # v95: sudoedit editor picker (SUDO_EDITOR + the 'sk' alias). The
+        # no-arg form applies ZNH_SUDO_EDITOR when set, else smart-picks the
+        # first installed editor — safe for non-interactive WebUI jobs (no
+        # menu). needs_dash_user_env so the root job writes the DESKTOP
+        # user's fish/bash configs (not root's).
+        "sudo-editor": {
+            "title": "Set sudoedit editor (config / smart pick)",
+            "cmd": [HELPER_BIN, "--set-sudo-editor"],
+            "timeout_s": 120,
+            "needs_confirm": False,
+            "phrase": "",
+            "needs_dash_user_env": True,
+            "explain": "Configures which editor sudoedit (the 'sk' alias) uses: applies the ZNH_SUDO_EDITOR setting from Settings when set, otherwise smart-picks the best installed editor (GUI editors with a wait/block flag first: kate -b, kwrite, gedit, ...; then terminal editors: micro, nano, nvim, vim). Writes SUDO_EDITOR + the sk alias into the fish (conf.d) AND bash (.bashrc, idempotent managed block) configs of the desktop user, then syntax-checks both. For the full interactive menu of installed editors, run 'sudo zypper-auto-helper --set-sudo-editor' in a terminal.",
+        },
+        "sudo-editor-remove": {
+            "title": "Remove sudoedit editor config",
+            "cmd": [HELPER_BIN, "--remove-sudo-editor"],
+            "timeout_s": 60,
+            "needs_confirm": True,
+            "phrase": "SUDOEDIT",
+            "needs_dash_user_env": True,
+            "explain": "Removes the sudoedit editor configuration: the managed fish conf.d file, the marked .bashrc block (ONLY the managed block — nothing else in .bashrc is touched), and the ZNH_SUDO_EDITOR config key.",
+            "warning": "The sk alias and SUDO_EDITOR export stop working after this. Re-run the Set sudoedit editor action (or --set-sudo-editor) to restore them.",
         },
     }
 
