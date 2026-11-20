@@ -12,6 +12,7 @@
 - Fix: Fedora 44 pipx package name corrected in `znh_resolve_package_name` — `dnf:python3-pipx` now resolves to `pipx` (not `python3-pipx`)
 - Dashboard: Module badges now show 3 states — green (healthy), yellow (installed but service unhealthy), red (missing). Flatpak checks Flathub remote; Snap checks snapd.service status via systemctl/snap version. New `feat_*_healthy` fields in status-data.json for live polling.
 ## Unreleased
+- [2026-11-20 19:39 UTC] README: the welcome line now reads 'Welcome to the **UNIVERSAL-Helper** community project' (was 'Zypper Auto-Helper').
 - [2026-11-20 19:38 UTC] README restructure (the user's ask): the 8 long intro feature bullets (Cross-distro resilience + the v93 repo-key-doctor, v95/v96 sudoedit picker, v97 up-block, v98 reboot fix, v99 locale-proof, v100 package preview items) moved OUT of the front page into a new dedicated '🌟 Feature Highlights (v93–v100)' section placed directly BELOW the Table of Contents (between the quick links and The Goal) — the intro now keeps only the short elevator-pitch bullet list and reads scannable again. Nothing was deleted (all text moved verbatim, additive restructure); the TOC list and the Quick links both gained a 'Feature highlights (v93–v100)' entry pointing at the new #feature-highlights anchor.
 - [2026-11-20 19:34 UTC] README: the header image now uses icon/uni.png (was icon/Screenshot_20260205_091408.png; the old screenshot file stays in the repo, the reference is switched only).
 ## Unreleased

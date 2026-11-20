@@ -4,7 +4,7 @@
 
 ![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE-Tumbleweed-73ba25?style=for-the-badge&logo=opensuse)
 
-Welcome to the **Zypper Auto-Helper** community project – a batteries‑included automation layer for openSUSE Tumbleweed that turns "`zypper dup` nights" into a quick, predictable routine.
+Welcome to the **UNIVERSAL-Helper** community project – a batteries‑included automation layer for openSUSE Tumbleweed that turns "`zypper dup` nights" into a quick, predictable routine.
 
 This repository provides a robust `systemd` architecture and CLI that:
 - Pre‑downloads Tumbleweed snapshots safely in the background.
