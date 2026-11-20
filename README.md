@@ -1,4 +1,4 @@
-![Zypper Auto-Helper screenshot](icon/Screenshot_20260205_091408.png)
+![UNIVERSAL-helper](icon/uni.png)
 
 # Zypper Auto-Downloader for Tumbleweed
 
